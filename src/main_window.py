@@ -229,6 +229,7 @@ class MainWindow(QMainWindow):
     def _wire_actions(self):
         self.open_image_btn.clicked.connect(self.canvas.load_image_dialog)
         self.load_image_action.triggered.connect(self.canvas.load_image_dialog)
+        self.open_mask_btn.clicked.connect(self.canvas.load_mask_dialog)
         self.exit_action.triggered.connect(self.close)
         self.run_btn.clicked.connect(self._run_inference)
         self.segment_action.triggered.connect(self._run_inference)

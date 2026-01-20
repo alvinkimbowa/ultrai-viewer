@@ -31,6 +31,16 @@ class Canvas(QWidget):
         if path:
             self.load_image(path)
 
+    def load_mask_dialog(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Mask",
+            "",
+            "Mask Files (*.tif *.tiff *.png *.bmp *.jpg *.jpeg)",
+        )
+        if path:
+            self.load_mask(path)
+
     def save_mask_dialog(self):
         if self.mask is None:
             QMessageBox.information(self, "No mask", "Run segmentation before saving a mask.")
@@ -59,6 +69,37 @@ class Canvas(QWidget):
         else:
             cv2.imwrite(file_path, mask_uint8)
 
+    def load_mask(self, file_path):
+        try:
+            mask = self._read_mask(file_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        if self.image is None:
+            QMessageBox.information(self, "No image", "Load an image before loading a mask.")
+            return
+        if mask.shape[:2] != self.image.shape[:2]:
+            mask = cv2.resize(mask, (self.image.shape[1], self.image.shape[0]), interpolation=cv2.INTER_NEAREST)
+        self.set_mask(mask)
+
+    def _read_mask(self, file_path):
+        lower_path = file_path.lower()
+        if lower_path.endswith((".tif", ".tiff")):
+            mask = tifffile.imread(file_path)
+        else:
+            mask = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if mask is None:
+                raise ValueError(f"Unsupported mask format: {file_path}")
+        if mask is None:
+            raise ValueError(f"Unsupported mask format: {file_path}")
+        if mask.ndim == 3:
+            if mask.shape[-1] in (3, 4):
+                mask = mask[:, :, 0]
+            else:
+                mask = mask[0]
+        while mask.ndim > 2:
+            mask = mask[0]
+        return mask
     def load_image(self, file_path):
         try:
             raw = self._read_image(file_path)
