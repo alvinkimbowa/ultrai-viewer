@@ -20,6 +20,10 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QFileDialog,
+    QDialog,
+    QLineEdit,
+    QFormLayout,
+    QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
@@ -69,6 +73,7 @@ class MainWindow(QMainWindow):
         self._inference_dialog = None
         self._sequence_paths = []
         self._sequence_index = -1
+        self._sequence_output_dir = None
         self._preload_model()
         self._init_model_picker()
 
@@ -322,9 +327,10 @@ class MainWindow(QMainWindow):
         self.canvas.set_mask_opacity(value / 100.0)
 
     def _load_sequence(self):
-        directory = QFileDialog.getExistingDirectory(self, "Load image sequence")
-        if not directory:
+        dialog_result = self._show_sequence_dialog()
+        if dialog_result is None:
             return
+        directory, output_dir = dialog_result
         extensions = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
         paths = [
             str(path)
@@ -336,6 +342,7 @@ class MainWindow(QMainWindow):
             return
         self._sequence_paths = paths
         self._sequence_index = 0
+        self._sequence_output_dir = output_dir
         self.sequence_combo.setEnabled(True)
         self.sequence_combo.clear()
         self.sequence_combo.addItems([Path(p).name for p in self._sequence_paths])
@@ -371,6 +378,52 @@ class MainWindow(QMainWindow):
         self.canvas.load_image(path)
         self.prev_btn.setEnabled(self._sequence_index > 0)
         self.next_btn.setEnabled(self._sequence_index < len(self._sequence_paths) - 1)
+
+    def _show_sequence_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Load image sequence")
+        layout = QFormLayout(dialog)
+
+        input_line = QLineEdit(dialog)
+        output_line = QLineEdit(dialog)
+
+        def browse_input():
+            directory = QFileDialog.getExistingDirectory(dialog, "Select input folder")
+            if directory:
+                input_line.setText(directory)
+
+        def browse_output():
+            directory = QFileDialog.getExistingDirectory(dialog, "Select output folder")
+            if directory:
+                output_line.setText(directory)
+
+        input_row = QHBoxLayout()
+        input_btn = QPushButton("Browse")
+        input_btn.clicked.connect(browse_input)
+        input_row.addWidget(input_line)
+        input_row.addWidget(input_btn)
+        layout.addRow("Input folder:", input_row)
+
+        output_row = QHBoxLayout()
+        output_btn = QPushButton("Browse")
+        output_btn.clicked.connect(browse_output)
+        output_row.addWidget(output_line)
+        output_row.addWidget(output_btn)
+        layout.addRow("Output folder:", output_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        layout.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        input_dir = input_line.text().strip()
+        output_dir = output_line.text().strip()
+        if not input_dir or not output_dir:
+            QMessageBox.information(self, "Missing fields", "Select both input and output folders.")
+            return None
+        return input_dir, output_dir
 
     def _preload_model(self):
         if not self._model.has_model():
