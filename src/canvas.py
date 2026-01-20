@@ -1,5 +1,5 @@
 """
-Canvas widget for displaying images and simple mask annotation tools.
+Canvas widget for displaying images and mask annotation tools.
 """
 
 import os
@@ -28,6 +28,7 @@ class Canvas(QWidget):
         self._last_point = None
         self._poly_points = []
         self._freehand_points = []
+        self._last_outline = []
 
         self.setMouseTracking(True)
 
@@ -92,6 +93,7 @@ class Canvas(QWidget):
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
         self._refresh_mask_pixmap()
+        self._last_outline = []
         self.update()
 
     def load_mask(self, file_path):
@@ -114,6 +116,7 @@ class Canvas(QWidget):
             return
         self.mask = None
         self.mask_pixmap = None
+        self._last_outline = []
         self.update()
 
     def clear_image(self):
@@ -123,6 +126,7 @@ class Canvas(QWidget):
         self.pixmap = None
         self.image_path = None
         self.clear_mask()
+        self._last_outline = []
         self.update()
 
     def set_mask(self, mask):
@@ -142,6 +146,7 @@ class Canvas(QWidget):
         self.tool = tool_name
         self._drawing = False
         self._poly_points = []
+        self._freehand_points = []
         self.update()
 
     def set_brush_radius(self, radius):
@@ -149,6 +154,15 @@ class Canvas(QWidget):
 
     def set_fill_roi(self, enabled):
         self.fill_roi = bool(enabled)
+        if self.fill_roi and self._last_outline:
+            self._ensure_mask()
+            points = np.array(
+                [[p.x(), p.y()] for p in self._last_outline],
+                dtype=np.int32,
+            ).reshape((-1, 1, 2))
+            cv2.fillPoly(self.mask, [points], 1.0)
+            self._refresh_mask_pixmap()
+            self.update()
 
     def fit_to_window(self):
         self.update()
@@ -337,6 +351,8 @@ class Canvas(QWidget):
             ).reshape((-1, 1, 2))
             cv2.fillPoly(self.mask, [points], 1.0)
             self._refresh_mask_pixmap()
+        else:
+            self._last_outline = list(self._poly_points)
         self._poly_points = []
         self.update()
 
@@ -350,6 +366,7 @@ class Canvas(QWidget):
             if self.tool == "freehand":
                 self._drawing = True
                 self._freehand_points = [point]
+                self._last_outline = []
                 self.update()
             elif self.tool == "brush":
                 self._ensure_mask()
@@ -405,6 +422,8 @@ class Canvas(QWidget):
                     ).reshape((-1, 1, 2))
                     cv2.fillPoly(self.mask, [points], 1.0)
                     self._refresh_mask_pixmap()
+                elif len(self._freehand_points) > 1:
+                    self._last_outline = list(self._freehand_points)
                 self._freehand_points = []
             self._drawing = False
             self._last_point = None
@@ -447,4 +466,14 @@ class Canvas(QWidget):
             for idx in range(len(self._freehand_points) - 1):
                 start = self._image_to_screen(self._freehand_points[idx])
                 end = self._image_to_screen(self._freehand_points[idx + 1])
+                painter.drawLine(start, end)
+        if self._last_outline:
+            painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine))
+            for idx in range(len(self._last_outline) - 1):
+                start = self._image_to_screen(self._last_outline[idx])
+                end = self._image_to_screen(self._last_outline[idx + 1])
+                painter.drawLine(start, end)
+            if len(self._last_outline) > 2:
+                start = self._image_to_screen(self._last_outline[-1])
+                end = self._image_to_screen(self._last_outline[0])
                 painter.drawLine(start, end)
