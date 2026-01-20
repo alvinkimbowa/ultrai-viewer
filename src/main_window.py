@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self._inference_thread = None
         self._inference_worker = None
         self._inference_dialog = None
+        self._preload_model()
         self._init_model_picker()
 
         self._start_size = self._initial_window_size()
@@ -307,6 +308,17 @@ class MainWindow(QMainWindow):
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
+
+    def _preload_model(self):
+        if not self._model.has_model():
+            return
+        self.statusBar().showMessage("Loading model...")
+        try:
+            if self._model.preload():
+                self.statusBar().showMessage("Model loaded")
+        except Exception as exc:
+            self.statusBar().showMessage("Model load failed")
+            QMessageBox.warning(self, "Model error", str(exc))
 
 
     def _init_model_picker(self):

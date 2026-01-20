@@ -74,6 +74,9 @@ class ModelIntegration:
         )
         return self._session
 
+    def preload(self) -> bool:
+        return self._ensure_session() is not None
+
     def _model_input_hw(self, session) -> tuple[int, int]:
         shape = session.get_inputs()[0].shape
         height = shape[2] if len(shape) > 2 and isinstance(shape[2], int) else None
