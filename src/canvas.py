@@ -22,6 +22,7 @@ class Canvas(QWidget):
         self.mask_opacity = 0.5
         self._undo_stack = []
         self._redo_stack = []
+        self._mask_touched = False
 
         self.tool = "select"
         self.brush_radius = 4
@@ -111,6 +112,7 @@ class Canvas(QWidget):
         self.mask = np.zeros((height, width), dtype=np.float32)
         self._refresh_mask_pixmap()
         self._last_outline = []
+        self._mask_touched = False
         self._reset_history()
         self._reset_view()
         self.update()
@@ -137,6 +139,7 @@ class Canvas(QWidget):
             self.mask = None
             self.mask_pixmap = None
             self._last_outline = []
+            self._mask_touched = False
             self._reset_history()
             self.update()
             return
@@ -145,6 +148,7 @@ class Canvas(QWidget):
         self._refresh_mask_pixmap()
         self._last_outline = []
         self._push_history()
+        self._mask_touched = True
         self.update()
 
     def clear_image(self):
@@ -163,6 +167,7 @@ class Canvas(QWidget):
             return
         self.mask = self._normalize_mask(mask)
         self._refresh_mask_pixmap()
+        self._mask_touched = True
         self._reset_history()
         self.update()
 
@@ -193,6 +198,7 @@ class Canvas(QWidget):
             cv2.fillPoly(self.mask, [points], 1.0)
             self._refresh_mask_pixmap()
             self._push_history()
+            self._mask_touched = True
             self.update()
 
     def fit_to_window(self):
@@ -402,6 +408,7 @@ class Canvas(QWidget):
             cv2.fillPoly(self.mask, [points], 1.0)
             self._refresh_mask_pixmap()
             self._push_history()
+            self._mask_touched = True
         else:
             self._last_outline = list(self._poly_points)
         self._poly_points = []
@@ -474,12 +481,14 @@ class Canvas(QWidget):
                     cv2.fillPoly(self.mask, [points], 1.0)
                     self._refresh_mask_pixmap()
                     self._push_history()
+                    self._mask_touched = True
                 elif len(self._freehand_points) > 1:
                     self._last_outline = list(self._freehand_points)
                 self._freehand_points = []
             elif self.tool in ("brush", "eraser"):
                 if self._drawing:
                     self._push_history()
+                    self._mask_touched = True
             self._drawing = False
             self._last_point = None
             self.update()
@@ -562,6 +571,9 @@ class Canvas(QWidget):
             return
         self._undo_stack.append(np.copy(self.mask))
         self._redo_stack = []
+
+    def has_mask_data(self):
+        return self.mask is not None and self._mask_touched
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
