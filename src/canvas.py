@@ -2,6 +2,7 @@
 Canvas widget for displaying images.
 """
 
+import os
 from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox
 from PyQt6.QtGui import QImage, QPixmap, QPainter
 from PyQt6.QtCore import Qt, QRect
@@ -15,6 +16,7 @@ class Canvas(QWidget):
         super().__init__()
         self.image = None
         self.pixmap = None
+        self.image_path = None
         self.mask = None
         self.mask_pixmap = None
         self.mask_opacity = 0.5
@@ -29,6 +31,35 @@ class Canvas(QWidget):
         if path:
             self.load_image(path)
 
+    def save_mask_dialog(self):
+        if self.mask is None:
+            QMessageBox.information(self, "No mask", "Run segmentation before saving a mask.")
+            return
+        default_dir = ""
+        default_name = "mask.tif"
+        if self.image_path:
+            default_dir = os.path.dirname(self.image_path)
+            default_name = os.path.basename(self.image_path)
+        default_path = os.path.join(default_dir, default_name) if default_dir else default_name
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Mask",
+            default_path,
+            "Mask Files (*.tif *.tiff *.png)",
+        )
+        if path:
+            self.save_mask(path)
+
+    def save_mask(self, file_path):
+        if self.mask is None:
+            raise ValueError("No mask available to save.")
+        mask_uint8 = (self.mask >= 0.5).astype(np.uint8) * 255
+        lower_path = file_path.lower()
+        if lower_path.endswith((".tif", ".tiff")):
+            tifffile.imwrite(file_path, mask_uint8)
+        else:
+            cv2.imwrite(file_path, mask_uint8)
+
     def load_image(self, file_path):
         try:
             raw = self._read_image(file_path)
@@ -38,6 +69,7 @@ class Canvas(QWidget):
 
         self.image = raw
         self.pixmap = self._to_pixmap(raw)
+        self.image_path = file_path
         self.mask = None
         self.mask_pixmap = None
         self.update()

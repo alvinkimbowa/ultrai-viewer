@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QKeySequence
 
 from .canvas import Canvas
 from .model_integration import ModelIntegration
@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.segment_batch_action)
         file_menu.addSeparator()
         self.save_mask_action = QAction("Save mask...", self)
+        self.save_mask_action.setShortcut(QKeySequence.StandardKey.Save)
         file_menu.addAction(self.save_mask_action)
         self.clear_mask_action = QAction("Clear Mask", self)
         file_menu.addAction(self.clear_mask_action)
@@ -230,6 +231,8 @@ class MainWindow(QMainWindow):
         self.exit_action.triggered.connect(self.close)
         self.run_btn.clicked.connect(self._run_inference)
         self.segment_action.triggered.connect(self._run_inference)
+        self.save_btn.clicked.connect(self.canvas.save_mask_dialog)
+        self.save_mask_action.triggered.connect(self.canvas.save_mask_dialog)
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
