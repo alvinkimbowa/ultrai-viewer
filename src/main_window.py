@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSpinBox,
     QComboBox,
+    QCheckBox,
     QScrollArea,
     QSizePolicy,
     QStyle,
@@ -94,7 +95,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.redo_action)
 
         tools_menu = menubar.addMenu("Tools")
-        self.select_pan_action = QAction("Select/Pan", self)
+        self.select_pan_action = QAction("Select", self)
         tools_menu.addAction(self.select_pan_action)
         self.freehand_action = QAction("Freehand Line", self)
         tools_menu.addAction(self.freehand_action)
@@ -169,7 +170,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
         self.tool_picker.addItems(
-            ["Select/Pan", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser"]
+            ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser"]
         )
         self.tool_picker.setCurrentIndex(0)
         layout.addWidget(self.tool_picker)
@@ -182,6 +183,10 @@ class MainWindow(QMainWindow):
         self.brush_radius.setMaximum(50)
         self.brush_radius.setValue(4)
         layout.addWidget(self.brush_radius)
+
+        self.fill_roi_checkbox = QCheckBox("Fill ROI")
+        self.fill_roi_checkbox.setChecked(False)
+        layout.addWidget(self.fill_roi_checkbox)
 
         layout.addSpacing(10)
 
@@ -239,6 +244,11 @@ class MainWindow(QMainWindow):
         self.clear_mask_action.triggered.connect(self.canvas.clear_mask)
         self.close_btn.clicked.connect(self.canvas.clear_image)
         self.close_image_action.triggered.connect(self.canvas.clear_image)
+        self.tool_picker.currentIndexChanged.connect(self._on_tool_changed)
+        self.brush_radius.valueChanged.connect(self.canvas.set_brush_radius)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self.fit_btn.clicked.connect(self.canvas.fit_to_window)
+        self.fill_roi_checkbox.toggled.connect(self.canvas.set_fill_roi)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
 
     def _center_window(self):
@@ -273,6 +283,19 @@ class MainWindow(QMainWindow):
         height = max(min_h, height)
         self._sidebar_width = min(240, max(160, int(screen_rect.width() * 0.2)))
         return (width, height)
+
+    def _on_tool_changed(self, index):
+        tool_map = {
+            0: "select",
+            1: "freehand",
+            2: "polyline",
+            3: "brush",
+            4: "eraser",
+        }
+        self.canvas.set_tool(tool_map.get(index, "pan"))
+
+    def _on_opacity_changed(self, value):
+        self.canvas.set_mask_opacity(value / 100.0)
 
     def _init_model_picker(self):
         models = self._model.list_models()
