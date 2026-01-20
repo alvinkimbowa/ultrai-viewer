@@ -15,6 +15,9 @@ class Canvas(QWidget):
         super().__init__()
         self.image = None
         self.pixmap = None
+        self.mask = None
+        self.mask_pixmap = None
+        self.mask_opacity = 0.5
 
     def load_image_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -35,6 +38,8 @@ class Canvas(QWidget):
 
         self.image = raw
         self.pixmap = self._to_pixmap(raw)
+        self.mask = None
+        self.mask_pixmap = None
         self.update()
 
     def _read_image(self, file_path):
@@ -75,6 +80,53 @@ class Canvas(QWidget):
             return QPixmap.fromImage(q_image)
         raise ValueError(f"Unsupported image layout: {image.shape}")
 
+    def set_mask(self, mask):
+        if self.image is None:
+            return
+        self.mask = self._normalize_mask(mask)
+        self.mask_pixmap = self._mask_to_pixmap(self.mask)
+        self.update()
+
+    def set_mask_opacity(self, opacity):
+        self.mask_opacity = max(0.0, min(1.0, float(opacity)))
+        if self.mask is not None:
+            self.mask_pixmap = self._mask_to_pixmap(self.mask)
+        self.update()
+
+    def _normalize_mask(self, mask):
+        data = np.asarray(mask)
+        if data.ndim == 4:
+            data = data[0]
+        if data.ndim == 3 and data.shape[0] == 1:
+            data = data[0]
+        if data.ndim == 3 and data.shape[2] == 1:
+            data = data[:, :, 0]
+        if data.ndim != 2:
+            raise ValueError(f"Unsupported mask layout: {data.shape}")
+        if self.image is not None and data.shape[:2] != self.image.shape[:2]:
+            data = cv2.resize(data, (self.image.shape[1], self.image.shape[0]), interpolation=cv2.INTER_NEAREST)
+        if data.dtype != np.float32:
+            data = data.astype(np.float32, copy=False)
+        if data.max() > 1.0:
+            data = data / 255.0
+        data = np.clip(data, 0.0, 1.0)
+        return data
+
+    def _mask_to_pixmap(self, mask):
+        height, width = mask.shape
+        alpha = (mask * 255.0 * self.mask_opacity).astype(np.uint8)
+        rgb = (mask * 255.0).astype(np.uint8)
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        rgba[:, :, 0] = rgb
+        rgba[:, :, 1] = rgb
+        rgba[:, :, 2] = rgb
+        rgba[:, :, 3] = alpha
+        bytes_per_line = rgba.strides[0]
+        q_image = QImage(
+            rgba.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888
+        )
+        return QPixmap.fromImage(q_image)
+
     def _as_uint8(self, image):
         if image.dtype == np.uint8:
             return image
@@ -110,3 +162,5 @@ class Canvas(QWidget):
         offset_y = (self.height() - draw_h) // 2
         target = QRect(offset_x, offset_y, draw_w, draw_h)
         painter.drawPixmap(target, self.pixmap)
+        if self.mask_pixmap is not None:
+            painter.drawPixmap(target, self.mask_pixmap)

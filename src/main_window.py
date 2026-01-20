@@ -16,11 +16,13 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QApplication,
+    QMessageBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction
 
 from .canvas import Canvas
+from .model_integration import ModelIntegration
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +55,8 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Ready")
         self._wire_actions()
+        self._model = ModelIntegration()
+        self._last_prediction = None
 
         self._start_size = self._initial_window_size()
         self.setGeometry(10, 10, *self._start_size)
@@ -66,26 +70,38 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.load_image_action)
         file_menu.addAction(QAction("Load Mask...", self))
         file_menu.addAction(QAction("Load image sequence...", self))
-        file_menu.addAction(QAction("Segment", self))
-        file_menu.addAction(QAction("Batch segment", self))
+        self.segment_action = QAction("Segment", self)
+        file_menu.addAction(self.segment_action)
+        self.segment_batch_action = QAction("Batch segment", self)
+        file_menu.addAction(self.segment_batch_action)
         file_menu.addSeparator()
-        file_menu.addAction(QAction("Save mask...", self))
-        file_menu.addAction(QAction("Clear Mask", self))
-        file_menu.addAction(QAction("Close Image", self))
+        self.save_mask_action = QAction("Save mask...", self)
+        file_menu.addAction(self.save_mask_action)
+        self.clear_mask_action = QAction("Clear Mask", self)
+        file_menu.addAction(self.clear_mask_action)
+        self.close_image_action = QAction("Close Image", self)
+        file_menu.addAction(self.close_image_action)
         file_menu.addSeparator()
         self.exit_action = QAction("Exit", self)
         file_menu.addAction(self.exit_action)
 
         edit_menu = menubar.addMenu("Edit")
-        edit_menu.addAction(QAction("Undo", self))
-        edit_menu.addAction(QAction("Redo", self))
+        self.undo_action = QAction("Undo", self)
+        edit_menu.addAction(self.undo_action)
+        self.redo_action = QAction("Redo", self)
+        edit_menu.addAction(self.redo_action)
 
         tools_menu = menubar.addMenu("Tools")
-        tools_menu.addAction(QAction("Select/Pan", self))
-        tools_menu.addAction(QAction("Freehand Line", self))
-        tools_menu.addAction(QAction("Segmented Line", self))
-        tools_menu.addAction(QAction("Paint Brush", self))
-        tools_menu.addAction(QAction("Eraser", self))
+        self.select_pan_action = QAction("Select/Pan", self)
+        tools_menu.addAction(self.select_pan_action)
+        self.freehand_action = QAction("Freehand Line", self)
+        tools_menu.addAction(self.freehand_action)
+        self.polyline_action = QAction("Segmented Line", self)
+        tools_menu.addAction(self.polyline_action)
+        self.paint_action = QAction("Paint Brush", self)
+        tools_menu.addAction(self.paint_action)
+        self.eraser_action = QAction("Eraser", self)
+        tools_menu.addAction(self.eraser_action)
 
     def _build_sidebar(self):
         panel = QWidget()
@@ -212,6 +228,8 @@ class MainWindow(QMainWindow):
         self.open_image_btn.clicked.connect(self.canvas.load_image_dialog)
         self.load_image_action.triggered.connect(self.canvas.load_image_dialog)
         self.exit_action.triggered.connect(self.close)
+        self.run_btn.clicked.connect(self._run_inference)
+        self.segment_action.triggered.connect(self._run_inference)
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
@@ -245,3 +263,25 @@ class MainWindow(QMainWindow):
         height = max(min_h, height)
         self._sidebar_width = min(240, max(160, int(screen_rect.width() * 0.2)))
         return (width, height)
+
+    def _run_inference(self):
+        if self.canvas.image is None:
+            QMessageBox.warning(self, "No image", "Load an image before running segmentation.")
+            return
+        if not self._model.has_model():
+            QMessageBox.warning(
+                self,
+                "No model",
+                "No ONNX model found in assets/.",
+            )
+            return
+        self.statusBar().showMessage("Running segmentation...")
+        try:
+            self._last_prediction = self._model.run_inference(self.canvas.image)
+        except Exception as exc:
+            QMessageBox.warning(self, "Model error", str(exc))
+            self.statusBar().showMessage("Segmentation failed")
+            return
+        if self._last_prediction is not None:
+            self.canvas.set_mask(self._last_prediction)
+        self.statusBar().showMessage("Segmentation complete")
