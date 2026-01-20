@@ -6,7 +6,7 @@ import os
 import numpy as np
 import cv2
 import tifffile
-from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox, QScrollBar, QStyle
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from PyQt6.QtCore import Qt, QRect, QPoint
 
@@ -29,6 +29,21 @@ class Canvas(QWidget):
         self._poly_points = []
         self._freehand_points = []
         self._last_outline = []
+
+        self.scale = 1.0
+        self.min_scale = 0.1
+        self.max_scale = 10.0
+        self._scroll_x = 0
+        self._scroll_y = 0
+
+        self.h_scrollbar = QScrollBar(Qt.Orientation.Horizontal, self)
+        self.v_scrollbar = QScrollBar(Qt.Orientation.Vertical, self)
+        self.h_scrollbar.valueChanged.connect(self._on_h_scroll)
+        self.v_scrollbar.valueChanged.connect(self._on_v_scroll)
+        self.h_scrollbar.hide()
+        self.v_scrollbar.hide()
+        self.h_scrollbar.raise_()
+        self.v_scrollbar.raise_()
 
         self.setMouseTracking(True)
 
@@ -94,6 +109,7 @@ class Canvas(QWidget):
         self.mask = np.zeros((height, width), dtype=np.float32)
         self._refresh_mask_pixmap()
         self._last_outline = []
+        self._reset_view()
         self.update()
 
     def load_mask(self, file_path):
@@ -127,6 +143,7 @@ class Canvas(QWidget):
         self.image_path = None
         self.clear_mask()
         self._last_outline = []
+        self._reset_view()
         self.update()
 
     def set_mask(self, mask):
@@ -165,7 +182,19 @@ class Canvas(QWidget):
             self.update()
 
     def fit_to_window(self):
+        if self.pixmap is None:
+            return
+        pix_w = self.pixmap.width()
+        pix_h = self.pixmap.height()
+        if pix_w <= 0 or pix_h <= 0:
+            return
+        scale = min(self.width() / pix_w, self.height() / pix_h)
+        self.scale = max(self.min_scale, min(self.max_scale, scale))
+        self._scroll_x = 0
+        self._scroll_y = 0
+        self._update_scrollbars()
         self.update()
+
 
     def _read_image(self, file_path):
         lower_path = file_path.lower()
@@ -293,11 +322,17 @@ class Canvas(QWidget):
         pix_h = self.pixmap.height()
         if pix_w <= 0 or pix_h <= 0:
             return 1.0, 0, 0
-        scale = min(self.width() / pix_w, self.height() / pix_h)
+        scale = self.scale
         draw_w = int(pix_w * scale)
         draw_h = int(pix_h * scale)
-        offset_x = (self.width() - draw_w) // 2
-        offset_y = (self.height() - draw_h) // 2
+        if draw_w <= self.width():
+            offset_x = (self.width() - draw_w) // 2
+        else:
+            offset_x = -self._scroll_x
+        if draw_h <= self.height():
+            offset_y = (self.height() - draw_h) // 2
+        else:
+            offset_y = -self._scroll_y
         return scale, offset_x, offset_y
 
     def _screen_to_image(self, pos):
@@ -477,3 +512,110 @@ class Canvas(QWidget):
                 start = self._image_to_screen(self._last_outline[-1])
                 end = self._image_to_screen(self._last_outline[0])
                 painter.drawLine(start, end)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_scrollbars()
+
+    def wheelEvent(self, event):
+        if self.pixmap is None:
+            return
+        delta = event.angleDelta().y()
+        modifiers = event.modifiers()
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            factor = 1.2 if delta > 0 else 1 / 1.2
+            self._apply_zoom(factor)
+        elif modifiers & Qt.KeyboardModifier.ShiftModifier:
+            if self.h_scrollbar.isVisible():
+                self._scroll_horizontal(-delta)
+        else:
+            self._scroll_vertical(-delta)
+        event.accept()
+
+    def _reset_view(self):
+        self.scale = 1.0
+        self._scroll_x = 0
+        self._scroll_y = 0
+        if self.pixmap is not None:
+            pix_w = self.pixmap.width()
+            pix_h = self.pixmap.height()
+            if pix_w > 0 and pix_h > 0:
+                scale = min(self.width() / pix_w, self.height() / pix_h)
+                self.scale = max(self.min_scale, min(self.max_scale, scale))
+        self._update_scrollbars()
+
+    def _apply_zoom(self, factor):
+        if self.pixmap is None:
+            return
+        self.scale = max(self.min_scale, min(self.max_scale, self.scale * factor))
+        self._update_scrollbars()
+        self.update()
+
+    def _update_scrollbars(self):
+        if self.pixmap is None:
+            self.h_scrollbar.hide()
+            self.v_scrollbar.hide()
+            return
+        pix_w = self.pixmap.width()
+        pix_h = self.pixmap.height()
+        draw_w = int(pix_w * self.scale)
+        draw_h = int(pix_h * self.scale)
+
+        bar_size = self.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        h_visible = draw_w > self.width()
+        v_visible = draw_h > self.height()
+
+        h_height = bar_size if h_visible else 0
+        v_width = bar_size if v_visible else 0
+
+        if h_visible:
+            self.h_scrollbar.setRange(0, max(0, draw_w - self.width()))
+            self.h_scrollbar.setPageStep(max(1, self.width()))
+            self.h_scrollbar.setValue(min(self.h_scrollbar.value(), self.h_scrollbar.maximum()))
+            self.h_scrollbar.setGeometry(0, self.height() - h_height, self.width() - v_width, h_height)
+            self.h_scrollbar.show()
+        else:
+            self.h_scrollbar.setValue(0)
+            self._scroll_x = 0
+            self.h_scrollbar.hide()
+
+        if v_visible:
+            self.v_scrollbar.setRange(0, max(0, draw_h - self.height()))
+            self.v_scrollbar.setPageStep(max(1, self.height()))
+            self.v_scrollbar.setValue(min(self.v_scrollbar.value(), self.v_scrollbar.maximum()))
+            self.v_scrollbar.setGeometry(self.width() - v_width, 0, v_width, self.height() - h_height)
+            self.v_scrollbar.show()
+        else:
+            self.v_scrollbar.setValue(0)
+            self._scroll_y = 0
+            self.v_scrollbar.hide()
+
+        self._scroll_x = self.h_scrollbar.value()
+        self._scroll_y = self.v_scrollbar.value()
+        self.update()
+
+    def _scroll_horizontal(self, delta):
+        if not self.h_scrollbar.isVisible():
+            return
+        step = max(1, int(abs(delta) * 0.25))
+        if delta > 0:
+            self.h_scrollbar.setValue(self.h_scrollbar.value() + step)
+        else:
+            self.h_scrollbar.setValue(self.h_scrollbar.value() - step)
+
+    def _scroll_vertical(self, delta):
+        if not self.v_scrollbar.isVisible():
+            return
+        step = max(1, int(abs(delta) * 0.25))
+        if delta > 0:
+            self.v_scrollbar.setValue(self.v_scrollbar.value() + step)
+        else:
+            self.v_scrollbar.setValue(self.v_scrollbar.value() - step)
+
+    def _on_h_scroll(self, value):
+        self._scroll_x = value
+        self.update()
+
+    def _on_v_scroll(self, value):
+        self._scroll_y = value
+        self.update()
