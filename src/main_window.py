@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QKeySequence
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 
 from .canvas import Canvas
 from .model_integration import ModelIntegration
@@ -59,6 +59,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.canvas, stretch=1)
 
         self.statusBar().showMessage("Ready")
+        self._prev_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
+        self._next_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
         self._wire_actions()
         self._model = ModelIntegration()
         self._last_prediction = None
@@ -270,6 +272,8 @@ class MainWindow(QMainWindow):
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
         self.prev_btn.clicked.connect(self._show_previous_sequence)
         self.next_btn.clicked.connect(self._show_next_sequence)
+        self._prev_shortcut.activated.connect(self._show_previous_sequence)
+        self._next_shortcut.activated.connect(self._show_next_sequence)
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
