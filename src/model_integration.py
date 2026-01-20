@@ -74,6 +74,9 @@ class ModelIntegration:
         )
         return self._session
 
+    def preload(self) -> bool:
+        return self._ensure_session() is not None
+
     def _model_input_hw(self, session) -> tuple[int, int]:
         shape = session.get_inputs()[0].shape
         height = shape[2] if len(shape) > 2 and isinstance(shape[2], int) else None
@@ -114,13 +117,19 @@ class ModelIntegration:
             data = np.squeeze(data)
         return data
 
-    def run_inference(self, image) -> np.ndarray:
+    def run_inference(self, image, cancel_event=None) -> np.ndarray:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Inference canceled.")
         session = self._ensure_session()
         if session is None:
             raise RuntimeError("Model session is not available.")
         model_input = self._prepare_input(image, session)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Inference canceled.")
         input_name = session.get_inputs()[0].name
         outputs = session.run(None, {input_name: model_input})
         if not outputs:
             raise RuntimeError("Model returned no outputs.")
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Inference canceled.")
         return self._postprocess(outputs[0])

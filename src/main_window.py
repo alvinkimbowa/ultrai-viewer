@@ -18,12 +18,14 @@ from PyQt6.QtWidgets import (
     QStyle,
     QApplication,
     QMessageBox,
+    QProgressDialog,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QKeySequence
 
 from .canvas import Canvas
 from .model_integration import ModelIntegration
+from threading import Event
 
 
 class MainWindow(QMainWindow):
@@ -58,6 +60,10 @@ class MainWindow(QMainWindow):
         self._wire_actions()
         self._model = ModelIntegration()
         self._last_prediction = None
+        self._inference_thread = None
+        self._inference_worker = None
+        self._inference_dialog = None
+        self._preload_model()
         self._init_model_picker()
 
         self._start_size = self._initial_window_size()
@@ -90,8 +96,10 @@ class MainWindow(QMainWindow):
 
         edit_menu = menubar.addMenu("Edit")
         self.undo_action = QAction("Undo", self)
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         edit_menu.addAction(self.undo_action)
         self.redo_action = QAction("Redo", self)
+        self.redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         edit_menu.addAction(self.redo_action)
 
         tools_menu = menubar.addMenu("Tools")
@@ -249,6 +257,10 @@ class MainWindow(QMainWindow):
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
         self.fill_roi_checkbox.toggled.connect(self.canvas.set_fill_roi)
+        self.undo_btn.clicked.connect(self.canvas.undo)
+        self.redo_btn.clicked.connect(self.canvas.redo)
+        self.undo_action.triggered.connect(self.canvas.undo)
+        self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
 
     def _center_window(self):
@@ -297,6 +309,18 @@ class MainWindow(QMainWindow):
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
 
+    def _preload_model(self):
+        if not self._model.has_model():
+            return
+        self.statusBar().showMessage("Loading model...")
+        try:
+            if self._model.preload():
+                self.statusBar().showMessage("Model loaded")
+        except Exception as exc:
+            self.statusBar().showMessage("Model load failed")
+            QMessageBox.warning(self, "Model error", str(exc))
+
+
     def _init_model_picker(self):
         models = self._model.list_models()
         if not models:
@@ -334,13 +358,112 @@ class MainWindow(QMainWindow):
                 "No ONNX model found in assets/.",
             )
             return
-        self.statusBar().showMessage("Running segmentation...")
-        try:
-            self._last_prediction = self._model.run_inference(self.canvas.image)
-        except Exception as exc:
-            QMessageBox.warning(self, "Model error", str(exc))
-            self.statusBar().showMessage("Segmentation failed")
+        if self._inference_thread and self._inference_thread.isRunning():
+            self.statusBar().showMessage("Segmentation already running...")
             return
+
+        self.statusBar().showMessage("Running segmentation...")
+        self._show_inference_dialog()
+
+        self._inference_thread = QThread(self)
+        self._inference_worker = InferenceWorker(self._model, self.canvas.image)
+        self._inference_worker.moveToThread(self._inference_thread)
+        self._inference_thread.started.connect(self._inference_worker.run)
+        self._inference_worker.finished.connect(self._on_inference_finished)
+        self._inference_worker.canceled.connect(self._on_inference_canceled)
+        self._inference_worker.error.connect(self._on_inference_error)
+        self._inference_worker.finished.connect(self._inference_thread.quit)
+        self._inference_worker.canceled.connect(self._inference_thread.quit)
+        self._inference_worker.error.connect(self._inference_thread.quit)
+        self._inference_worker.finished.connect(self._inference_worker.deleteLater)
+        self._inference_worker.canceled.connect(self._inference_worker.deleteLater)
+        self._inference_worker.error.connect(self._inference_worker.deleteLater)
+        self._inference_thread.finished.connect(self._on_inference_thread_done)
+        self._inference_thread.finished.connect(self._inference_thread.deleteLater)
+        self._inference_thread.start()
+
+    def _show_inference_dialog(self):
+        if self._inference_dialog is not None:
+            self._inference_dialog.close()
+        self._inference_dialog = QProgressDialog(
+            "Running segmentation...",
+            "Cancel",
+            0,
+            0,
+            self,
+        )
+        self._inference_dialog.setWindowTitle("Segment")
+        self._inference_dialog.setMinimumDuration(0)
+        self._inference_dialog.setAutoClose(False)
+        self._inference_dialog.setAutoReset(False)
+        self._inference_dialog.canceled.connect(self._request_inference_cancel)
+        self._inference_dialog.show()
+
+    def _close_inference_dialog(self):
+        if self._inference_dialog is None:
+            return
+        self._inference_dialog.close()
+        self._inference_dialog = None
+
+    def _request_inference_cancel(self):
+        if self._inference_worker:
+            self._inference_worker.cancel()
+        self.statusBar().showMessage("Canceling segmentation...")
+        if self._inference_dialog:
+            self._inference_dialog.setLabelText("Canceling segmentation...")
+
+    def _on_inference_finished(self, prediction):
+        self._last_prediction = prediction
         if self._last_prediction is not None:
             self.canvas.set_mask(self._last_prediction)
         self.statusBar().showMessage("Segmentation complete")
+        self._close_inference_dialog()
+
+    def _on_inference_canceled(self):
+        self.statusBar().showMessage("Segmentation canceled")
+        self._close_inference_dialog()
+
+    def _on_inference_error(self, message):
+        QMessageBox.warning(self, "Model error", message)
+        self.statusBar().showMessage("Segmentation failed")
+        self._close_inference_dialog()
+
+    def _on_inference_thread_done(self):
+        self._inference_thread = None
+        self._inference_worker = None
+
+
+class InferenceWorker(QObject):
+    finished = pyqtSignal(object)
+    canceled = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, model, image):
+        super().__init__()
+        self._model = model
+        self._image = image
+        self._cancel_event = Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    @pyqtSlot()
+    def run(self):
+        if self._cancel_event.is_set():
+            self.canceled.emit()
+            return
+        try:
+            prediction = self._model.run_inference(
+                self._image,
+                cancel_event=self._cancel_event,
+            )
+        except Exception as exc:
+            if str(exc).lower().startswith("inference canceled"):
+                self.canceled.emit()
+                return
+            self.error.emit(str(exc))
+            return
+        if self._cancel_event.is_set():
+            self.canceled.emit()
+            return
+        self.finished.emit(prediction)

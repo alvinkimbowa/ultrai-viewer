@@ -20,6 +20,8 @@ class Canvas(QWidget):
         self.mask = None
         self.mask_pixmap = None
         self.mask_opacity = 0.5
+        self._undo_stack = []
+        self._redo_stack = []
 
         self.tool = "select"
         self.brush_radius = 4
@@ -109,6 +111,7 @@ class Canvas(QWidget):
         self.mask = np.zeros((height, width), dtype=np.float32)
         self._refresh_mask_pixmap()
         self._last_outline = []
+        self._reset_history()
         self._reset_view()
         self.update()
 
@@ -130,9 +133,18 @@ class Canvas(QWidget):
     def clear_mask(self):
         if self.mask is None:
             return
-        self.mask = None
-        self.mask_pixmap = None
+        if self.image is None:
+            self.mask = None
+            self.mask_pixmap = None
+            self._last_outline = []
+            self._reset_history()
+            self.update()
+            return
+        height, width = self.image.shape[:2]
+        self.mask = np.zeros((height, width), dtype=np.float32)
+        self._refresh_mask_pixmap()
         self._last_outline = []
+        self._push_history()
         self.update()
 
     def clear_image(self):
@@ -151,6 +163,7 @@ class Canvas(QWidget):
             return
         self.mask = self._normalize_mask(mask)
         self._refresh_mask_pixmap()
+        self._reset_history()
         self.update()
 
     def set_mask_opacity(self, opacity):
@@ -179,6 +192,7 @@ class Canvas(QWidget):
             ).reshape((-1, 1, 2))
             cv2.fillPoly(self.mask, [points], 1.0)
             self._refresh_mask_pixmap()
+            self._push_history()
             self.update()
 
     def fit_to_window(self):
@@ -314,6 +328,7 @@ class Canvas(QWidget):
         if self.mask is None:
             height, width = self.image.shape[:2]
             self.mask = np.zeros((height, width), dtype=np.float32)
+            self._reset_history()
 
     def _current_view(self):
         if self.pixmap is None:
@@ -386,6 +401,7 @@ class Canvas(QWidget):
             ).reshape((-1, 1, 2))
             cv2.fillPoly(self.mask, [points], 1.0)
             self._refresh_mask_pixmap()
+            self._push_history()
         else:
             self._last_outline = list(self._poly_points)
         self._poly_points = []
@@ -457,9 +473,13 @@ class Canvas(QWidget):
                     ).reshape((-1, 1, 2))
                     cv2.fillPoly(self.mask, [points], 1.0)
                     self._refresh_mask_pixmap()
+                    self._push_history()
                 elif len(self._freehand_points) > 1:
                     self._last_outline = list(self._freehand_points)
                 self._freehand_points = []
+            elif self.tool in ("brush", "eraser"):
+                if self._drawing:
+                    self._push_history()
             self._drawing = False
             self._last_point = None
             self.update()
@@ -512,6 +532,36 @@ class Canvas(QWidget):
                 start = self._image_to_screen(self._last_outline[-1])
                 end = self._image_to_screen(self._last_outline[0])
                 painter.drawLine(start, end)
+
+    def undo(self):
+        if len(self._undo_stack) <= 1:
+            return
+        current = self._undo_stack.pop()
+        self._redo_stack.append(current)
+        self.mask = np.copy(self._undo_stack[-1])
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def redo(self):
+        if not self._redo_stack:
+            return
+        state = self._redo_stack.pop()
+        self._undo_stack.append(np.copy(state))
+        self.mask = np.copy(state)
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def _reset_history(self):
+        self._undo_stack = []
+        self._redo_stack = []
+        if self.mask is not None:
+            self._undo_stack.append(np.copy(self.mask))
+
+    def _push_history(self):
+        if self.mask is None:
+            return
+        self._undo_stack.append(np.copy(self.mask))
+        self._redo_stack = []
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
