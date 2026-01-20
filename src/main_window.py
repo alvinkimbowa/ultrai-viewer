@@ -360,6 +360,7 @@ class MainWindow(QMainWindow):
     def _show_previous_sequence(self):
         if self._sequence_index <= 0:
             return
+        self._save_sequence_mask_if_needed()
         self._sequence_index -= 1
         self.sequence_combo.setCurrentIndex(self._sequence_index)
 
@@ -368,6 +369,7 @@ class MainWindow(QMainWindow):
             return
         if self._sequence_index >= len(self._sequence_paths) - 1:
             return
+        self._save_sequence_mask_if_needed()
         self._sequence_index += 1
         self.sequence_combo.setCurrentIndex(self._sequence_index)
 
@@ -376,8 +378,39 @@ class MainWindow(QMainWindow):
             return
         path = self._sequence_paths[self._sequence_index]
         self.canvas.load_image(path)
+        mask_path = self._find_sequence_mask_path(path)
+        if mask_path:
+            self.canvas.load_mask(mask_path)
+        else:
+            self.canvas.clear_mask()
         self.prev_btn.setEnabled(self._sequence_index > 0)
         self.next_btn.setEnabled(self._sequence_index < len(self._sequence_paths) - 1)
+
+    def _save_sequence_mask_if_needed(self):
+        if not self._sequence_output_dir:
+            return
+        if self._sequence_index < 0 or self._sequence_index >= len(self._sequence_paths):
+            return
+        if not self.canvas.has_mask_data():
+            return
+        image_path = Path(self._sequence_paths[self._sequence_index])
+        output_path = Path(self._sequence_output_dir) / image_path.name
+        try:
+            self.canvas.save_mask(str(output_path))
+            self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save error", str(exc))
+
+    def _find_sequence_mask_path(self, image_path):
+        if not self._sequence_output_dir:
+            return None
+        stem = Path(image_path).stem
+        output_dir = Path(self._sequence_output_dir)
+        for ext in (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
+            candidate = output_dir / f"{stem}{ext}"
+            if candidate.exists():
+                return str(candidate)
+        return None
 
     def _show_sequence_dialog(self):
         dialog = QDialog(self)
