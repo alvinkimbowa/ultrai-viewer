@@ -90,8 +90,10 @@ class MainWindow(QMainWindow):
 
         edit_menu = menubar.addMenu("Edit")
         self.undo_action = QAction("Undo", self)
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
         edit_menu.addAction(self.undo_action)
         self.redo_action = QAction("Redo", self)
+        self.redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         edit_menu.addAction(self.redo_action)
 
         tools_menu = menubar.addMenu("Tools")
@@ -249,6 +251,10 @@ class MainWindow(QMainWindow):
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
         self.fill_roi_checkbox.toggled.connect(self.canvas.set_fill_roi)
+        self.undo_btn.clicked.connect(self.canvas.undo)
+        self.redo_btn.clicked.connect(self.canvas.redo)
+        self.undo_action.triggered.connect(self.canvas.undo)
+        self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
 
     def _center_window(self):
