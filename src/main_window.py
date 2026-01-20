@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QMessageBox,
     QProgressDialog,
+    QFileDialog,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QKeySequence
@@ -26,6 +27,7 @@ from PyQt6.QtGui import QAction, QKeySequence
 from .canvas import Canvas
 from .model_integration import ModelIntegration
 from threading import Event
+from pathlib import Path
 
 
 class MainWindow(QMainWindow):
@@ -63,6 +65,8 @@ class MainWindow(QMainWindow):
         self._inference_thread = None
         self._inference_worker = None
         self._inference_dialog = None
+        self._sequence_paths = []
+        self._sequence_index = -1
         self._preload_model()
         self._init_model_picker()
 
@@ -262,6 +266,10 @@ class MainWindow(QMainWindow):
         self.undo_action.triggered.connect(self.canvas.undo)
         self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
+        self.sequence_btn.clicked.connect(self._load_sequence)
+        self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
+        self.prev_btn.clicked.connect(self._show_previous_sequence)
+        self.next_btn.clicked.connect(self._show_next_sequence)
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
@@ -308,6 +316,57 @@ class MainWindow(QMainWindow):
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
+
+    def _load_sequence(self):
+        directory = QFileDialog.getExistingDirectory(self, "Load image sequence")
+        if not directory:
+            return
+        extensions = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+        paths = [
+            str(path)
+            for path in sorted(Path(directory).iterdir())
+            if path.suffix.lower() in extensions
+        ]
+        if not paths:
+            QMessageBox.information(self, "No images", "No images found in the selected folder.")
+            return
+        self._sequence_paths = paths
+        self._sequence_index = 0
+        self.sequence_combo.setEnabled(True)
+        self.sequence_combo.clear()
+        self.sequence_combo.addItems([Path(p).name for p in self._sequence_paths])
+        self.sequence_combo.setCurrentIndex(0)
+        self.prev_btn.setEnabled(False)
+        self.next_btn.setEnabled(len(self._sequence_paths) > 1)
+        self._load_sequence_image()
+
+    def _on_sequence_selected(self, index):
+        if index < 0 or index >= len(self._sequence_paths):
+            return
+        self._sequence_index = index
+        self._load_sequence_image()
+
+    def _show_previous_sequence(self):
+        if self._sequence_index <= 0:
+            return
+        self._sequence_index -= 1
+        self.sequence_combo.setCurrentIndex(self._sequence_index)
+
+    def _show_next_sequence(self):
+        if self._sequence_index < 0:
+            return
+        if self._sequence_index >= len(self._sequence_paths) - 1:
+            return
+        self._sequence_index += 1
+        self.sequence_combo.setCurrentIndex(self._sequence_index)
+
+    def _load_sequence_image(self):
+        if self._sequence_index < 0 or self._sequence_index >= len(self._sequence_paths):
+            return
+        path = self._sequence_paths[self._sequence_index]
+        self.canvas.load_image(path)
+        self.prev_btn.setEnabled(self._sequence_index > 0)
+        self.next_btn.setEnabled(self._sequence_index < len(self._sequence_paths) - 1)
 
     def _preload_model(self):
         if not self._model.has_model():
