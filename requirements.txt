@@ -1,0 +1,8 @@
+onnx
+onnxscript
+onnxruntime
+opencv-python
+numpy
+pyinstaller
+scikit-image
+PyQt6
