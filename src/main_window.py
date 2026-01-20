@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.canvas, stretch=1)
 
         self.statusBar().showMessage("Ready")
+        self._wire_actions()
 
         self._start_size = self._initial_window_size()
         self.setGeometry(10, 10, *self._start_size)
@@ -206,6 +207,11 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         return panel
+
+    def _wire_actions(self):
+        self.open_image_btn.clicked.connect(self.canvas.load_image_dialog)
+        self.load_image_action.triggered.connect(self.canvas.load_image_dialog)
+        self.exit_action.triggered.connect(self.close)
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
