@@ -235,6 +235,10 @@ class MainWindow(QMainWindow):
         self.segment_action.triggered.connect(self._run_inference)
         self.save_btn.clicked.connect(self.canvas.save_mask_dialog)
         self.save_mask_action.triggered.connect(self.canvas.save_mask_dialog)
+        self.clear_btn.clicked.connect(self.canvas.clear_mask)
+        self.clear_mask_action.triggered.connect(self.canvas.clear_mask)
+        self.close_btn.clicked.connect(self.canvas.clear_image)
+        self.close_image_action.triggered.connect(self.canvas.clear_image)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
 
     def _center_window(self):

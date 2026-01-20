@@ -114,6 +114,20 @@ class Canvas(QWidget):
         self.mask_pixmap = None
         self.update()
 
+    def clear_mask(self):
+        if self.mask is None:
+            return
+        self.mask = None
+        self.mask_pixmap = None
+        self.update()
+
+    def clear_image(self):
+        self.image = None
+        self.pixmap = None
+        self.image_path = None
+        self.clear_mask()
+        self.update()
+
     def _read_image(self, file_path):
         lower_path = file_path.lower()
         if lower_path.endswith((".tif", ".tiff")):
