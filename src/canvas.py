@@ -71,8 +71,8 @@ class Canvas(QWidget):
             self.load_mask(path)
 
     def save_mask_dialog(self):
-        if self.mask is None:
-            QMessageBox.information(self, "No mask", "Run segmentation before saving a mask.")
+        if not self.has_mask_data():
+            QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")
             return
         default_path = ""
         if self.image_path:
@@ -89,7 +89,7 @@ class Canvas(QWidget):
             self.save_mask(path)
 
     def save_mask(self, file_path):
-        if self.mask is None:
+        if not self.has_mask_data():
             raise ValueError("No mask available to save.")
         mask_uint8 = (self.mask >= 0.5).astype(np.uint8) * 255
         lower_path = file_path.lower()
