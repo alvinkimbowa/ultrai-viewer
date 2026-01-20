@@ -35,12 +35,11 @@ class Canvas(QWidget):
         if self.mask is None:
             QMessageBox.information(self, "No mask", "Run segmentation before saving a mask.")
             return
-        default_dir = ""
-        default_name = "mask.tif"
+        default_path = ""
         if self.image_path:
             default_dir = os.path.dirname(self.image_path)
             default_name = os.path.basename(self.image_path)
-        default_path = os.path.join(default_dir, default_name) if default_dir else default_name
+            default_path = os.path.join(default_dir, default_name)
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Mask",

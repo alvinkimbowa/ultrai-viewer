@@ -15,6 +15,41 @@ class ModelIntegration:
     def has_model(self) -> bool:
         return bool(self._model_path)
 
+    def list_models(self) -> list[str]:
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        assets_dir = os.path.join(base_dir, "assets")
+        if not os.path.isdir(assets_dir):
+            return []
+        return [
+            os.path.splitext(name)[0]
+            for name in sorted(os.listdir(assets_dir))
+            if name.endswith((".onnx", ".nnx"))
+        ]
+
+    def set_model(self, name: str) -> None:
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        assets_dir = os.path.join(base_dir, "assets")
+        if not name:
+            self._model_path = None
+            self._session = None
+            return
+        candidate = os.path.join(assets_dir, name)
+        if not candidate.endswith((".onnx", ".nnx")):
+            candidate = f"{candidate}.onnx"
+        if not os.path.exists(candidate):
+            alt = f"{os.path.splitext(candidate)[0]}.nnx"
+            if os.path.exists(alt):
+                candidate = alt
+        if not os.path.exists(candidate):
+            raise FileNotFoundError(f"Model not found: {name}")
+        self._model_path = candidate
+        self._session = None
+
+    def current_model(self) -> str | None:
+        if not self._model_path:
+            return None
+        return os.path.splitext(os.path.basename(self._model_path))[0]
+
     def _locate_model(self) -> str | None:
         base_dir = os.path.dirname(os.path.dirname(__file__))
         assets_dir = os.path.join(base_dir, "assets")

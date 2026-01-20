@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self._wire_actions()
         self._model = ModelIntegration()
         self._last_prediction = None
+        self._init_model_picker()
 
         self._start_size = self._initial_window_size()
         self.setGeometry(10, 10, *self._start_size)
@@ -233,6 +234,7 @@ class MainWindow(QMainWindow):
         self.segment_action.triggered.connect(self._run_inference)
         self.save_btn.clicked.connect(self.canvas.save_mask_dialog)
         self.save_mask_action.triggered.connect(self.canvas.save_mask_dialog)
+        self.model_picker.currentIndexChanged.connect(self._on_model_changed)
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
@@ -266,6 +268,32 @@ class MainWindow(QMainWindow):
         height = max(min_h, height)
         self._sidebar_width = min(240, max(160, int(screen_rect.width() * 0.2)))
         return (width, height)
+
+    def _init_model_picker(self):
+        models = self._model.list_models()
+        if not models:
+            self.model_picker.clear()
+            self.model_picker.addItem("No models loaded")
+            self.model_picker.setEnabled(False)
+            return
+        self.model_picker.clear()
+        self.model_picker.addItems(models)
+        current = self._model.current_model()
+        if current and current in models:
+            self.model_picker.setCurrentText(current)
+        self.model_picker.setEnabled(True)
+
+    def _on_model_changed(self, index):
+        if not self.model_picker.isEnabled():
+            return
+        name = self.model_picker.currentText().strip()
+        if not name or name == "No models loaded":
+            return
+        try:
+            self._model.set_model(name)
+            self.statusBar().showMessage(f"Model selected: {name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Model error", str(exc))
 
     def _run_inference(self):
         if self.canvas.image is None:
