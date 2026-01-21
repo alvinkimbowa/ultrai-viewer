@@ -308,19 +308,26 @@ class Canvas(QWidget):
             self.mask_pixmap = None
             return
         height, width = self.mask.shape
+        color = np.array([255, 255, 180], dtype=np.uint8)
         if self.show_contour_only:
             binary = (self.mask > 0).astype(np.uint8)
             contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             rgba = np.zeros((height, width, 4), dtype=np.uint8)
-            contour_color = int(255 * self.mask_opacity)
-            cv2.drawContours(rgba, contours, -1, (0, 255, 0, contour_color), 1)
+            contour_alpha = int(255 * self.mask_opacity)
+            cv2.drawContours(
+                rgba,
+                contours,
+                -1,
+                (int(color[0]), int(color[1]), int(color[2]), int(contour_alpha)),
+                1,
+            )
         else:
             alpha = (self.mask * 255.0 * self.mask_opacity).astype(np.uint8)
-            rgb = (self.mask * 255.0).astype(np.uint8)
+            base = (self.mask * 255.0).astype(np.float32)
             rgba = np.zeros((height, width, 4), dtype=np.uint8)
-            rgba[:, :, 0] = rgb
-            rgba[:, :, 1] = rgb
-            rgba[:, :, 2] = rgb
+            rgba[:, :, 0] = (base * float(color[0]) / 255.0).astype(np.uint8)
+            rgba[:, :, 1] = (base * float(color[1]) / 255.0).astype(np.uint8)
+            rgba[:, :, 2] = (base * float(color[2]) / 255.0).astype(np.uint8)
             rgba[:, :, 3] = alpha
         bytes_per_line = rgba.strides[0]
         q_image = QImage(
