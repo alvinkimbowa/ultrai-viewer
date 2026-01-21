@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._base_title = "UltAI Viewer"
         self.setWindowTitle(self._base_title)
-        self._sidebar_width = 220
+        self._sidebar_width = 260
 
         self._create_menu_bar()
 
@@ -147,19 +147,20 @@ class MainWindow(QMainWindow):
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         layout.addWidget(QLabel("Single Image:"))
+        load_row = QHBoxLayout()
         self.open_image_btn = QPushButton("Load Image")
         configure_button(self.open_image_btn)
-        layout.addWidget(self.open_image_btn)
-
+        load_row.addWidget(self.open_image_btn)
         self.open_mask_btn = QPushButton("Load Mask")
         configure_button(self.open_mask_btn)
-        layout.addWidget(self.open_mask_btn)
+        load_row.addWidget(self.open_mask_btn)
+        layout.addLayout(load_row)
 
         self.fit_btn = QPushButton("Fit to Window")
         configure_button(self.fit_btn)
         layout.addWidget(self.fit_btn)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
         layout.addWidget(QLabel("Image Sequence:"))
         self.sequence_btn = QPushButton("Load image sequence")
@@ -184,7 +185,7 @@ class MainWindow(QMainWindow):
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
         model_device_row = QHBoxLayout()
         model_device_row.addWidget(QLabel("Model:"))
@@ -199,23 +200,26 @@ class MainWindow(QMainWindow):
         model_device_row.addWidget(self.device_picker)
         layout.addLayout(model_device_row)
 
+        segment_row = QHBoxLayout()
         self.run_btn = QPushButton("Segment")
         configure_button(self.run_btn)
-        layout.addWidget(self.run_btn)
-
+        segment_row.addWidget(self.run_btn)
         self.run_batch_btn = QPushButton("Batch segment")
         configure_button(self.run_batch_btn)
-        layout.addWidget(self.run_batch_btn)
+        segment_row.addWidget(self.run_batch_btn)
+        layout.addLayout(segment_row)
 
-        layout.addSpacing(10)
+        layout.addSpacing(20)
 
-        layout.addWidget(QLabel("Tools:"))
+        tools_row = QHBoxLayout()
+        tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
         self.tool_picker.addItems(
             ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser"]
         )
         self.tool_picker.setCurrentIndex(0)
-        layout.addWidget(self.tool_picker)
+        tools_row.addWidget(self.tool_picker)
+        layout.addLayout(tools_row)
 
         self.fill_roi_checkbox = QCheckBox("Fill ROI")
         self.fill_roi_checkbox.setChecked(False)
@@ -231,7 +235,7 @@ class MainWindow(QMainWindow):
         opacity_row.addWidget(self.opacity_slider)
         layout.addLayout(opacity_row)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
         brush_row = QHBoxLayout()
         brush_label = QLabel("Tool Radius:")
@@ -245,29 +249,31 @@ class MainWindow(QMainWindow):
         brush_row.addWidget(self.brush_radius_label)
         layout.addLayout(brush_row)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
+        undo_redo_row = QHBoxLayout()
         self.undo_btn = QPushButton("Undo")
         configure_button(self.undo_btn)
-        layout.addWidget(self.undo_btn)
-
+        undo_redo_row.addWidget(self.undo_btn)
         self.redo_btn = QPushButton("Redo")
         configure_button(self.redo_btn)
-        layout.addWidget(self.redo_btn)
+        undo_redo_row.addWidget(self.redo_btn)
+        layout.addLayout(undo_redo_row)
 
-        layout.addSpacing(10)
+        layout.addSpacing(20)
 
         self.save_btn = QPushButton("Save mask")
         configure_button(self.save_btn)
         layout.addWidget(self.save_btn)
 
+        clear_row = QHBoxLayout()
         self.clear_btn = QPushButton("Clear Mask")
         configure_button(self.clear_btn)
-        layout.addWidget(self.clear_btn)
-
+        clear_row.addWidget(self.clear_btn)
         self.close_btn = QPushButton("Close Image")
         configure_button(self.close_btn)
-        layout.addWidget(self.close_btn)
+        clear_row.addWidget(self.close_btn)
+        layout.addLayout(clear_row)
 
         layout.addStretch()
 
@@ -344,7 +350,7 @@ class MainWindow(QMainWindow):
         min_h = min(650, max_h)
         width = max(min_w, width)
         height = max(min_h, height)
-        self._sidebar_width = min(240, max(160, int(screen_rect.width() * 0.2)))
+        self._sidebar_width = min(260, max(180, int(screen_rect.width() * 0.22)))
         return (width, height)
 
     def _on_tool_changed(self, index):
