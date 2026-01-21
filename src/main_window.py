@@ -158,7 +158,7 @@ class MainWindow(QMainWindow):
         configure_button(self.fit_btn)
         layout.addWidget(self.fit_btn)
 
-        layout.addSpacing(10)
+        layout.addSpacing(5)
 
         layout.addWidget(QLabel("Image Sequence:"))
         self.sequence_btn = QPushButton("Load image sequence")
@@ -183,7 +183,7 @@ class MainWindow(QMainWindow):
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
 
-        layout.addSpacing(10)
+        layout.addSpacing(5)
 
         layout.addWidget(QLabel("Model:"))
         self.model_picker = QComboBox()
@@ -199,7 +199,7 @@ class MainWindow(QMainWindow):
         configure_button(self.run_batch_btn)
         layout.addWidget(self.run_batch_btn)
 
-        layout.addSpacing(20)
+        layout.addSpacing(10)
 
         layout.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
@@ -213,7 +213,14 @@ class MainWindow(QMainWindow):
         self.fill_roi_checkbox.setChecked(False)
         layout.addWidget(self.fill_roi_checkbox)
 
-        layout.addSpacing(10)
+        layout.addWidget(QLabel("Mask Opacity:"))
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setMinimum(0)
+        self.opacity_slider.setMaximum(100)
+        self.opacity_slider.setValue(50)
+        layout.addWidget(self.opacity_slider)
+
+        layout.addSpacing(5)
 
         layout.addWidget(QLabel("Brush Radius:"))
         self.brush_radius = QSlider(Qt.Orientation.Horizontal)
@@ -224,7 +231,7 @@ class MainWindow(QMainWindow):
         self.brush_radius_label = QLabel("4 px")
         layout.addWidget(self.brush_radius_label)
 
-        layout.addSpacing(10)
+        layout.addSpacing(5)
 
         self.undo_btn = QPushButton("Undo")
         configure_button(self.undo_btn)
@@ -233,15 +240,6 @@ class MainWindow(QMainWindow):
         self.redo_btn = QPushButton("Redo")
         configure_button(self.redo_btn)
         layout.addWidget(self.redo_btn)
-
-        layout.addSpacing(20)
-
-        layout.addWidget(QLabel("Mask Opacity:"))
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setMinimum(0)
-        self.opacity_slider.setMaximum(100)
-        self.opacity_slider.setValue(50)
-        layout.addWidget(self.opacity_slider)
 
         layout.addSpacing(10)
 
@@ -324,7 +322,7 @@ class MainWindow(QMainWindow):
         max_w = max(300, screen_rect.width() - margin)
         max_h = max(300, screen_rect.height() - margin)
         target_w = int(screen_rect.width() * 0.75)
-        target_h = int(screen_rect.height() * 0.75)
+        target_h = int(screen_rect.height() * 1)
         width = min(target_w, max_w)
         height = min(target_h, max_h)
         min_w = min(250, max_w)
