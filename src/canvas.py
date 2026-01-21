@@ -32,6 +32,7 @@ class Canvas(QWidget):
         self._poly_points = []
         self._freehand_points = []
         self._last_outline = []
+        self._cursor_pos = None
 
         self.scale = 1.0
         self.min_scale = 0.1
@@ -450,7 +451,10 @@ class Canvas(QWidget):
     def mouseMoveEvent(self, event):
         if self.image is None:
             return
+        self._cursor_pos = self._screen_to_image(event.position().toPoint())
         if not self._drawing:
+            if self.tool in ("brush", "eraser"):
+                self.update()
             return
         point = self._screen_to_image(event.position().toPoint())
         if point is None:
@@ -492,6 +496,10 @@ class Canvas(QWidget):
             self._drawing = False
             self._last_point = None
             self.update()
+
+    def leaveEvent(self, event):
+        self._cursor_pos = None
+        self.update()
 
     def mouseDoubleClickEvent(self, event):
         if self.tool == "polyline":
@@ -541,6 +549,14 @@ class Canvas(QWidget):
                 start = self._image_to_screen(self._last_outline[-1])
                 end = self._image_to_screen(self._last_outline[0])
                 painter.drawLine(start, end)
+
+        if self._cursor_pos is not None and self.tool in ("brush", "eraser"):
+            scale, _, _ = self._current_view()
+            radius = max(1, int(self.brush_radius * scale))
+            center = self._image_to_screen(self._cursor_pos)
+            painter.setPen(QPen(QColor(0, 255, 0), 1, Qt.PenStyle.SolidLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(center, radius, radius)
 
     def undo(self):
         if len(self._undo_stack) <= 1:

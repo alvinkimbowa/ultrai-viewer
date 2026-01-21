@@ -205,12 +205,14 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(10)
 
-        layout.addWidget(QLabel("Brush Radius:"))
+        layout.addWidget(QLabel("Brush/Eraser Radius:"))
         self.brush_radius = QSlider(Qt.Orientation.Horizontal)
         self.brush_radius.setMinimum(1)
         self.brush_radius.setMaximum(50)
         self.brush_radius.setValue(4)
         layout.addWidget(self.brush_radius)
+        self.brush_radius_label = QLabel("4 px")
+        layout.addWidget(self.brush_radius_label)
 
         self.fill_roi_checkbox = QCheckBox("Fill ROI")
         self.fill_roi_checkbox.setChecked(False)
@@ -275,7 +277,7 @@ class MainWindow(QMainWindow):
         self.close_btn.clicked.connect(self.canvas.clear_image)
         self.close_image_action.triggered.connect(self.canvas.clear_image)
         self.tool_picker.currentIndexChanged.connect(self._on_tool_changed)
-        self.brush_radius.valueChanged.connect(self.canvas.set_brush_radius)
+        self.brush_radius.valueChanged.connect(self._on_brush_radius_changed)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
         self.fill_roi_checkbox.toggled.connect(self.canvas.set_fill_roi)
@@ -337,6 +339,11 @@ class MainWindow(QMainWindow):
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
+
+    def _on_brush_radius_changed(self, value):
+        self.canvas.set_brush_radius(value)
+        if hasattr(self, "brush_radius_label"):
+            self.brush_radius_label.setText(f"{int(value)} px")
 
     def _run_batch_inference(self):
         if not self._sequence_paths:
