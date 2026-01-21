@@ -20,6 +20,7 @@ class Canvas(QWidget):
         self.mask = None
         self.mask_pixmap = None
         self.mask_opacity = 0.5
+        self.show_contour_only = True
         self._undo_stack = []
         self._redo_stack = []
         self._mask_touched = False
@@ -178,6 +179,12 @@ class Canvas(QWidget):
             self._refresh_mask_pixmap()
         self.update()
 
+    def set_contour_only(self, enabled):
+        self.show_contour_only = bool(enabled)
+        if self.mask is not None:
+            self._refresh_mask_pixmap()
+        self.update()
+
     def set_tool(self, tool_name):
         self.tool = tool_name
         self._drawing = False
@@ -190,6 +197,7 @@ class Canvas(QWidget):
 
     def set_fill_roi(self, enabled):
         self.fill_roi = bool(enabled)
+        self.show_contour_only = not self.fill_roi
         if self.fill_roi and self._last_outline:
             self._ensure_mask()
             points = np.array(
@@ -197,10 +205,11 @@ class Canvas(QWidget):
                 dtype=np.int32,
             ).reshape((-1, 1, 2))
             cv2.fillPoly(self.mask, [points], 1.0)
-            self._refresh_mask_pixmap()
             self._push_history()
             self._mask_touched = True
-            self.update()
+        if self.mask is not None:
+            self._refresh_mask_pixmap()
+        self.update()
 
     def fit_to_window(self):
         if self.pixmap is None:
@@ -299,13 +308,20 @@ class Canvas(QWidget):
             self.mask_pixmap = None
             return
         height, width = self.mask.shape
-        alpha = (self.mask * 255.0 * self.mask_opacity).astype(np.uint8)
-        rgb = (self.mask * 255.0).astype(np.uint8)
-        rgba = np.zeros((height, width, 4), dtype=np.uint8)
-        rgba[:, :, 0] = rgb
-        rgba[:, :, 1] = rgb
-        rgba[:, :, 2] = rgb
-        rgba[:, :, 3] = alpha
+        if self.show_contour_only:
+            binary = (self.mask > 0).astype(np.uint8)
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            contour_color = int(255 * self.mask_opacity)
+            cv2.drawContours(rgba, contours, -1, (0, 255, 0, contour_color), 1)
+        else:
+            alpha = (self.mask * 255.0 * self.mask_opacity).astype(np.uint8)
+            rgb = (self.mask * 255.0).astype(np.uint8)
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            rgba[:, :, 0] = rgb
+            rgba[:, :, 1] = rgb
+            rgba[:, :, 2] = rgb
+            rgba[:, :, 3] = alpha
         bytes_per_line = rgba.strides[0]
         q_image = QImage(
             rgba.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888

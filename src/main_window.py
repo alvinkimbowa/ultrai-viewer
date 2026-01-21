@@ -333,7 +333,10 @@ class MainWindow(QMainWindow):
             3: "brush",
             4: "eraser",
         }
-        self.canvas.set_tool(tool_map.get(index, "pan"))
+        tool = tool_map.get(index, "select")
+        self.canvas.set_tool(tool)
+        if tool in ("brush", "eraser"):
+            self.fill_roi_checkbox.setChecked(True)
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
