@@ -447,6 +447,8 @@ class MainWindow(QMainWindow):
     def _on_batch_finished(self, processed):
         self.statusBar().showMessage(f"Batch segmentation complete: {processed} images.")
         self._close_batch_dialog()
+        if self._sequence_paths and self._sequence_index >= 0:
+            self._load_sequence_image()
 
     def _on_batch_canceled(self):
         self.statusBar().showMessage("Batch segmentation canceled")
