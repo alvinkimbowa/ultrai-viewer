@@ -158,6 +158,9 @@ class MainWindow(QMainWindow):
         self.sequence_btn = QPushButton("Load image sequence")
         configure_button(self.sequence_btn)
         layout.addWidget(self.sequence_btn)
+        self.clear_sequence_btn = QPushButton("Clear sequence")
+        configure_button(self.clear_sequence_btn)
+        layout.addWidget(self.clear_sequence_btn)
         self.sequence_combo = QComboBox()
         self.sequence_combo.setEnabled(False)
         layout.addWidget(self.sequence_combo)
@@ -282,6 +285,7 @@ class MainWindow(QMainWindow):
         self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.sequence_btn.clicked.connect(self._load_sequence)
+        self.clear_sequence_btn.clicked.connect(self._clear_sequence)
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
         self.prev_btn.clicked.connect(self._show_previous_sequence)
         self.next_btn.clicked.connect(self._show_next_sequence)
@@ -460,6 +464,17 @@ class MainWindow(QMainWindow):
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(len(self._sequence_paths) > 1)
         self._load_sequence_image()
+
+    def _clear_sequence(self):
+        self._sequence_paths = []
+        self._sequence_index = -1
+        self._sequence_output_dir = None
+        self.sequence_combo.clear()
+        self.sequence_combo.setEnabled(False)
+        self.prev_btn.setEnabled(False)
+        self.next_btn.setEnabled(False)
+        self.canvas.clear_image()
+        self.statusBar().showMessage("Sequence cleared")
 
     def _on_sequence_selected(self, index):
         if index < 0 or index >= len(self._sequence_paths):
