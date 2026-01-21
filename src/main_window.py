@@ -200,6 +200,8 @@ class MainWindow(QMainWindow):
         model_device_row.addWidget(self.device_picker)
         layout.addLayout(model_device_row)
 
+        layout.addSpacing(3)
+
         segment_row = QHBoxLayout()
         self.run_btn = QPushButton("Segment")
         configure_button(self.run_btn)
@@ -209,7 +211,7 @@ class MainWindow(QMainWindow):
         segment_row.addWidget(self.run_batch_btn)
         layout.addLayout(segment_row)
 
-        layout.addSpacing(20)
+        layout.addSpacing(15)
 
         tools_row = QHBoxLayout()
         tools_row.addWidget(QLabel("Tools:"))
@@ -219,11 +221,12 @@ class MainWindow(QMainWindow):
         )
         self.tool_picker.setCurrentIndex(0)
         tools_row.addWidget(self.tool_picker)
+        self.fill_roi_checkbox = QCheckBox("Fill ROI")
+        tools_row.addWidget(self.fill_roi_checkbox)
+        self.fill_roi_checkbox.setChecked(False)
         layout.addLayout(tools_row)
 
-        self.fill_roi_checkbox = QCheckBox("Fill ROI")
-        self.fill_roi_checkbox.setChecked(False)
-        layout.addWidget(self.fill_roi_checkbox)
+        layout.addSpacing(5)
 
         opacity_row = QHBoxLayout()
         opacity_label = QLabel("Mask Opacity:")
@@ -260,7 +263,7 @@ class MainWindow(QMainWindow):
         undo_redo_row.addWidget(self.redo_btn)
         layout.addLayout(undo_redo_row)
 
-        layout.addSpacing(20)
+        layout.addSpacing(5)
 
         self.save_btn = QPushButton("Save mask")
         configure_button(self.save_btn)
