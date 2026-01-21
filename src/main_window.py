@@ -29,7 +29,7 @@ from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 
 from .canvas import Canvas
-from .model_integration import ModelIntegration
+from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from threading import Event
 from pathlib import Path
 import numpy as np
@@ -768,12 +768,7 @@ class MainWindow(QMainWindow):
             self._gpu_warning = None
             self.statusBar().showMessage(f"Device selected: {self.device_picker.currentText()}")
         except Exception as exc:
-            self._gpu_warning = (
-                "GPU selected but could not be used. Falling back to CPU.\n\n"
-                "This usually means there is no supported GPU or required drivers "
-                "(NVIDIA driver/CUDA/cuDNN) are missing.\n\n"
-                f"Details: {exc}"
-            )
+            self._gpu_warning = f"{GPU_FALLBACK_WARNING}\n\nDetails: {exc}"
             self._select_cpu_device(show_warning=True)
 
     def _run_inference(self):

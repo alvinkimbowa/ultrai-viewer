@@ -9,6 +9,13 @@ import numpy as np
 import cv2
 
 
+GPU_FALLBACK_WARNING = (
+    "GPU selected but could not be used. Falling back to CPU.\n\n"
+    "This usually means there is no supported GPU or required drivers "
+    "(NVIDIA driver/CUDA/cuDNN) are missing."
+)
+
+
 class ModelIntegration:
     def __init__(self, model_path: str | None = None):
         self._model_path = model_path or self._locate_model()
@@ -112,11 +119,7 @@ class ModelIntegration:
         providers = ort.get_available_providers()
         selected = self._device_provider
         if selected not in providers:
-            self._device_warning = (
-                "GPU selected but not available on this machine. Falling back to CPU. "
-                "This usually means there is no supported GPU or required drivers "
-                "(NVIDIA driver/CUDA/cuDNN) are missing."
-            )
+            self._device_warning = GPU_FALLBACK_WARNING
             selected = "CPUExecutionProvider"
         provider_list = [selected]
         if selected != "CPUExecutionProvider" and "CPUExecutionProvider" in providers:
@@ -130,9 +133,7 @@ class ModelIntegration:
         except Exception as exc:
             if selected != "CPUExecutionProvider":
                 self._device_warning = (
-                    "GPU selected but could not be used. Falling back to CPU. "
-                    "This usually means the GPU is unsupported or required drivers "
-                    "(NVIDIA driver/CUDA/cuDNN) are missing."
+                    GPU_FALLBACK_WARNING
                 )
                 with self._redirect_stderr_to_log():
                     self._session = ort.InferenceSession(
@@ -147,11 +148,7 @@ class ModelIntegration:
             except Exception:
                 active_providers = []
             if not active_providers or active_providers[0] != selected:
-                self._device_warning = (
-                    "GPU selected but could not be used. Falling back to CPU. "
-                    "This usually means the GPU is unsupported or required drivers "
-                    "(NVIDIA driver/CUDA/cuDNN) are missing."
-                )
+                self._device_warning = GPU_FALLBACK_WARNING
         return self._session
 
     @contextlib.contextmanager
