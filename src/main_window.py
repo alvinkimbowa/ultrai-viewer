@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
         layout.addSpacing(10)
 
         layout.addWidget(QLabel("Brush Radius:"))
-        self.brush_radius = QSpinBox()
+        self.brush_radius = QSlider(Qt.Orientation.Horizontal)
         self.brush_radius.setMinimum(1)
         self.brush_radius.setMaximum(50)
         self.brush_radius.setValue(4)
