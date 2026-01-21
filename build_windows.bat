@@ -8,6 +8,9 @@ set "ULTAI_ARCH=x86"
 set "APP_NAME=UltrAiViewer-%VERSION%-%ULTAI_OS%-%ULTAI_ARCH%"
 
 py -m PyInstaller --noconfirm --clean UltrAiViewer.spec
+
+cp "User Guide - UltrAi Viewer.pdf" "dist/%APP_NAME%/User Guide - UltrAi Viewer.pdf"
+
 if errorlevel 1 exit /b 1
 
 echo Build complete: dist\%APP_NAME%
