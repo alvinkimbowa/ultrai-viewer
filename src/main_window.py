@@ -327,7 +327,7 @@ class MainWindow(QMainWindow):
         margin = 40
         max_w = max(700, screen_rect.width() - margin)
         max_h = max(300, screen_rect.height() - margin)
-        target_w = int(screen_rect.width() * 0.45)
+        target_w = int(screen_rect.width() * 0.35)
         target_h = int(screen_rect.height() * 0.45)
         width = min(target_w, max_w)
         height = min(target_h, max_h)
