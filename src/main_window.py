@@ -152,6 +152,10 @@ class MainWindow(QMainWindow):
         configure_button(self.open_mask_btn)
         layout.addWidget(self.open_mask_btn)
 
+        self.fit_btn = QPushButton("Fit to Window")
+        configure_button(self.fit_btn)
+        layout.addWidget(self.fit_btn)
+
         layout.addSpacing(10)
 
         layout.addWidget(QLabel("Image Sequence:"))
@@ -203,9 +207,13 @@ class MainWindow(QMainWindow):
         self.tool_picker.setCurrentIndex(0)
         layout.addWidget(self.tool_picker)
 
+        self.fill_roi_checkbox = QCheckBox("Fill ROI")
+        self.fill_roi_checkbox.setChecked(False)
+        layout.addWidget(self.fill_roi_checkbox)
+
         layout.addSpacing(10)
 
-        layout.addWidget(QLabel("Brush/Eraser Radius:"))
+        layout.addWidget(QLabel("Brush Radius:"))
         self.brush_radius = QSlider(Qt.Orientation.Horizontal)
         self.brush_radius.setMinimum(1)
         self.brush_radius.setMaximum(50)
@@ -213,10 +221,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.brush_radius)
         self.brush_radius_label = QLabel("4 px")
         layout.addWidget(self.brush_radius_label)
-
-        self.fill_roi_checkbox = QCheckBox("Fill ROI")
-        self.fill_roi_checkbox.setChecked(False)
-        layout.addWidget(self.fill_roi_checkbox)
 
         layout.addSpacing(10)
 
@@ -238,12 +242,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.opacity_slider)
 
         layout.addSpacing(10)
-
-        self.fit_btn = QPushButton("Fit to Window")
-        configure_button(self.fit_btn)
-        layout.addWidget(self.fit_btn)
-
-        layout.addSpacing(20)
 
         self.save_btn = QPushButton("Save mask")
         configure_button(self.save_btn)
