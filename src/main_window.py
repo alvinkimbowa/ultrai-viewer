@@ -32,6 +32,9 @@ from .canvas import Canvas
 from .model_integration import ModelIntegration
 from threading import Event
 from pathlib import Path
+import numpy as np
+import cv2
+import tifffile
 
 
 class MainWindow(QMainWindow):
@@ -74,6 +77,9 @@ class MainWindow(QMainWindow):
         self._sequence_paths = []
         self._sequence_index = -1
         self._sequence_output_dir = None
+        self._batch_thread = None
+        self._batch_worker = None
+        self._batch_dialog = None
         self._preload_model()
         self._init_model_picker()
 
@@ -257,6 +263,8 @@ class MainWindow(QMainWindow):
         self.exit_action.triggered.connect(self.close)
         self.run_btn.clicked.connect(self._run_inference)
         self.segment_action.triggered.connect(self._run_inference)
+        self.run_batch_btn.clicked.connect(self._run_batch_inference)
+        self.segment_batch_action.triggered.connect(self._run_batch_inference)
         self.save_btn.clicked.connect(self.canvas.save_mask_dialog)
         self.save_mask_action.triggered.connect(self.canvas.save_mask_dialog)
         self.clear_btn.clicked.connect(self.canvas.clear_mask)
@@ -325,6 +333,108 @@ class MainWindow(QMainWindow):
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
+
+    def _run_batch_inference(self):
+        if not self._sequence_paths:
+            QMessageBox.information(self, "No sequence", "Load an image sequence first.")
+            return
+        if not self._sequence_output_dir:
+            QMessageBox.information(self, "No output folder", "Select an output folder first.")
+            return
+        if not self._model.has_model():
+            QMessageBox.warning(
+                self,
+                "No model",
+                "No ONNX model found in assets/.",
+            )
+            return
+        if self._batch_thread and self._batch_thread.isRunning():
+            self.statusBar().showMessage("Batch segmentation already running...")
+            return
+
+        total = len(self._sequence_paths)
+        self.statusBar().showMessage("Running batch segmentation...")
+        self._show_batch_dialog(total)
+
+        self._batch_thread = QThread(self)
+        self._batch_worker = BatchInferenceWorker(
+            self._model,
+            list(self._sequence_paths),
+            self._sequence_output_dir,
+        )
+        self._batch_worker.moveToThread(self._batch_thread)
+        self._batch_thread.started.connect(self._batch_worker.run)
+        self._batch_worker.progress.connect(self._on_batch_progress)
+        self._batch_worker.image_started.connect(self._on_batch_image_started)
+        self._batch_worker.finished.connect(self._on_batch_finished)
+        self._batch_worker.canceled.connect(self._on_batch_canceled)
+        self._batch_worker.error.connect(self._on_batch_error)
+        self._batch_worker.finished.connect(self._batch_thread.quit)
+        self._batch_worker.canceled.connect(self._batch_thread.quit)
+        self._batch_worker.error.connect(self._batch_thread.quit)
+        self._batch_worker.finished.connect(self._batch_worker.deleteLater)
+        self._batch_worker.canceled.connect(self._batch_worker.deleteLater)
+        self._batch_worker.error.connect(self._batch_worker.deleteLater)
+        self._batch_thread.finished.connect(self._on_batch_thread_done)
+        self._batch_thread.finished.connect(self._batch_thread.deleteLater)
+        self._batch_thread.start()
+
+    def _show_batch_dialog(self, total):
+        if self._batch_dialog is not None:
+            self._batch_dialog.close()
+        self._batch_dialog = QProgressDialog(
+            "Running batch segmentation...",
+            "Cancel",
+            0,
+            total,
+            self,
+        )
+        self._batch_dialog.setWindowTitle("Batch segment")
+        self._batch_dialog.setMinimumDuration(0)
+        self._batch_dialog.setAutoClose(False)
+        self._batch_dialog.setAutoReset(False)
+        self._batch_dialog.canceled.connect(self._request_batch_cancel)
+        self._batch_dialog.show()
+
+    def _close_batch_dialog(self):
+        if self._batch_dialog is None:
+            return
+        self._batch_dialog.close()
+        self._batch_dialog = None
+
+    def _request_batch_cancel(self):
+        if self._batch_worker:
+            self._batch_worker.cancel()
+        self.statusBar().showMessage("Canceling batch segmentation...")
+        if self._batch_dialog:
+            self._batch_dialog.setLabelText("Canceling batch segmentation...")
+
+    def _on_batch_progress(self, current, total):
+        if self._batch_dialog:
+            self._batch_dialog.setValue(current)
+            self._batch_dialog.setLabelText(f"Segmenting image {current}/{total}")
+
+    def _on_batch_image_started(self, image_path, index, total):
+        if self._batch_dialog:
+            name = Path(image_path).name
+            self._batch_dialog.setLabelText(f"Segmenting {name} ({index}/{total})")
+
+    def _on_batch_finished(self, processed):
+        self.statusBar().showMessage(f"Batch segmentation complete: {processed} images.")
+        self._close_batch_dialog()
+
+    def _on_batch_canceled(self):
+        self.statusBar().showMessage("Batch segmentation canceled")
+        self._close_batch_dialog()
+
+    def _on_batch_error(self, message):
+        QMessageBox.warning(self, "Batch error", message)
+        self.statusBar().showMessage("Batch segmentation failed")
+        self._close_batch_dialog()
+
+    def _on_batch_thread_done(self):
+        self._batch_thread = None
+        self._batch_worker = None
 
     def _load_sequence(self):
         dialog_result = self._show_sequence_dialog()
@@ -616,3 +726,74 @@ class InferenceWorker(QObject):
             self.canceled.emit()
             return
         self.finished.emit(prediction)
+
+
+class BatchInferenceWorker(QObject):
+    finished = pyqtSignal(int)
+    canceled = pyqtSignal()
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, int)
+    image_started = pyqtSignal(str, int, int)
+
+    def __init__(self, model, image_paths, output_dir):
+        super().__init__()
+        self._model = model
+        self._image_paths = list(image_paths)
+        self._output_dir = output_dir
+        self._cancel_event = Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    @pyqtSlot()
+    def run(self):
+        total = len(self._image_paths)
+        if total == 0:
+            self.error.emit("No images found for batch segmentation.")
+            return
+        processed = 0
+        for idx, image_path in enumerate(self._image_paths, start=1):
+            if self._cancel_event.is_set():
+                self.canceled.emit()
+                return
+            self.image_started.emit(image_path, idx, total)
+            try:
+                image = self._load_image(image_path)
+                prediction = self._model.run_inference(
+                    image,
+                    cancel_event=self._cancel_event,
+                )
+                self._save_mask(prediction, image_path)
+            except Exception as exc:
+                if str(exc).lower().startswith("inference canceled"):
+                    self.canceled.emit()
+                    return
+                self.error.emit(str(exc))
+                return
+            processed += 1
+            self.progress.emit(processed, total)
+        self.finished.emit(processed)
+
+    def _load_image(self, file_path):
+        lower_path = file_path.lower()
+        if lower_path.endswith((".tif", ".tiff")):
+            image = tifffile.imread(file_path)
+        else:
+            image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if image is None:
+                raise ValueError(f"Unsupported image format: {file_path}")
+            if image.ndim == 3:
+                if image.shape[2] == 3:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                elif image.shape[2] == 4:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+        if image is None:
+            raise ValueError(f"Unsupported image format: {file_path}")
+        return image
+
+    def _save_mask(self, prediction, image_path):
+        if prediction is None:
+            return
+        mask_uint8 = (prediction >= 0.5).astype(np.uint8) * 255
+        output_path = Path(self._output_dir) / f"{Path(image_path).stem}.png"
+        cv2.imwrite(str(output_path), mask_uint8)
