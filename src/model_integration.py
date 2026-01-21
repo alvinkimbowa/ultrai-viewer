@@ -115,7 +115,21 @@ class ModelIntegration:
             data = np.argmax(data, axis=0)
         if data.ndim >= 2:
             data = np.squeeze(data)
-        return data
+        return self._largest_component(data)
+
+    def _largest_component(self, mask):
+        binary = np.asarray(mask) > 0
+        if binary.ndim != 2:
+            binary = np.squeeze(binary)
+        if binary.size == 0 or not np.any(binary):
+            return np.zeros_like(binary, dtype=np.uint8)
+        count, labels = cv2.connectedComponents(binary.astype(np.uint8), connectivity=8)
+        if count <= 1:
+            return binary.astype(np.uint8)
+        sizes = np.bincount(labels.ravel())
+        sizes[0] = 0
+        largest = int(np.argmax(sizes))
+        return (labels == largest).astype(np.uint8)
 
     def run_inference(self, image, cancel_event=None) -> np.ndarray:
         if cancel_event is not None and cancel_event.is_set():
