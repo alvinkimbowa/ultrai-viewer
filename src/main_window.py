@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._base_title = "UltAI Viewer"
         self.setWindowTitle(self._base_title)
-        self._sidebar_width = 220
+        self._sidebar_width = 260
 
         self._create_menu_bar()
 
@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         self._batch_dialog = None
         self._preload_model()
         self._init_model_picker()
+        self._init_device_picker()
 
         self._start_size = self._initial_window_size()
         self.setGeometry(10, 10, *self._start_size)
@@ -146,19 +147,20 @@ class MainWindow(QMainWindow):
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         layout.addWidget(QLabel("Single Image:"))
+        load_row = QHBoxLayout()
         self.open_image_btn = QPushButton("Load Image")
         configure_button(self.open_image_btn)
-        layout.addWidget(self.open_image_btn)
-
+        load_row.addWidget(self.open_image_btn)
         self.open_mask_btn = QPushButton("Load Mask")
         configure_button(self.open_mask_btn)
-        layout.addWidget(self.open_mask_btn)
+        load_row.addWidget(self.open_mask_btn)
+        layout.addLayout(load_row)
 
         self.fit_btn = QPushButton("Fit to Window")
         configure_button(self.fit_btn)
         layout.addWidget(self.fit_btn)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
         layout.addWidget(QLabel("Image Sequence:"))
         self.sequence_btn = QPushButton("Load image sequence")
@@ -183,31 +185,41 @@ class MainWindow(QMainWindow):
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
-        layout.addWidget(QLabel("Model:"))
+        model_device_row = QHBoxLayout()
+        model_device_row.addWidget(QLabel("Model:"))
         self.model_picker = QComboBox()
         self.model_picker.addItem("No models loaded")
         self.model_picker.setEnabled(False)
-        layout.addWidget(self.model_picker)
+        model_device_row.addWidget(self.model_picker)
+        model_device_row.addSpacing(6)
+        model_device_row.addWidget(QLabel("Device:"))
+        self.device_picker = QComboBox()
+        self.device_picker.setEnabled(False)
+        model_device_row.addWidget(self.device_picker)
+        layout.addLayout(model_device_row)
 
+        segment_row = QHBoxLayout()
         self.run_btn = QPushButton("Segment")
         configure_button(self.run_btn)
-        layout.addWidget(self.run_btn)
-
+        segment_row.addWidget(self.run_btn)
         self.run_batch_btn = QPushButton("Batch segment")
         configure_button(self.run_batch_btn)
-        layout.addWidget(self.run_batch_btn)
+        segment_row.addWidget(self.run_batch_btn)
+        layout.addLayout(segment_row)
 
-        layout.addSpacing(10)
+        layout.addSpacing(20)
 
-        layout.addWidget(QLabel("Tools:"))
+        tools_row = QHBoxLayout()
+        tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
         self.tool_picker.addItems(
             ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser"]
         )
         self.tool_picker.setCurrentIndex(0)
-        layout.addWidget(self.tool_picker)
+        tools_row.addWidget(self.tool_picker)
+        layout.addLayout(tools_row)
 
         self.fill_roi_checkbox = QCheckBox("Fill ROI")
         self.fill_roi_checkbox.setChecked(False)
@@ -223,7 +235,7 @@ class MainWindow(QMainWindow):
         opacity_row.addWidget(self.opacity_slider)
         layout.addLayout(opacity_row)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
         brush_row = QHBoxLayout()
         brush_label = QLabel("Tool Radius:")
@@ -237,29 +249,31 @@ class MainWindow(QMainWindow):
         brush_row.addWidget(self.brush_radius_label)
         layout.addLayout(brush_row)
 
-        layout.addSpacing(5)
+        layout.addSpacing(10)
 
+        undo_redo_row = QHBoxLayout()
         self.undo_btn = QPushButton("Undo")
         configure_button(self.undo_btn)
-        layout.addWidget(self.undo_btn)
-
+        undo_redo_row.addWidget(self.undo_btn)
         self.redo_btn = QPushButton("Redo")
         configure_button(self.redo_btn)
-        layout.addWidget(self.redo_btn)
+        undo_redo_row.addWidget(self.redo_btn)
+        layout.addLayout(undo_redo_row)
 
-        layout.addSpacing(10)
+        layout.addSpacing(20)
 
         self.save_btn = QPushButton("Save mask")
         configure_button(self.save_btn)
         layout.addWidget(self.save_btn)
 
+        clear_row = QHBoxLayout()
         self.clear_btn = QPushButton("Clear Mask")
         configure_button(self.clear_btn)
-        layout.addWidget(self.clear_btn)
-
+        clear_row.addWidget(self.clear_btn)
         self.close_btn = QPushButton("Close Image")
         configure_button(self.close_btn)
-        layout.addWidget(self.close_btn)
+        clear_row.addWidget(self.close_btn)
+        layout.addLayout(clear_row)
 
         layout.addStretch()
 
@@ -290,6 +304,7 @@ class MainWindow(QMainWindow):
         self.undo_action.triggered.connect(self.canvas.undo)
         self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
+        self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.sequence_btn.clicked.connect(self._load_sequence)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
@@ -335,7 +350,7 @@ class MainWindow(QMainWindow):
         min_h = min(650, max_h)
         width = max(min_w, width)
         height = max(min_h, height)
-        self._sidebar_width = min(240, max(160, int(screen_rect.width() * 0.2)))
+        self._sidebar_width = min(260, max(180, int(screen_rect.width() * 0.22)))
         return (width, height)
 
     def _on_tool_changed(self, index):
@@ -447,6 +462,8 @@ class MainWindow(QMainWindow):
     def _on_batch_finished(self, processed):
         self.statusBar().showMessage(f"Batch segmentation complete: {processed} images.")
         self._close_batch_dialog()
+        if self._sequence_paths and self._sequence_index >= 0:
+            self._load_sequence_image()
 
     def _on_batch_canceled(self):
         self.statusBar().showMessage("Batch segmentation canceled")
@@ -666,6 +683,19 @@ class MainWindow(QMainWindow):
             self.model_picker.setCurrentText(current)
         self.model_picker.setEnabled(True)
 
+    def _init_device_picker(self):
+        devices = self._model.available_devices()
+        self.device_picker.clear()
+        for label, provider in devices:
+            self.device_picker.addItem(label, provider)
+        if not devices:
+            self.device_picker.addItem("CPU", "CPUExecutionProvider")
+        current = self._model.current_device()
+        index = self.device_picker.findData(current)
+        if index >= 0:
+            self.device_picker.setCurrentIndex(index)
+        self.device_picker.setEnabled(True)
+
     def _on_model_changed(self, index):
         if not self.model_picker.isEnabled():
             return
@@ -677,6 +707,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Model selected: {name}")
         except Exception as exc:
             QMessageBox.warning(self, "Model error", str(exc))
+
+    def _on_device_changed(self, index):
+        if not self.device_picker.isEnabled():
+            return
+        provider = self.device_picker.currentData()
+        if not provider:
+            return
+        try:
+            self._model.set_device(provider)
+            self.statusBar().showMessage(f"Device selected: {self.device_picker.currentText()}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Device error", str(exc))
 
     def _run_inference(self):
         if self.canvas.image is None:

@@ -8,5 +8,7 @@ export APP_NAME="UltrAiViewer-v${VERSION}-${OS}-${ARCH}"
 
 python -m PyInstaller --noconfirm --clean UltrAiViewer.spec
 
+cp "User Guide - UltrAi Viewer.pdf" "dist/${APP_NAME}/User Guide - UltrAi Viewer.pdf"
+
 chmod +x dist/${APP_NAME}/${APP_NAME}
 echo "Build complete: dist/${APP_NAME}"
