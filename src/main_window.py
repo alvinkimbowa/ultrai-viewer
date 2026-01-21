@@ -186,16 +186,18 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(5)
 
-        layout.addWidget(QLabel("Model:"))
+        model_device_row = QHBoxLayout()
+        model_device_row.addWidget(QLabel("Model:"))
         self.model_picker = QComboBox()
         self.model_picker.addItem("No models loaded")
         self.model_picker.setEnabled(False)
-        layout.addWidget(self.model_picker)
-
-        layout.addWidget(QLabel("Device:"))
+        model_device_row.addWidget(self.model_picker)
+        model_device_row.addSpacing(6)
+        model_device_row.addWidget(QLabel("Device:"))
         self.device_picker = QComboBox()
         self.device_picker.setEnabled(False)
-        layout.addWidget(self.device_picker)
+        model_device_row.addWidget(self.device_picker)
+        layout.addLayout(model_device_row)
 
         self.run_btn = QPushButton("Segment")
         configure_button(self.run_btn)
