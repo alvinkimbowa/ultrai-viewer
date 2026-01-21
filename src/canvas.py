@@ -78,7 +78,7 @@ class Canvas(QWidget):
         default_path = ""
         if self.image_path:
             default_dir = os.path.dirname(self.image_path)
-            default_name = os.path.basename(self.image_path)
+            default_name = f"{os.path.splitext(os.path.basename(self.image_path))[0]}.png"
             default_path = os.path.join(default_dir, default_name)
         path, _ = QFileDialog.getSaveFileName(
             self,
