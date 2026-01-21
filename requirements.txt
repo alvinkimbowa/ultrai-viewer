@@ -1,6 +1,6 @@
 onnx
 onnxscript
-onnxruntime
+onnxruntime-gpu
 opencv-python
 numpy
 pyinstaller
