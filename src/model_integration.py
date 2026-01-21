@@ -1,8 +1,10 @@
 """
-Model integration for single-image ONNX inference (CPU).
+Model integration for single-image ONNX inference (CPU/GPU).
 """
 
 import os
+import sys
+import contextlib
 import numpy as np
 import cv2
 
@@ -11,9 +13,38 @@ class ModelIntegration:
     def __init__(self, model_path: str | None = None):
         self._model_path = model_path or self._locate_model()
         self._session = None
+        self._device_provider = "CPUExecutionProvider"
 
     def has_model(self) -> bool:
         return bool(self._model_path)
+
+    def available_devices(self) -> list[tuple[str, str]]:
+        try:
+            import onnxruntime as ort
+        except Exception:
+            return [("CPU", "CPUExecutionProvider")]
+
+        providers = set(ort.get_available_providers())
+        devices = []
+        if "CUDAExecutionProvider" in providers:
+            devices.append(("GPU", "CUDAExecutionProvider"))
+        devices.append(("CPU", "CPUExecutionProvider"))
+        return devices
+
+    def set_device(self, provider: str) -> None:
+        try:
+            import onnxruntime as ort
+        except Exception:
+            provider = "CPUExecutionProvider"
+        else:
+            available = ort.get_available_providers()
+            if provider not in available:
+                raise ValueError(f"Device provider not available: {provider}")
+        self._device_provider = provider
+        self._session = None
+
+    def current_device(self) -> str:
+        return self._device_provider
 
     def list_models(self) -> list[str]:
         base_dir = os.path.dirname(os.path.dirname(__file__))
@@ -68,11 +99,33 @@ class ModelIntegration:
             return None
         import onnxruntime as ort
 
-        self._session = ort.InferenceSession(
-            self._model_path,
-            providers=["CPUExecutionProvider"],
-        )
+        providers = ort.get_available_providers()
+        selected = self._device_provider
+        if selected not in providers:
+            selected = "CPUExecutionProvider"
+        provider_list = [selected]
+        if selected != "CPUExecutionProvider" and "CPUExecutionProvider" in providers:
+            provider_list.append("CPUExecutionProvider")
+        with self._redirect_stderr_to_log():
+            self._session = ort.InferenceSession(
+                self._model_path,
+                providers=provider_list,
+            )
         return self._session
+
+    @contextlib.contextmanager
+    def _redirect_stderr_to_log(self):
+        log_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "inference.log")
+        log_file = open(log_path, "a", encoding="utf-8")
+        stderr_fd = sys.stderr.fileno()
+        saved_fd = os.dup(stderr_fd)
+        try:
+            os.dup2(log_file.fileno(), stderr_fd)
+            yield
+        finally:
+            os.dup2(saved_fd, stderr_fd)
+            os.close(saved_fd)
+            log_file.close()
 
     def preload(self) -> bool:
         return self._ensure_session() is not None
