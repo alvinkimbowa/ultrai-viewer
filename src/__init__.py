@@ -1,2 +1,1 @@
-# Knee Ultrasound cartilate segmentation package
-
+# UltAI Viewer package

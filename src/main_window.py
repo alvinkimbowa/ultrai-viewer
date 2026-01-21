@@ -40,7 +40,7 @@ import tifffile
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self._base_title = "Knee Ultrasound Viewer"
+        self._base_title = "UltAI Viewer"
         self.setWindowTitle(self._base_title)
         self._sidebar_width = 220
 
