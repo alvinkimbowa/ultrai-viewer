@@ -40,7 +40,8 @@ import tifffile
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Knee Ultrasound Viewer")
+        self._base_title = "Knee Ultrasound Viewer"
+        self.setWindowTitle(self._base_title)
         self._sidebar_width = 220
 
         self._create_menu_bar()
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         root_layout = QHBoxLayout(root)
 
         self.canvas = Canvas()
+        self.canvas.image_loaded.connect(self._update_title_with_image)
 
         sidebar = self._build_sidebar()
         sidebar_scroll = QScrollArea()
@@ -299,6 +301,13 @@ class MainWindow(QMainWindow):
         frame = self.frameGeometry()
         frame.moveCenter(screen.availableGeometry().center())
         self.move(frame.topLeft())
+
+    def _update_title_with_image(self, image_path):
+        name = Path(image_path).name if image_path else ""
+        if name:
+            self.setWindowTitle(f"{self._base_title} - {name}")
+        else:
+            self.setWindowTitle(self._base_title)
 
     def _screen_bounds(self):
         screen = QApplication.primaryScreen()

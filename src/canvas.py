@@ -8,10 +8,11 @@ import cv2
 import tifffile
 from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox, QScrollBar, QStyle
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PyQt6.QtCore import Qt, QRect, QPoint
+from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
 
 
 class Canvas(QWidget):
+    image_loaded = pyqtSignal(str)
     def __init__(self):
         super().__init__()
         self.image = None
@@ -118,6 +119,7 @@ class Canvas(QWidget):
         self._reset_history()
         self._reset_view()
         self.update()
+        self.image_loaded.emit(file_path)
 
     def load_mask(self, file_path):
         try:
@@ -163,6 +165,7 @@ class Canvas(QWidget):
         self._last_outline = []
         self._reset_view()
         self.update()
+        self.image_loaded.emit("")
 
     def set_mask(self, mask):
         if self.image is None:
