@@ -84,6 +84,7 @@ class MainWindow(QMainWindow):
         self._batch_dialog = None
         self._preload_model()
         self._init_model_picker()
+        self._init_device_picker()
 
         self._start_size = self._initial_window_size()
         self.setGeometry(10, 10, *self._start_size)
@@ -191,6 +192,11 @@ class MainWindow(QMainWindow):
         self.model_picker.setEnabled(False)
         layout.addWidget(self.model_picker)
 
+        layout.addWidget(QLabel("Device:"))
+        self.device_picker = QComboBox()
+        self.device_picker.setEnabled(False)
+        layout.addWidget(self.device_picker)
+
         self.run_btn = QPushButton("Segment")
         configure_button(self.run_btn)
         layout.addWidget(self.run_btn)
@@ -290,6 +296,7 @@ class MainWindow(QMainWindow):
         self.undo_action.triggered.connect(self.canvas.undo)
         self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
+        self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.sequence_btn.clicked.connect(self._load_sequence)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
@@ -668,6 +675,19 @@ class MainWindow(QMainWindow):
             self.model_picker.setCurrentText(current)
         self.model_picker.setEnabled(True)
 
+    def _init_device_picker(self):
+        devices = self._model.available_devices()
+        self.device_picker.clear()
+        for label, provider in devices:
+            self.device_picker.addItem(label, provider)
+        if not devices:
+            self.device_picker.addItem("CPU", "CPUExecutionProvider")
+        current = self._model.current_device()
+        index = self.device_picker.findData(current)
+        if index >= 0:
+            self.device_picker.setCurrentIndex(index)
+        self.device_picker.setEnabled(True)
+
     def _on_model_changed(self, index):
         if not self.model_picker.isEnabled():
             return
@@ -679,6 +699,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Model selected: {name}")
         except Exception as exc:
             QMessageBox.warning(self, "Model error", str(exc))
+
+    def _on_device_changed(self, index):
+        if not self.device_picker.isEnabled():
+            return
+        provider = self.device_picker.currentData()
+        if not provider:
+            return
+        try:
+            self._model.set_device(provider)
+            self.statusBar().showMessage(f"Device selected: {self.device_picker.currentText()}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Device error", str(exc))
 
     def _run_inference(self):
         if self.canvas.image is None:
