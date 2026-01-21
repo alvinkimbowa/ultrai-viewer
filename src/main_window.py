@@ -452,17 +452,8 @@ class MainWindow(QMainWindow):
         dialog_result = self._show_sequence_dialog()
         if dialog_result is None:
             return
-        directory, output_dir = dialog_result
-        extensions = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
-        paths = [
-            str(path)
-            for path in sorted(Path(directory).iterdir())
-            if path.suffix.lower() in extensions
-        ]
-        if not paths:
-            QMessageBox.information(self, "No images", "No images found in the selected folder.")
-            return
-        self._sequence_paths = paths
+        paths, output_dir = dialog_result
+        self._sequence_paths = list(paths)
         self._sequence_index = 0
         self._sequence_output_dir = output_dir
         self.sequence_combo.setEnabled(True)
@@ -552,11 +543,36 @@ class MainWindow(QMainWindow):
 
         input_line = QLineEdit(dialog)
         output_line = QLineEdit(dialog)
+        input_line.setReadOnly(True)
 
-        def browse_input():
+        selected_paths = []
+
+        def select_folder():
             directory = QFileDialog.getExistingDirectory(dialog, "Select input folder")
             if directory:
-                input_line.setText(directory)
+                paths = sorted(
+                    str(path)
+                    for path in Path(directory).iterdir()
+                    if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+                )
+                if paths:
+                    selected_paths[:] = paths
+                    input_line.setText(f"{directory} ({len(paths)} images)")
+                else:
+                    QMessageBox.information(
+                        dialog, "No images", "No images found in the selected folder."
+                    )
+
+        def select_files():
+            files, _ = QFileDialog.getOpenFileNames(
+                dialog,
+                "Select images",
+                "",
+                "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
+            )
+            if files:
+                selected_paths[:] = list(files)
+                input_line.setText(f"{len(files)} images selected")
 
         def browse_output():
             directory = QFileDialog.getExistingDirectory(dialog, "Select output folder")
@@ -564,11 +580,14 @@ class MainWindow(QMainWindow):
                 output_line.setText(directory)
 
         input_row = QHBoxLayout()
-        input_btn = QPushButton("Browse")
-        input_btn.clicked.connect(browse_input)
-        input_row.addWidget(input_line)
-        input_row.addWidget(input_btn)
-        layout.addRow("Input folder:", input_row)
+        folder_btn = QPushButton("Select folder")
+        files_btn = QPushButton("Select images")
+        folder_btn.clicked.connect(select_folder)
+        files_btn.clicked.connect(select_files)
+        input_row.addWidget(folder_btn)
+        input_row.addWidget(files_btn)
+        layout.addRow("Input source:", input_row)
+        layout.addRow("Input selection:", input_line)
 
         output_row = QHBoxLayout()
         output_btn = QPushButton("Browse")
@@ -584,12 +603,14 @@ class MainWindow(QMainWindow):
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        input_dir = input_line.text().strip()
-        output_dir = output_line.text().strip()
-        if not input_dir or not output_dir:
-            QMessageBox.information(self, "Missing fields", "Select both input and output folders.")
+        if not selected_paths:
+            QMessageBox.information(self, "Missing fields", "Select input images or a folder.")
             return None
-        return input_dir, output_dir
+        output_dir = output_line.text().strip()
+        if not output_dir:
+            QMessageBox.information(self, "Missing fields", "Select an output folder.")
+            return None
+        return selected_paths, output_dir
 
     def _preload_model(self):
         if not self._model.has_model():
