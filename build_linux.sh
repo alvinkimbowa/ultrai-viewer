@@ -4,7 +4,7 @@ set -euo pipefail
 VERSION=$(cat VERSION)
 export OS="linux"
 export ARCH="x86_64"
-export APP_NAME="UltAIViewer-v${VERSION}-${OS}-${ARCH}"
+export APP_NAME="UltrAiViewer-v${VERSION}-${OS}-${ARCH}"
 
 python -m PyInstaller --noconfirm --clean UltrAiViewer.spec
 
