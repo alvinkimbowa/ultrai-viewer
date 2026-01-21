@@ -268,8 +268,8 @@ class MainWindow(QMainWindow):
         self.segment_action.triggered.connect(self._run_inference)
         self.run_batch_btn.clicked.connect(self._run_batch_inference)
         self.segment_batch_action.triggered.connect(self._run_batch_inference)
-        self.save_btn.clicked.connect(self.canvas.save_mask_dialog)
-        self.save_mask_action.triggered.connect(self.canvas.save_mask_dialog)
+        self.save_btn.clicked.connect(self._save_current_mask)
+        self.save_mask_action.triggered.connect(self._save_current_mask)
         self.clear_btn.clicked.connect(self.canvas.clear_mask)
         self.clear_mask_action.triggered.connect(self.canvas.clear_mask)
         self.close_btn.clicked.connect(self.canvas.clear_image)
@@ -518,12 +518,27 @@ class MainWindow(QMainWindow):
         if not self.canvas.has_mask_data():
             return
         image_path = Path(self._sequence_paths[self._sequence_index])
-        output_path = Path(self._sequence_output_dir) / image_path.name
+        output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
         try:
             self.canvas.save_mask(str(output_path))
             self.statusBar().showMessage(f"Saved mask: {output_path.name}")
         except Exception as exc:
             QMessageBox.warning(self, "Save error", str(exc))
+
+    def _save_current_mask(self):
+        if not self.canvas.has_mask_data():
+            QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")
+            return
+        if self._sequence_output_dir and self._sequence_index >= 0:
+            image_path = Path(self._sequence_paths[self._sequence_index])
+            output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
+            try:
+                self.canvas.save_mask(str(output_path))
+                self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+            except Exception as exc:
+                QMessageBox.warning(self, "Save error", str(exc))
+            return
+        self.canvas.save_mask_dialog()
 
     def _find_sequence_mask_path(self, image_path):
         if not self._sequence_output_dir:
