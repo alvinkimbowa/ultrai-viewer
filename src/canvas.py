@@ -210,6 +210,7 @@ class Canvas(QWidget):
             cv2.fillPoly(self.mask, [points], 1.0)
             self._push_history()
             self._mask_touched = True
+            self._last_outline = []
         if self.mask is not None:
             self._refresh_mask_pixmap()
         self.update()
