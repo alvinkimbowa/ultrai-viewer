@@ -82,9 +82,10 @@ class MainWindow(QMainWindow):
         self._batch_thread = None
         self._batch_worker = None
         self._batch_dialog = None
+        self._gpu_warning = None
+        self._init_device_picker()
         self._preload_model()
         self._init_model_picker()
-        self._init_device_picker()
 
         self._start_size = self._initial_window_size()
         self.setGeometry(10, 10, *self._start_size)
@@ -665,8 +666,23 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage("Loading model...")
         try:
-            if self._model.preload():
-                self.statusBar().showMessage("Model loaded")
+            gpu_provider = None
+            for _label, provider in self._model.available_devices():
+                if provider == "CUDAExecutionProvider":
+                    gpu_provider = provider
+                    break
+            if gpu_provider:
+                self._model.set_device(gpu_provider)
+                self._model.preload()
+                warning = self._model.device_warning()
+                if warning:
+                    self._gpu_warning = warning
+                    self._select_cpu_device(show_warning=False)
+                else:
+                    self._set_device_picker(gpu_provider)
+            else:
+                self._model.preload()
+            self.statusBar().showMessage("Model loaded")
         except Exception as exc:
             self.statusBar().showMessage("Model load failed")
             QMessageBox.warning(self, "Model error", str(exc))
@@ -699,6 +715,20 @@ class MainWindow(QMainWindow):
             self.device_picker.setCurrentIndex(index)
         self.device_picker.setEnabled(True)
 
+    def _set_device_picker(self, provider):
+        index = self.device_picker.findData(provider)
+        if index >= 0:
+            self.device_picker.blockSignals(True)
+            self.device_picker.setCurrentIndex(index)
+            self.device_picker.blockSignals(False)
+
+    def _select_cpu_device(self, show_warning):
+        self._model.set_device("CPUExecutionProvider")
+        self._model.preload()
+        self._set_device_picker("CPUExecutionProvider")
+        if show_warning and self._gpu_warning:
+            QMessageBox.warning(self, "GPU unavailable", self._gpu_warning)
+
     def _on_model_changed(self, index):
         if not self.model_picker.isEnabled():
             return
@@ -717,11 +747,34 @@ class MainWindow(QMainWindow):
         provider = self.device_picker.currentData()
         if not provider:
             return
+        if provider != "CUDAExecutionProvider":
+            self._model.set_device(provider)
+            if self._model.preload():
+                self.statusBar().showMessage(f"Device selected: {self.device_picker.currentText()}")
+            return
+
+        if self._gpu_warning:
+            self._select_cpu_device(show_warning=True)
+            return
         try:
             self._model.set_device(provider)
+            if not self._model.preload():
+                raise RuntimeError("Model session could not be created.")
+            warning = self._model.device_warning()
+            if warning:
+                self._gpu_warning = warning
+                self._select_cpu_device(show_warning=True)
+                return
+            self._gpu_warning = None
             self.statusBar().showMessage(f"Device selected: {self.device_picker.currentText()}")
         except Exception as exc:
-            QMessageBox.warning(self, "Device error", str(exc))
+            self._gpu_warning = (
+                "GPU selected but could not be used. Falling back to CPU.\n\n"
+                "This usually means there is no supported GPU or required drivers "
+                "(NVIDIA driver/CUDA/cuDNN) are missing.\n\n"
+                f"Details: {exc}"
+            )
+            self._select_cpu_device(show_warning=True)
 
     def _run_inference(self):
         if self.canvas.image is None:

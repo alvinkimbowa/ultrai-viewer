@@ -14,6 +14,7 @@ class ModelIntegration:
         self._model_path = model_path or self._locate_model()
         self._session = None
         self._device_provider = "CPUExecutionProvider"
+        self._device_warning = None
 
     def has_model(self) -> bool:
         return bool(self._model_path)
@@ -45,6 +46,14 @@ class ModelIntegration:
 
     def current_device(self) -> str:
         return self._device_provider
+
+    def consume_device_warning(self) -> str | None:
+        warning = self._device_warning
+        self._device_warning = None
+        return warning
+
+    def device_warning(self) -> str | None:
+        return self._device_warning
 
     def list_models(self) -> list[str]:
         base_dir = os.path.dirname(os.path.dirname(__file__))
@@ -99,18 +108,50 @@ class ModelIntegration:
             return None
         import onnxruntime as ort
 
+        self._device_warning = None
         providers = ort.get_available_providers()
         selected = self._device_provider
         if selected not in providers:
+            self._device_warning = (
+                "GPU selected but not available on this machine. Falling back to CPU. "
+                "This usually means there is no supported GPU or required drivers "
+                "(NVIDIA driver/CUDA/cuDNN) are missing."
+            )
             selected = "CPUExecutionProvider"
         provider_list = [selected]
         if selected != "CPUExecutionProvider" and "CPUExecutionProvider" in providers:
             provider_list.append("CPUExecutionProvider")
-        with self._redirect_stderr_to_log():
-            self._session = ort.InferenceSession(
-                self._model_path,
-                providers=provider_list,
-            )
+        try:
+            with self._redirect_stderr_to_log():
+                self._session = ort.InferenceSession(
+                    self._model_path,
+                    providers=provider_list,
+                )
+        except Exception as exc:
+            if selected != "CPUExecutionProvider":
+                self._device_warning = (
+                    "GPU selected but could not be used. Falling back to CPU. "
+                    "This usually means the GPU is unsupported or required drivers "
+                    "(NVIDIA driver/CUDA/cuDNN) are missing."
+                )
+                with self._redirect_stderr_to_log():
+                    self._session = ort.InferenceSession(
+                        self._model_path,
+                        providers=["CPUExecutionProvider"],
+                    )
+            else:
+                raise exc
+        if selected != "CPUExecutionProvider" and self._session is not None:
+            try:
+                active_providers = self._session.get_providers()
+            except Exception:
+                active_providers = []
+            if not active_providers or active_providers[0] != selected:
+                self._device_warning = (
+                    "GPU selected but could not be used. Falling back to CPU. "
+                    "This usually means the GPU is unsupported or required drivers "
+                    "(NVIDIA driver/CUDA/cuDNN) are missing."
+                )
         return self._session
 
     @contextlib.contextmanager
@@ -118,13 +159,18 @@ class ModelIntegration:
         log_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "inference.log")
         log_file = open(log_path, "a", encoding="utf-8")
         stderr_fd = sys.stderr.fileno()
-        saved_fd = os.dup(stderr_fd)
+        stdout_fd = sys.stdout.fileno()
+        saved_stderr_fd = os.dup(stderr_fd)
+        saved_stdout_fd = os.dup(stdout_fd)
         try:
             os.dup2(log_file.fileno(), stderr_fd)
+            os.dup2(log_file.fileno(), stdout_fd)
             yield
         finally:
-            os.dup2(saved_fd, stderr_fd)
-            os.close(saved_fd)
+            os.dup2(saved_stderr_fd, stderr_fd)
+            os.dup2(saved_stdout_fd, stdout_fd)
+            os.close(saved_stderr_fd)
+            os.close(saved_stdout_fd)
             log_file.close()
 
     def preload(self) -> bool:
@@ -194,7 +240,8 @@ class ModelIntegration:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Inference canceled.")
         input_name = session.get_inputs()[0].name
-        outputs = session.run(None, {input_name: model_input})
+        with self._redirect_stderr_to_log():
+            outputs = session.run(None, {input_name: model_input})
         if not outputs:
             raise RuntimeError("Model returned no outputs.")
         if cancel_event is not None and cancel_event.is_set():
