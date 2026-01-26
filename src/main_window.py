@@ -683,7 +683,7 @@ class MainWindow(QMainWindow):
                     self._set_device_picker(gpu_provider)
             else:
                 self._model.preload()
-            self.statusBar().showMessage("Model loaded")
+            self.statusBar().showMessage("Ready")
         except Exception as exc:
             self.statusBar().showMessage("Model load failed")
             QMessageBox.warning(self, "Model error", str(exc))
