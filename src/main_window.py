@@ -481,6 +481,7 @@ class MainWindow(QMainWindow):
     def _on_batch_thread_done(self):
         self._batch_thread = None
         self._batch_worker = None
+        self.statusBar().showMessage("Ready")
 
     def _load_sequence(self):
         dialog_result = self._show_sequence_dialog()
@@ -855,6 +856,7 @@ class MainWindow(QMainWindow):
     def _on_inference_thread_done(self):
         self._inference_thread = None
         self._inference_worker = None
+        self.statusBar().showMessage("Ready")
 
 
 class InferenceWorker(QObject):
