@@ -155,6 +155,18 @@ class ModelIntegration:
     def _redirect_stderr_to_log(self):
         log_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "inference.log")
         log_file = open(log_path, "a", encoding="utf-8")
+        if (
+            sys.stderr is None
+            or sys.stdout is None
+            or not hasattr(sys.stderr, "fileno")
+            or not hasattr(sys.stdout, "fileno")
+        ):
+            try:
+                with contextlib.redirect_stdout(log_file), contextlib.redirect_stderr(log_file):
+                    yield
+            finally:
+                log_file.close()
+            return
         stderr_fd = sys.stderr.fileno()
         stdout_fd = sys.stdout.fileno()
         saved_stderr_fd = os.dup(stderr_fd)
