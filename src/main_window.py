@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_frame_masks = {}
         self._video_frame_cache = OrderedDict()
+        self._video_decode_pos = -1
         self._video_cache_limit = 9
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
@@ -646,6 +647,7 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_frame_masks = {}
         self._video_frame_cache.clear()
+        self._video_decode_pos = -1
         self.sequence_combo.clear()
         self.sequence_combo.setEnabled(False)
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
@@ -672,6 +674,7 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_frame_masks = {}
         self._video_frame_cache.clear()
+        self._video_decode_pos = -1
 
     def _clear_sequence(self):
         self._stop_playback()
@@ -749,6 +752,19 @@ class MainWindow(QMainWindow):
         self.sequence_combo.blockSignals(False)
         self._load_sequence_image()
 
+    def _reopen_video_capture(self):
+        if not self._video_path:
+            return False
+        if self._video_capture is not None:
+            self._video_capture.release()
+        capture = cv2.VideoCapture(self._video_path)
+        if not capture.isOpened():
+            self._video_capture = None
+            return False
+        self._video_capture = capture
+        self._video_decode_pos = -1
+        return True
+
     def _decode_video_frame(self, frame_index):
         if frame_index in self._video_frame_cache:
             frame = self._video_frame_cache.pop(frame_index)
@@ -756,10 +772,19 @@ class MainWindow(QMainWindow):
             return frame
         if self._video_capture is None:
             return None
-        self._video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        success, frame = self._video_capture.read()
-        if not success or frame is None:
-            return None
+
+        # Sequential decode only. Reopen to restart when requesting older frames.
+        if frame_index <= self._video_decode_pos:
+            if not self._reopen_video_capture():
+                return None
+
+        frame = None
+        while self._video_decode_pos < frame_index:
+            success, frame = self._video_capture.read()
+            if not success or frame is None:
+                return None
+            self._video_decode_pos += 1
+
         if frame.ndim == 3 and frame.shape[2] == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         self._video_frame_cache[frame_index] = frame
