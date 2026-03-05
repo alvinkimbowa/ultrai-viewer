@@ -107,10 +107,16 @@ class Canvas(QWidget):
         except Exception as exc:
             QMessageBox.critical(self, "Load failed", str(exc))
             return
+        self._load_image_data(raw, file_path)
 
+    def load_image_array(self, image, source_name=""):
+        raw = np.asarray(image)
+        self._load_image_data(raw, source_name)
+
+    def _load_image_data(self, raw, source_name):
         self.image = raw
         self.pixmap = self._to_pixmap(raw)
-        self.image_path = file_path
+        self.image_path = source_name or None
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
         self._refresh_mask_pixmap()
@@ -119,7 +125,7 @@ class Canvas(QWidget):
         self._reset_history()
         self._reset_view()
         self.update()
-        self.image_loaded.emit(file_path)
+        self.image_loaded.emit(source_name)
 
     def load_mask(self, file_path):
         try:
@@ -202,18 +208,27 @@ class Canvas(QWidget):
         self.fill_roi = bool(enabled)
         self.show_contour_only = not self.fill_roi
         if self.fill_roi and self._last_outline:
-            self._ensure_mask()
-            points = np.array(
-                [[p.x(), p.y()] for p in self._last_outline],
-                dtype=np.int32,
-            ).reshape((-1, 1, 2))
-            cv2.fillPoly(self.mask, [points], 1.0)
-            self._push_history()
-            self._mask_touched = True
-            self._last_outline = []
+            self.commit_pending_outline_to_mask()
         if self.mask is not None:
             self._refresh_mask_pixmap()
         self.update()
+
+    def commit_pending_outline_to_mask(self):
+        if len(self._last_outline) < 2:
+            return False
+        self._ensure_mask()
+        points = np.array(
+            [[p.x(), p.y()] for p in self._last_outline],
+            dtype=np.int32,
+        ).reshape((-1, 1, 2))
+        cv2.fillPoly(self.mask, [points], 1.0)
+        self._push_history()
+        self._mask_touched = True
+        self._last_outline = []
+        if self.mask is not None:
+            self._refresh_mask_pixmap()
+        self.update()
+        return True
 
     def fit_to_window(self):
         if self.pixmap is None:
