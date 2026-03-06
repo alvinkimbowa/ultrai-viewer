@@ -161,8 +161,6 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.load_video_action)
         self.load_mask_action = QAction("Load Mask...", self)
         file_menu.addAction(self.load_mask_action)
-        self.load_sequence_action = QAction("Load image sequence...", self)
-        file_menu.addAction(self.load_sequence_action)
         self.segment_action = QAction("Segment", self)
         file_menu.addAction(self.segment_action)
         self.segment_batch_action = QAction("Batch segment", self)
@@ -213,42 +211,45 @@ class MainWindow(QMainWindow):
             button.setMinimumHeight(min_height)
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        layout.addWidget(QLabel("Single Image:"))
+        layout.addWidget(QLabel("Images:"))
         load_row = QHBoxLayout()
-        self.open_image_btn = QPushButton("Load Image")
+        self.open_image_btn = QPushButton("Load image(s)")
         configure_button(self.open_image_btn)
         load_row.addWidget(self.open_image_btn)
-        self.open_mask_btn = QPushButton("Load Mask")
-        configure_button(self.open_mask_btn)
-        load_row.addWidget(self.open_mask_btn)
         layout.addLayout(load_row)
 
-        self.fit_btn = QPushButton("Fit to Window")
-        configure_button(self.fit_btn)
-        layout.addWidget(self.fit_btn)
-
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep1)
-
-        layout.addWidget(QLabel("Image Sequence:"))
-        self.sequence_btn = QPushButton("Load image sequence")
-        configure_button(self.sequence_btn)
-        layout.addWidget(self.sequence_btn)
-        self.clear_sequence_btn = QPushButton("Clear sequence")
+        mask_row = QHBoxLayout()
+        self.open_mask_btn = QPushButton("Load mask(s)")
+        configure_button(self.open_mask_btn)
+        mask_row.addWidget(self.open_mask_btn)
+        self.clear_sequence_btn = QPushButton("Clear image(s)")
         configure_button(self.clear_sequence_btn)
-        layout.addWidget(self.clear_sequence_btn)
+        mask_row.addWidget(self.clear_sequence_btn)
+        layout.addLayout(mask_row)
+
         self.sequence_combo = QComboBox()
         self.sequence_combo.setEnabled(False)
         layout.addWidget(self.sequence_combo)
+        image_nav_row = QHBoxLayout()
+        self.image_prev_btn = QPushButton("Prev")
+        self.image_prev_btn.setEnabled(False)
+        configure_button(self.image_prev_btn)
+        image_nav_row.addWidget(self.image_prev_btn)
+        self.image_next_btn = QPushButton("Next")
+        self.image_next_btn.setEnabled(False)
+        configure_button(self.image_next_btn)
+        image_nav_row.addWidget(self.image_next_btn)
+        layout.addLayout(image_nav_row)
+        self.save_btn = QPushButton("Save masks")
+        configure_button(self.save_btn)
+        layout.addWidget(self.save_btn)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep2)
 
-        layout.addWidget(QLabel("Video Sequence:"))
+        layout.addWidget(QLabel("Videos:"))
         self.video_btn = QPushButton("Load video files")
         configure_button(self.video_btn)
         layout.addWidget(self.video_btn)
@@ -270,12 +271,16 @@ class MainWindow(QMainWindow):
         configure_button(self.next_btn)
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
+        self.save_video_btn = QPushButton("Save masks")
+        configure_button(self.save_video_btn)
+        layout.addWidget(self.save_video_btn)
 
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.Shape.HLine)
         sep3.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep3)
 
+        layout.addWidget(QLabel("Models:"))
         model_device_row = QHBoxLayout()
         model_device_row.addWidget(QLabel("Model:"))
         self.model_picker = QComboBox()
@@ -305,6 +310,7 @@ class MainWindow(QMainWindow):
         sep4.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep4)
 
+        layout.addWidget(QLabel("Edit:"))
         tools_row = QHBoxLayout()
         tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
@@ -330,11 +336,6 @@ class MainWindow(QMainWindow):
         opacity_row.addWidget(self.opacity_slider)
         layout.addLayout(opacity_row)
 
-        sep5 = QFrame()
-        sep5.setFrameShape(QFrame.Shape.HLine)
-        sep5.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep5)
-
         brush_row = QHBoxLayout()
         brush_label = QLabel("Tool Radius:")
         self.brush_radius = QSlider(Qt.Orientation.Horizontal)
@@ -349,6 +350,12 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(10)
 
+        self.fit_btn = QPushButton("Fit to Window")
+        configure_button(self.fit_btn)
+        layout.addWidget(self.fit_btn)
+
+        layout.addSpacing(5)
+
         undo_redo_row = QHBoxLayout()
         self.undo_btn = QPushButton("Undo")
         configure_button(self.undo_btn)
@@ -358,15 +365,6 @@ class MainWindow(QMainWindow):
         undo_redo_row.addWidget(self.redo_btn)
         layout.addLayout(undo_redo_row)
 
-        layout.addSpacing(5)
-
-        self.save_btn = QPushButton("Save mask")
-        configure_button(self.save_btn)
-        layout.addWidget(self.save_btn)
-        self.save_video_btn = QPushButton("Save video masks")
-        configure_button(self.save_video_btn)
-        layout.addWidget(self.save_video_btn)
-
         clear_row = QHBoxLayout()
         self.clear_btn = QPushButton("Clear Mask")
         configure_button(self.clear_btn)
@@ -375,6 +373,11 @@ class MainWindow(QMainWindow):
         configure_button(self.close_btn)
         clear_row.addWidget(self.close_btn)
         layout.addLayout(clear_row)
+
+        sep_end = QFrame()
+        sep_end.setFrameShape(QFrame.Shape.HLine)
+        sep_end.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep_end)
 
         layout.addStretch()
 
@@ -411,10 +414,10 @@ class MainWindow(QMainWindow):
         self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
-        self.sequence_btn.clicked.connect(self._load_sequence)
-        self.load_sequence_action.triggered.connect(self._load_sequence)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
+        self.image_prev_btn.clicked.connect(self._show_previous_sequence)
+        self.image_next_btn.clicked.connect(self._show_next_sequence)
         self.clear_video_btn.clicked.connect(self._clear_video_sequence)
         self.video_combo.currentIndexChanged.connect(self._on_video_selected)
         self.prev_btn.clicked.connect(self._show_previous_sequence)
@@ -453,13 +456,29 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(self._base_title)
 
     def _load_single_image(self):
+        image_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Load image(s)",
+            "",
+            "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
+        )
+        if not image_paths:
+            return
         self._stop_playback()
-        self._stash_video_mask_for_current_frame()
-        self._clear_video_state()
-        self._clear_sequence_state(clear_canvas=False)
-        self._mode = "none"
-        self._set_slider_state(0, 0, enabled=False)
-        self.canvas.load_image_dialog()
+        if self._mode == "video":
+            self._stash_video_mask_for_current_frame()
+            self._persist_current_video_masks()
+            self._clear_video_state()
+        self._mode = "sequence"
+        self._sequence_paths = list(image_paths)
+        self._sequence_index = 0
+        self._sequence_output_dir = None
+        self.sequence_combo.setEnabled(True)
+        self.sequence_combo.clear()
+        self.sequence_combo.addItems([Path(p).name for p in self._sequence_paths])
+        self._set_slider_state(0, len(self._sequence_paths) - 1, enabled=bool(self._sequence_paths))
+        self._set_sequence_index(0)
+        self.statusBar().showMessage(f"Loaded {len(self._sequence_paths)} image(s)")
 
     def _close_current_image(self):
         self._stop_playback()
@@ -709,6 +728,8 @@ class MainWindow(QMainWindow):
         self._clear_video_state()
         self._mode = "none"
         self._set_slider_state(0, 0, enabled=False)
+        self.image_prev_btn.setEnabled(False)
+        self.image_next_btn.setEnabled(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.canvas.clear_image()
@@ -773,6 +794,8 @@ class MainWindow(QMainWindow):
         self._clear_sequence_state(clear_canvas=False)
         self._mode = "none"
         self._set_slider_state(0, 0, enabled=False)
+        self.image_prev_btn.setEnabled(False)
+        self.image_next_btn.setEnabled(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.canvas.clear_image()
@@ -944,15 +967,21 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             can_prev = self._video_list_index > 0
             can_next = 0 <= self._video_list_index < len(self._video_paths) - 1
+            self.image_prev_btn.setEnabled(False)
+            self.image_next_btn.setEnabled(False)
             self.prev_btn.setEnabled(can_prev)
             self.next_btn.setEnabled(can_next)
             self.play_btn.setEnabled(self._video_frame_count > 1)
             return
         if self._mode == "sequence":
-            self.prev_btn.setEnabled(self._sequence_index > 0)
-            self.next_btn.setEnabled(self._sequence_index < len(self._sequence_paths) - 1)
+            self.image_prev_btn.setEnabled(self._sequence_index > 0)
+            self.image_next_btn.setEnabled(self._sequence_index < len(self._sequence_paths) - 1)
+            self.prev_btn.setEnabled(False)
+            self.next_btn.setEnabled(False)
             self.play_btn.setEnabled(False)
             return
+        self.image_prev_btn.setEnabled(False)
+        self.image_next_btn.setEnabled(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.play_btn.setEnabled(False)
