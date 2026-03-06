@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QFormLayout,
     QDialogButtonBox,
+    QFrame,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
@@ -226,21 +227,37 @@ class MainWindow(QMainWindow):
         configure_button(self.fit_btn)
         layout.addWidget(self.fit_btn)
 
-        layout.addSpacing(10)
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep1)
 
         layout.addWidget(QLabel("Image Sequence:"))
         self.sequence_btn = QPushButton("Load image sequence")
         configure_button(self.sequence_btn)
         layout.addWidget(self.sequence_btn)
-        self.video_btn = QPushButton("Load video")
-        configure_button(self.video_btn)
-        layout.addWidget(self.video_btn)
         self.clear_sequence_btn = QPushButton("Clear sequence")
         configure_button(self.clear_sequence_btn)
         layout.addWidget(self.clear_sequence_btn)
         self.sequence_combo = QComboBox()
         self.sequence_combo.setEnabled(False)
         layout.addWidget(self.sequence_combo)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep2)
+
+        layout.addWidget(QLabel("Video Sequence:"))
+        self.video_btn = QPushButton("Load video files")
+        configure_button(self.video_btn)
+        layout.addWidget(self.video_btn)
+        self.clear_video_btn = QPushButton("Clear videos")
+        configure_button(self.clear_video_btn)
+        layout.addWidget(self.clear_video_btn)
+        self.video_combo = QComboBox()
+        self.video_combo.setEnabled(False)
+        layout.addWidget(self.video_combo)
 
         nav_row = QHBoxLayout()
         self.prev_btn = QPushButton("Prev")
@@ -254,7 +271,10 @@ class MainWindow(QMainWindow):
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
 
-        layout.addSpacing(10)
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep3)
 
         model_device_row = QHBoxLayout()
         model_device_row.addWidget(QLabel("Model:"))
@@ -280,7 +300,10 @@ class MainWindow(QMainWindow):
         segment_row.addWidget(self.run_batch_btn)
         layout.addLayout(segment_row)
 
-        layout.addSpacing(15)
+        sep4 = QFrame()
+        sep4.setFrameShape(QFrame.Shape.HLine)
+        sep4.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep4)
 
         tools_row = QHBoxLayout()
         tools_row.addWidget(QLabel("Tools:"))
@@ -307,7 +330,10 @@ class MainWindow(QMainWindow):
         opacity_row.addWidget(self.opacity_slider)
         layout.addLayout(opacity_row)
 
-        layout.addSpacing(10)
+        sep5 = QFrame()
+        sep5.setFrameShape(QFrame.Shape.HLine)
+        sep5.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep5)
 
         brush_row = QHBoxLayout()
         brush_label = QLabel("Tool Radius:")
@@ -389,6 +415,8 @@ class MainWindow(QMainWindow):
         self.load_sequence_action.triggered.connect(self._load_sequence)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
         self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
+        self.clear_video_btn.clicked.connect(self._clear_video_sequence)
+        self.video_combo.currentIndexChanged.connect(self._on_video_selected)
         self.prev_btn.clicked.connect(self._show_previous_sequence)
         self.next_btn.clicked.connect(self._show_next_sequence)
         self._prev_shortcut.activated.connect(self._show_previous_sequence)
@@ -640,9 +668,9 @@ class MainWindow(QMainWindow):
         self._video_list_index = 0
         self._video_masks_by_path = {}
         self._mode = "video"
-        self.sequence_combo.setEnabled(True)
-        self.sequence_combo.clear()
-        self.sequence_combo.addItems([Path(p).name for p in self._video_paths])
+        self.video_combo.setEnabled(True)
+        self.video_combo.clear()
+        self.video_combo.addItems([Path(p).name for p in self._video_paths])
         self._open_video_at_index(0, start_frame=0)
 
     def _clear_sequence_state(self, clear_canvas):
@@ -659,6 +687,8 @@ class MainWindow(QMainWindow):
         self._persist_current_video_masks()
         if self._video_capture is not None:
             self._video_capture.release()
+        self.video_combo.clear()
+        self.video_combo.setEnabled(False)
         self._video_paths = []
         self._video_list_index = -1
         self._video_path = None
@@ -670,6 +700,19 @@ class MainWindow(QMainWindow):
         self._video_masks_by_path = {}
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
+
+    def _clear_video_sequence(self):
+        if self._mode != "video":
+            return
+        self._stop_playback()
+        self._stash_video_mask_for_current_frame()
+        self._clear_video_state()
+        self._mode = "none"
+        self._set_slider_state(0, 0, enabled=False)
+        self.prev_btn.setEnabled(False)
+        self.next_btn.setEnabled(False)
+        self.canvas.clear_image()
+        self.statusBar().showMessage("Video sequence cleared")
 
     def _persist_current_video_masks(self):
         if self._mode != "video":
@@ -709,9 +752,9 @@ class MainWindow(QMainWindow):
         self._video_decode_pos = -1
         self._video_frame_cache.clear()
         self._video_frame_masks = dict(self._video_masks_by_path.get(self._video_path, {}))
-        self.sequence_combo.blockSignals(True)
-        self.sequence_combo.setCurrentIndex(video_index)
-        self.sequence_combo.blockSignals(False)
+        self.video_combo.blockSignals(True)
+        self.video_combo.setCurrentIndex(video_index)
+        self.video_combo.blockSignals(False)
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
         target_frame = int(start_frame)
         if target_frame < 0:
@@ -736,15 +779,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Sequence/video cleared")
 
     def _on_sequence_selected(self, index):
-        if self._mode == "video":
-            if index < 0 or index >= len(self._video_paths):
-                return
-            if index == self._video_list_index:
-                return
-            self._stash_video_mask_for_current_frame()
-            self._persist_current_video_masks()
-            self._open_video_at_index(index, start_frame=0)
-            return
         if self._mode != "sequence":
             return
         if index < 0 or index >= len(self._sequence_paths):
@@ -754,16 +788,24 @@ class MainWindow(QMainWindow):
         self._save_sequence_mask_if_needed()
         self._set_sequence_index(index)
 
+    def _on_video_selected(self, index):
+        if self._mode != "video":
+            return
+        if index < 0 or index >= len(self._video_paths):
+            return
+        if index == self._video_list_index:
+            return
+        self._stash_video_mask_for_current_frame()
+        self._persist_current_video_masks()
+        self._open_video_at_index(index, start_frame=0)
+
     def _show_previous_sequence(self):
         if self._mode == "video":
-            if self._video_frame_index > 0:
-                self._set_video_frame_index(self._video_frame_index - 1)
-                return
             if self._video_list_index <= 0:
                 return
             self._stash_video_mask_for_current_frame()
             self._persist_current_video_masks()
-            self._open_video_at_index(self._video_list_index - 1, start_frame=-1)
+            self._open_video_at_index(self._video_list_index - 1, start_frame=0)
             return
         if self._mode != "sequence":
             return
@@ -774,11 +816,6 @@ class MainWindow(QMainWindow):
 
     def _show_next_sequence(self):
         if self._mode == "video":
-            if self._video_frame_index < 0:
-                return
-            if self._video_frame_index < self._video_frame_count - 1:
-                self._set_video_frame_index(self._video_frame_index + 1)
-                return
             if self._video_list_index >= len(self._video_paths) - 1:
                 return
             self._stash_video_mask_for_current_frame()
@@ -905,11 +942,8 @@ class MainWindow(QMainWindow):
 
     def _update_navigation_buttons(self):
         if self._mode == "video":
-            can_prev = self._video_frame_index > 0 or self._video_list_index > 0
-            can_next = (
-                (0 <= self._video_frame_index < self._video_frame_count - 1)
-                or (0 <= self._video_list_index < len(self._video_paths) - 1)
-            )
+            can_prev = self._video_list_index > 0
+            can_next = 0 <= self._video_list_index < len(self._video_paths) - 1
             self.prev_btn.setEnabled(can_prev)
             self.next_btn.setEnabled(can_next)
             self.play_btn.setEnabled(self._video_frame_count > 1)
