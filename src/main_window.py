@@ -124,11 +124,14 @@ class MainWindow(QMainWindow):
         self._sequence_output_dir = None
         self._mode = "none"
         self._video_path = None
+        self._video_paths = []
+        self._video_list_index = -1
         self._video_capture = None
         self._video_frame_count = 0
         self._video_fps = 0.0
         self._video_frame_index = -1
         self._video_frame_masks = {}
+        self._video_masks_by_path = {}
         self._video_frame_cache = OrderedDict()
         self._video_decode_pos = -1
         self._video_cache_limit = 9
@@ -405,7 +408,15 @@ class MainWindow(QMainWindow):
         if self._mode == "video" and self._video_path and self._video_frame_count > 0:
             base = Path(self._video_path).name
             index = self._video_frame_index + 1
-            self.setWindowTitle(f"{self._base_title} - {base} [frame {index}/{self._video_frame_count}]")
+            if self._video_paths and self._video_list_index >= 0:
+                v_num = self._video_list_index + 1
+                v_total = len(self._video_paths)
+                self.setWindowTitle(
+                    f"{self._base_title} - {base} ({v_num}/{v_total}) "
+                    f"[frame {index}/{self._video_frame_count}]"
+                )
+            else:
+                self.setWindowTitle(f"{self._base_title} - {base} [frame {index}/{self._video_frame_count}]")
             return
         name = Path(image_path).name if image_path else ""
         if name:
@@ -610,49 +621,29 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Sequence loaded: {len(self._sequence_paths)} images")
 
     def _load_video(self):
-        video_path, _ = QFileDialog.getOpenFileName(
+        video_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Load video",
+            "Load video(s)",
             "",
             "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv)",
         )
-        if not video_path:
+        if not video_paths:
             return
         self._stop_playback()
         if self._mode == "sequence":
             self._save_sequence_mask_if_needed()
             self._clear_sequence_state(clear_canvas=False)
         self._stash_video_mask_for_current_frame()
+        self._persist_current_video_masks()
         self._clear_video_state()
-        capture = cv2.VideoCapture(video_path)
-        if not capture.isOpened():
-            QMessageBox.warning(self, "Load failed", "Could not open selected video.")
-            capture.release()
-            return
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        if frame_count <= 0:
-            QMessageBox.warning(self, "Load failed", "Video has no readable frames.")
-            capture.release()
-            return
+        self._video_paths = sorted(str(Path(p)) for p in video_paths)
+        self._video_list_index = 0
+        self._video_masks_by_path = {}
         self._mode = "video"
-        self._video_path = video_path
-        self._video_capture = capture
-        self._video_frame_count = frame_count
-        self._video_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        if self._video_fps > 0:
-            self._playback_interval_ms = max(15, int(round(1000.0 / self._video_fps)))
-        else:
-            self._playback_interval_ms = 33
-        self._play_timer.setInterval(self._playback_interval_ms)
-        self._video_frame_index = -1
-        self._video_frame_masks = {}
-        self._video_frame_cache.clear()
-        self._video_decode_pos = -1
+        self.sequence_combo.setEnabled(True)
         self.sequence_combo.clear()
-        self.sequence_combo.setEnabled(False)
-        self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
-        self._set_video_frame_index(0, force=True)
-        self.statusBar().showMessage(f"Video loaded: {Path(video_path).name} ({frame_count} frames)")
+        self.sequence_combo.addItems([Path(p).name for p in self._video_paths])
+        self._open_video_at_index(0, start_frame=0)
 
     def _clear_sequence_state(self, clear_canvas):
         self._sequence_paths = []
@@ -665,16 +656,72 @@ class MainWindow(QMainWindow):
 
     def _clear_video_state(self):
         self._stop_playback()
+        self._persist_current_video_masks()
         if self._video_capture is not None:
             self._video_capture.release()
+        self._video_paths = []
+        self._video_list_index = -1
         self._video_path = None
         self._video_capture = None
         self._video_frame_count = 0
         self._video_fps = 0.0
         self._video_frame_index = -1
         self._video_frame_masks = {}
+        self._video_masks_by_path = {}
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
+
+    def _persist_current_video_masks(self):
+        if self._mode != "video":
+            return
+        if not self._video_path:
+            return
+        self._video_masks_by_path[self._video_path] = dict(self._video_frame_masks)
+
+    def _open_video_at_index(self, video_index, start_frame=0):
+        if video_index < 0 or video_index >= len(self._video_paths):
+            return
+        self._stop_playback()
+        if self._video_capture is not None:
+            self._video_capture.release()
+            self._video_capture = None
+        self._video_list_index = video_index
+        self._video_path = self._video_paths[video_index]
+        capture = cv2.VideoCapture(self._video_path)
+        if not capture.isOpened():
+            QMessageBox.warning(self, "Load failed", f"Could not open video: {Path(self._video_path).name}")
+            capture.release()
+            return
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        if frame_count <= 0:
+            QMessageBox.warning(self, "Load failed", f"Video has no readable frames: {Path(self._video_path).name}")
+            capture.release()
+            return
+        self._video_capture = capture
+        self._video_frame_count = frame_count
+        self._video_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        if self._video_fps > 0:
+            self._playback_interval_ms = max(15, int(round(1000.0 / self._video_fps)))
+        else:
+            self._playback_interval_ms = 33
+        self._play_timer.setInterval(self._playback_interval_ms)
+        self._video_frame_index = -1
+        self._video_decode_pos = -1
+        self._video_frame_cache.clear()
+        self._video_frame_masks = dict(self._video_masks_by_path.get(self._video_path, {}))
+        self.sequence_combo.blockSignals(True)
+        self.sequence_combo.setCurrentIndex(video_index)
+        self.sequence_combo.blockSignals(False)
+        self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
+        target_frame = int(start_frame)
+        if target_frame < 0:
+            target_frame = frame_count - 1
+        target_frame = min(frame_count - 1, max(0, target_frame))
+        self._set_video_frame_index(target_frame, force=True)
+        self.statusBar().showMessage(
+            f"Video loaded: {Path(self._video_path).name} "
+            f"({video_index + 1}/{len(self._video_paths)})"
+        )
 
     def _clear_sequence(self):
         self._stop_playback()
@@ -689,6 +736,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Sequence/video cleared")
 
     def _on_sequence_selected(self, index):
+        if self._mode == "video":
+            if index < 0 or index >= len(self._video_paths):
+                return
+            if index == self._video_list_index:
+                return
+            self._stash_video_mask_for_current_frame()
+            self._persist_current_video_masks()
+            self._open_video_at_index(index, start_frame=0)
+            return
         if self._mode != "sequence":
             return
         if index < 0 or index >= len(self._sequence_paths):
@@ -700,9 +756,14 @@ class MainWindow(QMainWindow):
 
     def _show_previous_sequence(self):
         if self._mode == "video":
-            if self._video_frame_index <= 0:
+            if self._video_frame_index > 0:
+                self._set_video_frame_index(self._video_frame_index - 1)
                 return
-            self._set_video_frame_index(self._video_frame_index - 1)
+            if self._video_list_index <= 0:
+                return
+            self._stash_video_mask_for_current_frame()
+            self._persist_current_video_masks()
+            self._open_video_at_index(self._video_list_index - 1, start_frame=-1)
             return
         if self._mode != "sequence":
             return
@@ -715,9 +776,14 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             if self._video_frame_index < 0:
                 return
-            if self._video_frame_index >= self._video_frame_count - 1:
+            if self._video_frame_index < self._video_frame_count - 1:
+                self._set_video_frame_index(self._video_frame_index + 1)
                 return
-            self._set_video_frame_index(self._video_frame_index + 1)
+            if self._video_list_index >= len(self._video_paths) - 1:
+                return
+            self._stash_video_mask_for_current_frame()
+            self._persist_current_video_masks()
+            self._open_video_at_index(self._video_list_index + 1, start_frame=0)
             return
         if self._mode != "sequence":
             return
@@ -839,8 +905,13 @@ class MainWindow(QMainWindow):
 
     def _update_navigation_buttons(self):
         if self._mode == "video":
-            self.prev_btn.setEnabled(self._video_frame_index > 0)
-            self.next_btn.setEnabled(0 <= self._video_frame_index < self._video_frame_count - 1)
+            can_prev = self._video_frame_index > 0 or self._video_list_index > 0
+            can_next = (
+                (0 <= self._video_frame_index < self._video_frame_count - 1)
+                or (0 <= self._video_list_index < len(self._video_paths) - 1)
+            )
+            self.prev_btn.setEnabled(can_prev)
+            self.next_btn.setEnabled(can_next)
             self.play_btn.setEnabled(self._video_frame_count > 1)
             return
         if self._mode == "sequence":
@@ -891,7 +962,12 @@ class MainWindow(QMainWindow):
         if self._mode != "video":
             return
         if self._video_frame_index >= self._video_frame_count - 1:
-            self._set_video_frame_index(0)
+            if self._video_list_index >= 0 and self._video_list_index < len(self._video_paths) - 1:
+                self._stash_video_mask_for_current_frame()
+                self._persist_current_video_masks()
+                self._open_video_at_index(self._video_list_index + 1, start_frame=0)
+            else:
+                self._set_video_frame_index(0)
         self._play_btn_set_pause()
         self._play_timer.start(max(1, int(self._playback_interval_ms)))
 
@@ -904,10 +980,14 @@ class MainWindow(QMainWindow):
         if self._mode != "video":
             self._stop_playback()
             return
-        if self._video_frame_index >= self._video_frame_count - 1:
-            self._stop_playback()
+        if self._video_frame_index < self._video_frame_count - 1:
+            self._set_video_frame_index(self._video_frame_index + 1)
             return
-        self._set_video_frame_index(self._video_frame_index + 1)
+        if self._video_list_index >= 0 and self._video_list_index < len(self._video_paths) - 1:
+            self._stash_video_mask_for_current_frame()
+            self._persist_current_video_masks()
+            self._open_video_at_index(self._video_list_index + 1, start_frame=0)
+            return
         if self._video_frame_index >= self._video_frame_count - 1:
             self._stop_playback()
 
@@ -987,39 +1067,61 @@ class MainWindow(QMainWindow):
             return
         self._commit_pending_outline()
         self._stash_video_mask_for_current_frame()
-        if not self._video_frame_masks:
+        self._persist_current_video_masks()
+        non_empty = {
+            path: masks
+            for path, masks in self._video_masks_by_path.items()
+            if masks
+        }
+        if not non_empty:
             QMessageBox.information(self, "No masks", "No annotated frames found.")
             return
         output_dir = QFileDialog.getExistingDirectory(self, "Select output folder")
         if not output_dir:
             return
         output_root = Path(output_dir)
-        saved_entries = []
-        for frame_index in sorted(self._video_frame_masks):
-            mask = np.asarray(self._video_frame_masks[frame_index], dtype=np.float32)
-            mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-            mask_name = f"frame_{frame_index:06d}.png"
-            mask_path = output_root / mask_name
-            if not cv2.imwrite(str(mask_path), mask_uint8):
-                QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_name}")
-                return
-            entry = {
-                "frame_index": int(frame_index),
-                "mask_file": mask_name,
-            }
-            if self._video_fps > 0:
-                entry["timestamp_sec"] = frame_index / self._video_fps
-            saved_entries.append(entry)
+        save_multiple = len(non_empty) > 1
+        total_saved = 0
+        videos_manifest = []
+        for video_path in self._video_paths or list(non_empty.keys()):
+            masks_for_video = non_empty.get(video_path, {})
+            if not masks_for_video:
+                continue
+            video_stem = Path(video_path).stem
+            video_output_root = output_root / video_stem if save_multiple else output_root
+            video_output_root.mkdir(parents=True, exist_ok=True)
+            entries = []
+            for frame_index in sorted(masks_for_video):
+                mask = np.asarray(masks_for_video[frame_index], dtype=np.float32)
+                mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
+                mask_name = f"frame_{frame_index:06d}.png"
+                mask_path = video_output_root / mask_name
+                if not cv2.imwrite(str(mask_path), mask_uint8):
+                    QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_name}")
+                    return
+                entries.append(
+                    {
+                        "frame_index": int(frame_index),
+                        "mask_file": mask_name,
+                    }
+                )
+            total_saved += len(entries)
+            videos_manifest.append(
+                {
+                    "source_video": str(video_path),
+                    "mask_count": len(entries),
+                    "masks": entries,
+                }
+            )
+
         manifest = {
-            "source_video": str(self._video_path or ""),
-            "frame_count": int(self._video_frame_count),
-            "fps": float(self._video_fps),
-            "mask_count": len(saved_entries),
-            "masks": saved_entries,
+            "video_count": len(videos_manifest),
+            "total_mask_count": total_saved,
+            "videos": videos_manifest,
         }
         manifest_path = output_root / "video_masks_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        self.statusBar().showMessage(f"Saved {len(saved_entries)} frame masks")
+        self.statusBar().showMessage(f"Saved {total_saved} frame masks")
 
     def _find_sequence_mask_path(self, image_path):
         if not self._sequence_output_dir:
