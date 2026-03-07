@@ -423,16 +423,16 @@ class Canvas(QWidget):
 
     def _roi_outline_thickness_px(self):
         if self.image is None:
-            return 2
+            return 1
         height, width = self.image.shape[:2]
         base = min(height, width)
-        thickness = int(round(base / 700.0))
-        return max(2, min(6, thickness))
+        thickness = int(round(base / 512.0))
+        return max(1, min(6, thickness))
 
     def _roi_outline_pen_width(self):
         thickness_px = self._roi_outline_thickness_px()
         width = int(round(thickness_px * max(0.6, self.scale)))
-        return max(2, min(8, width))
+        return max(1, min(8, width))
 
     def _draw_point(self, point, value):
         if self.mask is None:
