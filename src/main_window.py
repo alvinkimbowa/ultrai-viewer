@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
 )
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
 from .canvas import Canvas
@@ -142,6 +142,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
         self._prev_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
         self._next_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self._prev_shortcut.setEnabled(False)
+        self._next_shortcut.setEnabled(False)
+        self._arrow_repeat_timer = QTimer(self)
+        self._arrow_repeat_timer.timeout.connect(self._on_arrow_repeat_timeout)
+        self._arrow_repeat_direction = 0
+        self._arrow_repeat_started = False
+        QApplication.instance().installEventFilter(self)
         self._wire_actions()
         self._model = ModelIntegration()
         self._last_prediction = None
@@ -501,14 +508,61 @@ class MainWindow(QMainWindow):
         self.video_combo.currentIndexChanged.connect(self._on_video_selected)
         self.prev_btn.clicked.connect(self._show_previous_sequence)
         self.next_btn.clicked.connect(self._show_next_sequence)
-        self._prev_shortcut.activated.connect(self._show_previous_frame)
-        self._next_shortcut.activated.connect(self._show_next_frame)
         self.play_btn.clicked.connect(self._toggle_playback)
         self.frame_first_btn.clicked.connect(self._show_first_frame)
         self.frame_prev_btn.clicked.connect(self._show_previous_frame)
         self.frame_next_btn.clicked.connect(self._show_next_frame)
         self.frame_last_btn.clicked.connect(self._show_last_frame)
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                if event.modifiers() != Qt.KeyboardModifier.NoModifier or self._mode != "video":
+                    return False
+                if event.isAutoRepeat():
+                    return True
+                direction = -1 if event.key() == Qt.Key.Key_Left else 1
+                self._start_arrow_repeat(direction)
+                return True
+        if event.type() == QEvent.Type.KeyRelease:
+            if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                if event.isAutoRepeat():
+                    return True
+                direction = -1 if event.key() == Qt.Key.Key_Left else 1
+                if direction == self._arrow_repeat_direction:
+                    self._stop_arrow_repeat()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _start_arrow_repeat(self, direction):
+        self._stop_arrow_repeat()
+        self._arrow_repeat_direction = int(direction)
+        self._arrow_repeat_started = False
+        if self._arrow_repeat_direction < 0:
+            self._show_previous_frame()
+        else:
+            self._show_next_frame()
+        self._arrow_repeat_timer.start(250)
+
+    def _stop_arrow_repeat(self):
+        if self._arrow_repeat_timer.isActive():
+            self._arrow_repeat_timer.stop()
+        self._arrow_repeat_timer.setInterval(250)
+        self._arrow_repeat_direction = 0
+        self._arrow_repeat_started = False
+
+    def _on_arrow_repeat_timeout(self):
+        if self._arrow_repeat_direction == 0:
+            self._stop_arrow_repeat()
+            return
+        if not self._arrow_repeat_started:
+            self._arrow_repeat_started = True
+            self._arrow_repeat_timer.setInterval(40)
+        if self._arrow_repeat_direction < 0:
+            self._show_previous_frame()
+        else:
+            self._show_next_frame()
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
