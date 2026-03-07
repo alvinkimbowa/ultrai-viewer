@@ -338,7 +338,7 @@ class Canvas(QWidget):
                 contours,
                 -1,
                 (int(color[0]), int(color[1]), int(color[2]), int(contour_alpha)),
-                1,
+                self._roi_outline_thickness_px(),
             )
         else:
             alpha = (self.mask * 255.0 * self.mask_opacity).astype(np.uint8)
@@ -420,6 +420,19 @@ class Canvas(QWidget):
 
     def _brush_thickness(self):
         return max(1, int(self.brush_radius))
+
+    def _roi_outline_thickness_px(self):
+        if self.image is None:
+            return 2
+        height, width = self.image.shape[:2]
+        base = min(height, width)
+        thickness = int(round(base / 700.0))
+        return max(2, min(6, thickness))
+
+    def _roi_outline_pen_width(self):
+        thickness_px = self._roi_outline_thickness_px()
+        width = int(round(thickness_px * max(0.6, self.scale)))
+        return max(2, min(8, width))
 
     def _draw_point(self, point, value):
         if self.mask is None:
@@ -567,7 +580,7 @@ class Canvas(QWidget):
             painter.drawPixmap(target, self.mask_pixmap)
 
         if self.tool == "polyline" and self._poly_points:
-            painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine))
+            painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for point in self._poly_points:
                 screen_point = self._image_to_screen(point)
                 painter.drawEllipse(screen_point, 4, 4)
@@ -576,13 +589,13 @@ class Canvas(QWidget):
                 end = self._image_to_screen(self._poly_points[idx + 1])
                 painter.drawLine(start, end)
         if self.tool == "freehand" and self._freehand_points:
-            painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine))
+            painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._freehand_points) - 1):
                 start = self._image_to_screen(self._freehand_points[idx])
                 end = self._image_to_screen(self._freehand_points[idx + 1])
                 painter.drawLine(start, end)
         if self._last_outline:
-            painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine))
+            painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._last_outline) - 1):
                 start = self._image_to_screen(self._last_outline[idx])
                 end = self._image_to_screen(self._last_outline[idx + 1])
