@@ -26,8 +26,8 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
 )
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
 from .canvas import Canvas
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
         self.frame_next_btn.setAutoRepeatDelay(250)
         self.frame_next_btn.setAutoRepeatInterval(40)
         frame_nav_row.addWidget(self.frame_next_btn, stretch=0)
+        self._init_transport_icons()
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setEnabled(False)
         self.frame_slider.setRange(0, 0)
@@ -214,6 +215,38 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.paint_action)
         self.eraser_action = QAction("Eraser", self)
         tools_menu.addAction(self.eraser_action)
+
+    def _transport_icon(self, name):
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
+        if not icon_path.exists():
+            return None
+        return QIcon(str(icon_path))
+
+    def _init_transport_icons(self):
+        icon_size = QSize(14, 14)
+        self.play_btn.setText("")
+        self.play_btn.setIconSize(icon_size)
+        self.play_btn.setToolTip("Play/Pause")
+        self.frame_prev_btn.setText("")
+        self.frame_prev_btn.setIconSize(icon_size)
+        self.frame_prev_btn.setToolTip("Previous frame")
+        self.frame_next_btn.setText("")
+        self.frame_next_btn.setIconSize(icon_size)
+        self.frame_next_btn.setToolTip("Next frame")
+
+        prev_icon = self._transport_icon("prev")
+        if prev_icon is not None:
+            self.frame_prev_btn.setIcon(prev_icon)
+        else:
+            self.frame_prev_btn.setText("<")
+
+        next_icon = self._transport_icon("next")
+        if next_icon is not None:
+            self.frame_next_btn.setIcon(next_icon)
+        else:
+            self.frame_next_btn.setText(">")
+
+        self._play_btn_set_play()
 
     def _build_sidebar(self):
         panel = QWidget()
@@ -1101,10 +1134,22 @@ class MainWindow(QMainWindow):
             self._stop_playback()
 
     def _play_btn_set_play(self):
-        self.play_btn.setText(">")
+        icon = self._transport_icon("play")
+        if icon is not None:
+            self.play_btn.setText("")
+            self.play_btn.setIcon(icon)
+        else:
+            self.play_btn.setIcon(QIcon())
+            self.play_btn.setText(">")
 
     def _play_btn_set_pause(self):
-        self.play_btn.setText("||")
+        icon = self._transport_icon("pause")
+        if icon is not None:
+            self.play_btn.setText("")
+            self.play_btn.setIcon(icon)
+        else:
+            self.play_btn.setIcon(QIcon())
+            self.play_btn.setText("||")
 
     def _save_sequence_mask_if_needed(self):
         if self._mode != "sequence":
