@@ -250,10 +250,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(sep2)
 
         layout.addWidget(QLabel("Videos:"))
-        self.video_btn = QPushButton("Load video files")
+        self.video_btn = QPushButton("Load video(s)")
         configure_button(self.video_btn)
         layout.addWidget(self.video_btn)
-        self.clear_video_btn = QPushButton("Clear videos")
+        self.clear_video_btn = QPushButton("Clear video(s)")
         configure_button(self.clear_video_btn)
         layout.addWidget(self.clear_video_btn)
         self.video_combo = QComboBox()
