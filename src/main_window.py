@@ -879,6 +879,28 @@ class MainWindow(QMainWindow):
             return
         self._video_masks_by_path[self._video_path] = dict(self._video_frame_masks)
 
+    def _load_existing_video_masks(self, video_path, frame_count):
+        output_dir = (self._video_output_dir or "").strip()
+        if not output_dir:
+            return {}
+        video_mask_dir = Path(output_dir) / Path(video_path).stem
+        if not video_mask_dir.exists() or not video_mask_dir.is_dir():
+            return {}
+
+        loaded = {}
+        for mask_path in sorted(video_mask_dir.glob("frame_*.png")):
+            suffix = mask_path.stem.split("_")[-1]
+            if not suffix.isdigit():
+                continue
+            frame_index = int(suffix)
+            if frame_index < 0 or frame_index >= frame_count:
+                continue
+            mask_gray = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask_gray is None:
+                continue
+            loaded[frame_index] = (mask_gray >= 128).astype(np.float32)
+        return loaded
+
     def _open_video_at_index(self, video_index, start_frame=0):
         if video_index < 0 or video_index >= len(self._video_paths):
             return
@@ -910,7 +932,11 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_decode_pos = -1
         self._video_frame_cache.clear()
-        self._video_frame_masks = dict(self._video_masks_by_path.get(self._video_path, {}))
+        cached_masks = self._video_masks_by_path.get(self._video_path)
+        if cached_masks is None:
+            cached_masks = self._load_existing_video_masks(self._video_path, frame_count)
+            self._video_masks_by_path[self._video_path] = cached_masks
+        self._video_frame_masks = dict(cached_masks)
         self.video_combo.blockSignals(True)
         self.video_combo.setCurrentIndex(video_index)
         self.video_combo.blockSignals(False)
