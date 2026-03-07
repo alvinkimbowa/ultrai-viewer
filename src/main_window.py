@@ -166,8 +166,6 @@ class MainWindow(QMainWindow):
         self._video_frame_count = 0
         self._video_fps = 0.0
         self._video_frame_index = -1
-        self._video_frame_masks = {}
-        self._video_masks_by_path = {}
         self._video_output_dir = None
         self._video_frame_cache = OrderedDict()
         self._video_decode_pos = -1
@@ -629,7 +627,6 @@ class MainWindow(QMainWindow):
         self._stop_playback()
         if self._mode == "video":
             self._stash_video_mask_for_current_frame()
-            self._persist_current_video_masks()
             self._clear_video_state()
         self._mode = "sequence"
         self._sequence_paths = list(image_paths)
@@ -839,11 +836,9 @@ class MainWindow(QMainWindow):
             self._save_sequence_mask_if_needed()
             self._clear_sequence_state(clear_canvas=False)
         self._stash_video_mask_for_current_frame()
-        self._persist_current_video_masks()
         self._clear_video_state()
         self._video_paths = sorted(str(Path(p)) for p in video_paths)
         self._video_list_index = 0
-        self._video_masks_by_path = {}
         self._video_output_dir = output_dir
         self._last_video_output_dir = output_dir
         self._save_persisted_paths()
@@ -864,7 +859,6 @@ class MainWindow(QMainWindow):
 
     def _clear_video_state(self):
         self._stop_playback()
-        self._persist_current_video_masks()
         if self._video_capture is not None:
             self._video_capture.release()
         self.video_combo.clear()
@@ -876,8 +870,6 @@ class MainWindow(QMainWindow):
         self._video_frame_count = 0
         self._video_fps = 0.0
         self._video_frame_index = -1
-        self._video_frame_masks = {}
-        self._video_masks_by_path = {}
         self._video_output_dir = None
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
@@ -898,34 +890,26 @@ class MainWindow(QMainWindow):
         self.canvas.clear_image()
         self.statusBar().showMessage("Video sequence cleared")
 
-    def _persist_current_video_masks(self):
-        if self._mode != "video":
-            return
-        if not self._video_path:
-            return
-        self._video_masks_by_path[self._video_path] = dict(self._video_frame_masks)
-
-    def _load_existing_video_masks(self, video_path, frame_count):
+    def _video_output_root_for_path(self, video_path):
         output_dir = (self._video_output_dir or "").strip()
         if not output_dir:
-            return {}
-        video_mask_dir = Path(output_dir) / Path(video_path).stem
-        if not video_mask_dir.exists() or not video_mask_dir.is_dir():
-            return {}
+            return None
+        return Path(output_dir) / Path(video_path).stem
 
-        loaded = {}
-        for mask_path in sorted(video_mask_dir.glob("frame_*.png")):
-            suffix = mask_path.stem.split("_")[-1]
-            if not suffix.isdigit():
-                continue
-            frame_index = int(suffix)
-            if frame_index < 0 or frame_index >= frame_count:
-                continue
-            mask_gray = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-            if mask_gray is None:
-                continue
-            loaded[frame_index] = (mask_gray >= 128).astype(np.float32)
-        return loaded
+    def _video_mask_path(self, video_path, frame_index):
+        root = self._video_output_root_for_path(video_path)
+        if root is None:
+            return None
+        return root / f"frame_{int(frame_index):06d}.png"
+
+    def _load_saved_video_mask_for_frame(self, video_path, frame_index):
+        mask_path = self._video_mask_path(video_path, frame_index)
+        if mask_path is None or not mask_path.exists():
+            return None
+        mask_gray = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask_gray is None:
+            return None
+        return (mask_gray >= 128).astype(np.float32)
 
     def _open_video_at_index(self, video_index, start_frame=0):
         if video_index < 0 or video_index >= len(self._video_paths):
@@ -958,11 +942,6 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_decode_pos = -1
         self._video_frame_cache.clear()
-        cached_masks = self._video_masks_by_path.get(self._video_path)
-        if cached_masks is None:
-            cached_masks = self._load_existing_video_masks(self._video_path, frame_count)
-            self._video_masks_by_path[self._video_path] = cached_masks
-        self._video_frame_masks = dict(cached_masks)
         self.video_combo.blockSignals(True)
         self.video_combo.setCurrentIndex(video_index)
         self.video_combo.blockSignals(False)
@@ -1009,7 +988,6 @@ class MainWindow(QMainWindow):
         if index == self._video_list_index:
             return
         self._stash_video_mask_for_current_frame()
-        self._persist_current_video_masks()
         self._open_video_at_index(index, start_frame=0)
 
     def _show_previous_sequence(self):
@@ -1017,7 +995,6 @@ class MainWindow(QMainWindow):
             if self._video_list_index <= 0:
                 return
             self._stash_video_mask_for_current_frame()
-            self._persist_current_video_masks()
             self._open_video_at_index(self._video_list_index - 1, start_frame=0)
             return
         if self._mode != "sequence":
@@ -1032,7 +1009,6 @@ class MainWindow(QMainWindow):
             if self._video_list_index >= len(self._video_paths) - 1:
                 return
             self._stash_video_mask_for_current_frame()
-            self._persist_current_video_masks()
             self._open_video_at_index(self._video_list_index + 1, start_frame=0)
             return
         if self._mode != "sequence":
@@ -1180,7 +1156,7 @@ class MainWindow(QMainWindow):
             return
         self._video_frame_index = frame_index
         self.canvas.load_image_array(frame, self._video_path or "")
-        cached_mask = self._video_frame_masks.get(frame_index)
+        cached_mask = self._load_saved_video_mask_for_frame(self._video_path, frame_index)
         if cached_mask is not None:
             self.canvas.set_mask(np.copy(cached_mask))
         else:
@@ -1202,13 +1178,24 @@ class MainWindow(QMainWindow):
     def _stash_video_mask_for_current_frame(self):
         if self._mode != "video":
             return
-        if self._video_frame_index < 0:
+        if self._video_frame_index < 0 or not self._video_path:
             return
         self._commit_pending_outline()
-        if self._canvas_has_roi():
-            self._video_frame_masks[self._video_frame_index] = np.copy(self.canvas.mask)
+        mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
+        if mask_path is None:
             return
-        self._video_frame_masks.pop(self._video_frame_index, None)
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._canvas_has_roi():
+            mask = np.asarray(self.canvas.mask, dtype=np.float32)
+            mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
+            if not cv2.imwrite(str(mask_path), mask_uint8):
+                QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_path.name}")
+            return
+        if mask_path.exists():
+            try:
+                mask_path.unlink()
+            except OSError as exc:
+                QMessageBox.warning(self, "Save error", str(exc))
 
     def _update_navigation_buttons(self):
         if self._mode == "video":
@@ -1294,7 +1281,6 @@ class MainWindow(QMainWindow):
         if self._video_frame_index >= self._video_frame_count - 1:
             if self._video_list_index >= 0 and self._video_list_index < len(self._video_paths) - 1:
                 self._stash_video_mask_for_current_frame()
-                self._persist_current_video_masks()
                 self._open_video_at_index(self._video_list_index + 1, start_frame=0)
             else:
                 self._set_video_frame_index(0)
@@ -1315,7 +1301,6 @@ class MainWindow(QMainWindow):
             return
         if self._video_list_index >= 0 and self._video_list_index < len(self._video_paths) - 1:
             self._stash_video_mask_for_current_frame()
-            self._persist_current_video_masks()
             self._open_video_at_index(self._video_list_index + 1, start_frame=0)
             return
         if self._video_frame_index >= self._video_frame_count - 1:
@@ -1409,15 +1394,6 @@ class MainWindow(QMainWindow):
             return
         self._commit_pending_outline()
         self._stash_video_mask_for_current_frame()
-        self._persist_current_video_masks()
-        non_empty = {
-            path: masks
-            for path, masks in self._video_masks_by_path.items()
-            if masks
-        }
-        if not non_empty:
-            QMessageBox.information(self, "No masks", "No annotated frames found.")
-            return
         output_dir = (self._video_output_dir or "").strip()
         if not output_dir:
             output_dir = QFileDialog.getExistingDirectory(
@@ -1433,28 +1409,27 @@ class MainWindow(QMainWindow):
         output_root = Path(output_dir)
         total_saved = 0
         videos_manifest = []
-        for video_path in self._video_paths or list(non_empty.keys()):
-            masks_for_video = non_empty.get(video_path, {})
-            if not masks_for_video:
+        for video_path in self._video_paths:
+            video_output_root = output_root / Path(video_path).stem
+            if not video_output_root.exists() or not video_output_root.is_dir():
                 continue
-            video_stem = Path(video_path).stem
-            video_output_root = output_root / video_stem
-            video_output_root.mkdir(parents=True, exist_ok=True)
+            mask_files = sorted(video_output_root.glob("frame_*.png"))
+            if not mask_files:
+                continue
             entries = []
-            for frame_index in sorted(masks_for_video):
-                mask = np.asarray(masks_for_video[frame_index], dtype=np.float32)
-                mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-                mask_name = f"frame_{frame_index:06d}.png"
-                mask_path = video_output_root / mask_name
-                if not cv2.imwrite(str(mask_path), mask_uint8):
-                    QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_name}")
-                    return
+            for mask_path in mask_files:
+                suffix = mask_path.stem.split("_")[-1]
+                if not suffix.isdigit():
+                    continue
+                frame_index = int(suffix)
                 entries.append(
                     {
                         "frame_index": int(frame_index),
-                        "mask_file": mask_name,
+                        "mask_file": mask_path.name,
                     }
                 )
+            if not entries:
+                continue
             total_saved += len(entries)
             videos_manifest.append(
                 {
@@ -1463,6 +1438,9 @@ class MainWindow(QMainWindow):
                     "masks": entries,
                 }
             )
+        if not videos_manifest:
+            QMessageBox.information(self, "No masks", "No annotated frames found.")
+            return
 
         manifest = {
             "video_count": len(videos_manifest),
@@ -1847,8 +1825,6 @@ class MainWindow(QMainWindow):
         self._last_prediction = prediction
         if self._last_prediction is not None:
             self.canvas.set_mask(self._last_prediction)
-            if self._mode == "video" and self._video_frame_index >= 0:
-                self._video_frame_masks[self._video_frame_index] = np.copy(self.canvas.mask)
         self.statusBar().showMessage("Segmentation complete")
         self._close_inference_dialog()
 
