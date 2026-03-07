@@ -81,6 +81,22 @@ class MainWindow(QMainWindow):
         self.play_btn.setFixedWidth(26)
         self.play_btn.setFixedHeight(30)
         frame_nav_row.addWidget(self.play_btn, stretch=0)
+        self.frame_prev_btn = QPushButton("<")
+        self.frame_prev_btn.setEnabled(False)
+        self.frame_prev_btn.setFixedWidth(26)
+        self.frame_prev_btn.setFixedHeight(30)
+        self.frame_prev_btn.setAutoRepeat(True)
+        self.frame_prev_btn.setAutoRepeatDelay(250)
+        self.frame_prev_btn.setAutoRepeatInterval(40)
+        frame_nav_row.addWidget(self.frame_prev_btn, stretch=0)
+        self.frame_next_btn = QPushButton(">")
+        self.frame_next_btn.setEnabled(False)
+        self.frame_next_btn.setFixedWidth(26)
+        self.frame_next_btn.setFixedHeight(30)
+        self.frame_next_btn.setAutoRepeat(True)
+        self.frame_next_btn.setAutoRepeatDelay(250)
+        self.frame_next_btn.setAutoRepeatInterval(40)
+        frame_nav_row.addWidget(self.frame_next_btn, stretch=0)
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setEnabled(False)
         self.frame_slider.setRange(0, 0)
@@ -422,9 +438,11 @@ class MainWindow(QMainWindow):
         self.video_combo.currentIndexChanged.connect(self._on_video_selected)
         self.prev_btn.clicked.connect(self._show_previous_sequence)
         self.next_btn.clicked.connect(self._show_next_sequence)
-        self._prev_shortcut.activated.connect(self._show_previous_sequence)
-        self._next_shortcut.activated.connect(self._show_next_sequence)
+        self._prev_shortcut.activated.connect(self._show_previous_frame)
+        self._next_shortcut.activated.connect(self._show_next_frame)
         self.play_btn.clicked.connect(self._toggle_playback)
+        self.frame_prev_btn.clicked.connect(self._show_previous_frame)
+        self.frame_next_btn.clicked.connect(self._show_next_frame)
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
 
     def _center_window(self):
@@ -854,6 +872,22 @@ class MainWindow(QMainWindow):
         self._save_sequence_mask_if_needed()
         self._set_sequence_index(self._sequence_index + 1)
 
+    def _show_previous_frame(self):
+        if self._mode != "video":
+            return
+        if self._video_frame_index <= 0:
+            return
+        self._set_video_frame_index(self._video_frame_index - 1)
+
+    def _show_next_frame(self):
+        if self._mode != "video":
+            return
+        if self._video_frame_index < 0:
+            return
+        if self._video_frame_index >= self._video_frame_count - 1:
+            return
+        self._set_video_frame_index(self._video_frame_index + 1)
+
     def _load_sequence_image(self):
         if self._mode != "sequence":
             return
@@ -967,11 +1001,17 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             can_prev = self._video_list_index > 0
             can_next = 0 <= self._video_list_index < len(self._video_paths) - 1
+            can_prev_frame = self._video_frame_index > 0
+            can_next_frame = (
+                self._video_frame_index >= 0 and self._video_frame_index < self._video_frame_count - 1
+            )
             self.image_prev_btn.setEnabled(False)
             self.image_next_btn.setEnabled(False)
             self.prev_btn.setEnabled(can_prev)
             self.next_btn.setEnabled(can_next)
             self.play_btn.setEnabled(self._video_frame_count > 1)
+            self.frame_prev_btn.setEnabled(can_prev_frame)
+            self.frame_next_btn.setEnabled(can_next_frame)
             return
         if self._mode == "sequence":
             self.image_prev_btn.setEnabled(self._sequence_index > 0)
@@ -979,12 +1019,16 @@ class MainWindow(QMainWindow):
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
             self.play_btn.setEnabled(False)
+            self.frame_prev_btn.setEnabled(False)
+            self.frame_next_btn.setEnabled(False)
             return
         self.image_prev_btn.setEnabled(False)
         self.image_next_btn.setEnabled(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.play_btn.setEnabled(False)
+        self.frame_prev_btn.setEnabled(False)
+        self.frame_next_btn.setEnabled(False)
 
     def _set_slider_state(self, minimum, maximum, enabled):
         self.frame_slider.blockSignals(True)
@@ -993,6 +1037,8 @@ class MainWindow(QMainWindow):
         self.frame_slider.blockSignals(False)
         if not enabled:
             self.play_btn.setEnabled(False)
+            self.frame_prev_btn.setEnabled(False)
+            self.frame_next_btn.setEnabled(False)
 
     def _set_slider_value(self, value):
         self.frame_slider.blockSignals(True)
