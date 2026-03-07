@@ -164,6 +164,7 @@ class MainWindow(QMainWindow):
         self._video_frame_cache = OrderedDict()
         self._video_decode_pos = -1
         self._video_cache_limit = 9
+        self._video_use_random_seek = False
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
         self._playback_interval_ms = 33
@@ -801,6 +802,7 @@ class MainWindow(QMainWindow):
         self._video_masks_by_path = {}
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
+        self._video_use_random_seek = False
 
     def _clear_video_sequence(self):
         if self._mode != "video":
@@ -846,6 +848,7 @@ class MainWindow(QMainWindow):
         self._video_capture = capture
         self._video_frame_count = frame_count
         self._video_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        self._video_use_random_seek = self._supports_random_seek(self._video_path)
         if self._video_fps > 0:
             self._playback_interval_ms = max(15, int(round(1000.0 / self._video_fps)))
         else:
@@ -1006,6 +1009,10 @@ class MainWindow(QMainWindow):
         self._video_decode_pos = -1
         return True
 
+    def _supports_random_seek(self, video_path):
+        suffix = Path(video_path).suffix.lower()
+        return suffix in {".mp4", ".m4v", ".mov"}
+
     def _decode_video_frame(self, frame_index):
         if frame_index in self._video_frame_cache:
             frame = self._video_frame_cache.pop(frame_index)
@@ -1014,17 +1021,37 @@ class MainWindow(QMainWindow):
         if self._video_capture is None:
             return None
 
-        # Sequential decode only. Reopen to restart when requesting older frames.
-        if frame_index <= self._video_decode_pos:
-            if not self._reopen_video_capture():
-                return None
-
         frame = None
-        while self._video_decode_pos < frame_index:
-            success, frame = self._video_capture.read()
-            if not success or frame is None:
-                return None
-            self._video_decode_pos += 1
+        if self._video_use_random_seek:
+            if self._video_decode_pos + 1 == frame_index:
+                success, frame = self._video_capture.read()
+                if success and frame is not None:
+                    self._video_decode_pos = frame_index
+                else:
+                    frame = None
+            if frame is None:
+                self._video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                success, frame = self._video_capture.read()
+                if success and frame is not None:
+                    self._video_decode_pos = frame_index
+                else:
+                    if not self._reopen_video_capture():
+                        return None
+                    while self._video_decode_pos < frame_index:
+                        success, frame = self._video_capture.read()
+                        if not success or frame is None:
+                            return None
+                        self._video_decode_pos += 1
+        else:
+            # Sequential decode only. Reopen to restart when requesting older frames.
+            if frame_index <= self._video_decode_pos:
+                if not self._reopen_video_capture():
+                    return None
+            while self._video_decode_pos < frame_index:
+                success, frame = self._video_capture.read()
+                if not success or frame is None:
+                    return None
+                self._video_decode_pos += 1
 
         if frame.ndim == 3 and frame.shape[2] == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
