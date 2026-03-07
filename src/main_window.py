@@ -1308,7 +1308,7 @@ class MainWindow(QMainWindow):
 
     def _save_current_mask(self):
         if self._mode == "video":
-            self._save_video_frame_mask_dialog()
+            self._save_video_masks()
             return
         self._commit_pending_outline()
         if not self._canvas_has_roi():
@@ -1371,7 +1371,6 @@ class MainWindow(QMainWindow):
         if not output_dir:
             return
         output_root = Path(output_dir)
-        save_multiple = len(non_empty) > 1
         total_saved = 0
         videos_manifest = []
         for video_path in self._video_paths or list(non_empty.keys()):
@@ -1379,7 +1378,7 @@ class MainWindow(QMainWindow):
             if not masks_for_video:
                 continue
             video_stem = Path(video_path).stem
-            video_output_root = output_root / video_stem if save_multiple else output_root
+            video_output_root = output_root / video_stem
             video_output_root.mkdir(parents=True, exist_ok=True)
             entries = []
             for frame_index in sorted(masks_for_video):
