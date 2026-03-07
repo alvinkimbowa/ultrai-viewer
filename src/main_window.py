@@ -350,6 +350,7 @@ class MainWindow(QMainWindow):
         configure_button(self.save_btn)
         layout.addWidget(self.save_btn)
 
+        layout.addSpacing(16)
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setFrameShadow(QFrame.Shadow.Sunken)
@@ -381,6 +382,7 @@ class MainWindow(QMainWindow):
         configure_button(self.save_video_btn)
         layout.addWidget(self.save_video_btn)
 
+        layout.addSpacing(16)
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.Shape.HLine)
         sep3.setFrameShadow(QFrame.Shadow.Sunken)
@@ -411,6 +413,7 @@ class MainWindow(QMainWindow):
         segment_row.addWidget(self.run_batch_btn)
         layout.addLayout(segment_row)
 
+        layout.addSpacing(16)
         sep4 = QFrame()
         sep4.setFrameShape(QFrame.Shape.HLine)
         sep4.setFrameShadow(QFrame.Shadow.Sunken)
@@ -480,6 +483,7 @@ class MainWindow(QMainWindow):
         clear_row.addWidget(self.close_btn)
         layout.addLayout(clear_row)
 
+        layout.addSpacing(6)
         sep_end = QFrame()
         sep_end.setFrameShape(QFrame.Shape.HLine)
         sep_end.setFrameShadow(QFrame.Shadow.Sunken)
