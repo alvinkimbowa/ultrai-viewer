@@ -168,6 +168,7 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_frame_masks = {}
         self._video_masks_by_path = {}
+        self._video_output_dir = None
         self._video_frame_cache = OrderedDict()
         self._video_decode_pos = -1
         self._video_cache_limit = 9
@@ -805,14 +806,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Sequence loaded: {len(self._sequence_paths)} images")
 
     def _load_video(self):
-        video_paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Load video(s)",
-            "",
-            "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv)",
-        )
-        if not video_paths:
+        dialog_result = self._show_video_dialog()
+        if dialog_result is None:
             return
+        video_paths, output_dir = dialog_result
         self._stop_playback()
         if self._mode == "sequence":
             self._save_sequence_mask_if_needed()
@@ -823,6 +820,7 @@ class MainWindow(QMainWindow):
         self._video_paths = sorted(str(Path(p)) for p in video_paths)
         self._video_list_index = 0
         self._video_masks_by_path = {}
+        self._video_output_dir = output_dir
         self._mode = "video"
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
@@ -854,6 +852,7 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_frame_masks = {}
         self._video_masks_by_path = {}
+        self._video_output_dir = None
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
         self._video_use_random_seek = False
@@ -1367,9 +1366,12 @@ class MainWindow(QMainWindow):
         if not non_empty:
             QMessageBox.information(self, "No masks", "No annotated frames found.")
             return
-        output_dir = QFileDialog.getExistingDirectory(self, "Select output folder")
+        output_dir = (self._video_output_dir or "").strip()
         if not output_dir:
-            return
+            output_dir = QFileDialog.getExistingDirectory(self, "Select output folder")
+            if not output_dir:
+                return
+            self._video_output_dir = output_dir
         output_root = Path(output_dir)
         total_saved = 0
         videos_manifest = []
@@ -1493,6 +1495,82 @@ class MainWindow(QMainWindow):
             return None
         if not selected_paths:
             QMessageBox.information(self, "Missing fields", "Select input images or a folder.")
+            return None
+        output_dir = output_line.text().strip()
+        if not output_dir:
+            QMessageBox.information(self, "Missing fields", "Select an output folder.")
+            return None
+        return selected_paths, output_dir
+
+    def _show_video_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Load video sequence")
+        layout = QFormLayout(dialog)
+
+        input_line = QLineEdit(dialog)
+        output_line = QLineEdit(dialog)
+        input_line.setReadOnly(True)
+
+        selected_paths = []
+
+        def select_folder():
+            directory = QFileDialog.getExistingDirectory(dialog, "Select input folder")
+            if directory:
+                paths = sorted(
+                    str(path)
+                    for path in Path(directory).iterdir()
+                    if path.suffix.lower() in (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv")
+                )
+                if paths:
+                    selected_paths[:] = paths
+                    input_line.setText(f"{directory} ({len(paths)} videos)")
+                else:
+                    QMessageBox.information(
+                        dialog, "No videos", "No videos found in the selected folder."
+                    )
+
+        def select_files():
+            files, _ = QFileDialog.getOpenFileNames(
+                dialog,
+                "Select video(s)",
+                "",
+                "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv)",
+            )
+            if files:
+                selected_paths[:] = list(files)
+                input_line.setText(f"{len(files)} videos selected")
+
+        def browse_output():
+            directory = QFileDialog.getExistingDirectory(dialog, "Select output folder")
+            if directory:
+                output_line.setText(directory)
+
+        input_row = QHBoxLayout()
+        folder_btn = QPushButton("Select folder")
+        files_btn = QPushButton("Select videos")
+        folder_btn.clicked.connect(select_folder)
+        files_btn.clicked.connect(select_files)
+        input_row.addWidget(folder_btn)
+        input_row.addWidget(files_btn)
+        layout.addRow("Input source:", input_row)
+        layout.addRow("Input selection:", input_line)
+
+        output_row = QHBoxLayout()
+        output_btn = QPushButton("Browse")
+        output_btn.clicked.connect(browse_output)
+        output_row.addWidget(output_line)
+        output_row.addWidget(output_btn)
+        layout.addRow("Output folder:", output_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        layout.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        if not selected_paths:
+            QMessageBox.information(self, "Missing fields", "Select input videos or a folder.")
             return None
         output_dir = output_line.text().strip()
         if not output_dir:
