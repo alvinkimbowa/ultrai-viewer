@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
 )
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
 from .canvas import Canvas
@@ -173,6 +173,11 @@ class MainWindow(QMainWindow):
         self._video_decode_pos = -1
         self._video_cache_limit = 9
         self._video_use_random_seek = False
+        self._last_image_input_dir = ""
+        self._last_image_output_dir = ""
+        self._last_video_input_dir = ""
+        self._last_video_output_dir = ""
+        self._load_persisted_paths()
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
         self._playback_interval_ms = 33
@@ -235,6 +240,23 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.paint_action)
         self.eraser_action = QAction("Eraser", self)
         tools_menu.addAction(self.eraser_action)
+
+    def _settings(self):
+        return QSettings("UltAI", "UltAI Viewer")
+
+    def _load_persisted_paths(self):
+        settings = self._settings()
+        self._last_image_input_dir = str(settings.value("paths/image_input_dir", "", str) or "")
+        self._last_image_output_dir = str(settings.value("paths/image_output_dir", "", str) or "")
+        self._last_video_input_dir = str(settings.value("paths/video_input_dir", "", str) or "")
+        self._last_video_output_dir = str(settings.value("paths/video_output_dir", "", str) or "")
+
+    def _save_persisted_paths(self):
+        settings = self._settings()
+        settings.setValue("paths/image_input_dir", self._last_image_input_dir)
+        settings.setValue("paths/image_output_dir", self._last_image_output_dir)
+        settings.setValue("paths/video_input_dir", self._last_video_input_dir)
+        settings.setValue("paths/video_output_dir", self._last_video_output_dir)
 
     def _transport_icon(self, name):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
@@ -597,11 +619,13 @@ class MainWindow(QMainWindow):
         image_paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Load image(s)",
-            "",
+            self._last_image_input_dir,
             "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
         )
         if not image_paths:
             return
+        self._last_image_input_dir = str(Path(image_paths[0]).parent)
+        self._save_persisted_paths()
         self._stop_playback()
         if self._mode == "video":
             self._stash_video_mask_for_current_frame()
@@ -821,6 +845,8 @@ class MainWindow(QMainWindow):
         self._video_list_index = 0
         self._video_masks_by_path = {}
         self._video_output_dir = output_dir
+        self._last_video_output_dir = output_dir
+        self._save_persisted_paths()
         self._mode = "video"
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
@@ -1394,10 +1420,16 @@ class MainWindow(QMainWindow):
             return
         output_dir = (self._video_output_dir or "").strip()
         if not output_dir:
-            output_dir = QFileDialog.getExistingDirectory(self, "Select output folder")
+            output_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select output folder",
+                self._last_video_output_dir or self._last_video_input_dir,
+            )
             if not output_dir:
                 return
             self._video_output_dir = output_dir
+            self._last_video_output_dir = output_dir
+            self._save_persisted_paths()
         output_root = Path(output_dir)
         total_saved = 0
         videos_manifest = []
@@ -1464,7 +1496,9 @@ class MainWindow(QMainWindow):
         selected_paths = []
 
         def select_folder():
-            directory = QFileDialog.getExistingDirectory(dialog, "Select input folder")
+            directory = QFileDialog.getExistingDirectory(
+                dialog, "Select input folder", self._last_image_input_dir
+            )
             if directory:
                 paths = sorted(
                     str(path)
@@ -1474,6 +1508,8 @@ class MainWindow(QMainWindow):
                 if paths:
                     selected_paths[:] = paths
                     input_line.setText(f"{directory} ({len(paths)} images)")
+                    self._last_image_input_dir = directory
+                    self._save_persisted_paths()
                 else:
                     QMessageBox.information(
                         dialog, "No images", "No images found in the selected folder."
@@ -1483,17 +1519,25 @@ class MainWindow(QMainWindow):
             files, _ = QFileDialog.getOpenFileNames(
                 dialog,
                 "Select images",
-                "",
+                self._last_image_input_dir,
                 "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
             )
             if files:
                 selected_paths[:] = list(files)
                 input_line.setText(f"{len(files)} images selected")
+                self._last_image_input_dir = str(Path(files[0]).parent)
+                self._save_persisted_paths()
 
         def browse_output():
-            directory = QFileDialog.getExistingDirectory(dialog, "Select output folder")
+            directory = QFileDialog.getExistingDirectory(
+                dialog,
+                "Select output folder",
+                self._last_image_output_dir or self._last_image_input_dir,
+            )
             if directory:
                 output_line.setText(directory)
+                self._last_image_output_dir = directory
+                self._save_persisted_paths()
 
         input_row = QHBoxLayout()
         folder_btn = QPushButton("Select folder")
@@ -1526,6 +1570,10 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.information(self, "Missing fields", "Select an output folder.")
             return None
+        self._last_image_output_dir = output_dir
+        if selected_paths:
+            self._last_image_input_dir = str(Path(selected_paths[0]).parent)
+        self._save_persisted_paths()
         return selected_paths, output_dir
 
     def _show_video_dialog(self):
@@ -1540,7 +1588,9 @@ class MainWindow(QMainWindow):
         selected_paths = []
 
         def select_folder():
-            directory = QFileDialog.getExistingDirectory(dialog, "Select input folder")
+            directory = QFileDialog.getExistingDirectory(
+                dialog, "Select input folder", self._last_video_input_dir
+            )
             if directory:
                 paths = sorted(
                     str(path)
@@ -1550,6 +1600,8 @@ class MainWindow(QMainWindow):
                 if paths:
                     selected_paths[:] = paths
                     input_line.setText(f"{directory} ({len(paths)} videos)")
+                    self._last_video_input_dir = directory
+                    self._save_persisted_paths()
                 else:
                     QMessageBox.information(
                         dialog, "No videos", "No videos found in the selected folder."
@@ -1559,17 +1611,25 @@ class MainWindow(QMainWindow):
             files, _ = QFileDialog.getOpenFileNames(
                 dialog,
                 "Select video(s)",
-                "",
+                self._last_video_input_dir,
                 "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv)",
             )
             if files:
                 selected_paths[:] = list(files)
                 input_line.setText(f"{len(files)} videos selected")
+                self._last_video_input_dir = str(Path(files[0]).parent)
+                self._save_persisted_paths()
 
         def browse_output():
-            directory = QFileDialog.getExistingDirectory(dialog, "Select output folder")
+            directory = QFileDialog.getExistingDirectory(
+                dialog,
+                "Select output folder",
+                self._video_output_dir or self._last_video_output_dir or self._last_video_input_dir,
+            )
             if directory:
                 output_line.setText(directory)
+                self._last_video_output_dir = directory
+                self._save_persisted_paths()
 
         input_row = QHBoxLayout()
         folder_btn = QPushButton("Select folder")
@@ -1602,6 +1662,10 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.information(self, "Missing fields", "Select an output folder.")
             return None
+        self._last_video_output_dir = output_dir
+        if selected_paths:
+            self._last_video_input_dir = str(Path(selected_paths[0]).parent)
+        self._save_persisted_paths()
         return selected_paths, output_dir
 
     def _preload_model(self):
