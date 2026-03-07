@@ -34,7 +34,6 @@ from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from threading import Event
 from collections import OrderedDict
 from pathlib import Path
-import json
 import numpy as np
 import cv2
 import tifffile
@@ -1392,6 +1391,9 @@ class MainWindow(QMainWindow):
         if self._mode != "video":
             QMessageBox.information(self, "No video", "Load a video first.")
             return
+        if not self._video_path:
+            QMessageBox.information(self, "No video", "Load a video first.")
+            return
         self._commit_pending_outline()
         self._stash_video_mask_for_current_frame()
         output_dir = (self._video_output_dir or "").strip()
@@ -1406,50 +1408,20 @@ class MainWindow(QMainWindow):
             self._video_output_dir = output_dir
             self._last_video_output_dir = output_dir
             self._save_persisted_paths()
-        output_root = Path(output_dir)
-        total_saved = 0
-        videos_manifest = []
-        for video_path in self._video_paths:
-            video_output_root = output_root / Path(video_path).stem
-            if not video_output_root.exists() or not video_output_root.is_dir():
-                continue
-            mask_files = sorted(video_output_root.glob("frame_*.png"))
-            if not mask_files:
-                continue
-            entries = []
-            for mask_path in mask_files:
+        video_output_root = Path(output_dir) / Path(self._video_path).stem
+        annotated_count = 0
+        if video_output_root.exists() and video_output_root.is_dir():
+            for mask_path in sorted(video_output_root.glob("frame_*.png")):
                 suffix = mask_path.stem.split("_")[-1]
-                if not suffix.isdigit():
-                    continue
-                frame_index = int(suffix)
-                entries.append(
-                    {
-                        "frame_index": int(frame_index),
-                        "mask_file": mask_path.name,
-                    }
-                )
-            if not entries:
-                continue
-            total_saved += len(entries)
-            videos_manifest.append(
-                {
-                    "source_video": str(video_path),
-                    "mask_count": len(entries),
-                    "masks": entries,
-                }
-            )
-        if not videos_manifest:
+                if suffix.isdigit():
+                    annotated_count += 1
+        if annotated_count <= 0:
             QMessageBox.information(self, "No masks", "No annotated frames found.")
             return
-
-        manifest = {
-            "video_count": len(videos_manifest),
-            "total_mask_count": total_saved,
-            "videos": videos_manifest,
-        }
-        manifest_path = output_root / "video_masks_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        self.statusBar().showMessage(f"Saved {total_saved} frame masks")
+        self.statusBar().showMessage(
+            f"Saved {annotated_count}/{self._video_frame_count} annotated frames "
+            f"for {Path(self._video_path).name}"
+        )
 
     def _find_sequence_mask_path(self, image_path):
         if not self._sequence_output_dir:
