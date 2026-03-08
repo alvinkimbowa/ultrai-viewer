@@ -534,9 +534,15 @@ class Canvas(QWidget):
         self.update()
 
     def _prepare_for_new_outline(self):
-        self.commit_pending_outline_to_mask()
+        if self.image is not None:
+            self._ensure_mask()
+            if self.mask is not None:
+                self.mask.fill(0.0)
+                self._refresh_mask_pixmap()
+        self._last_outline = []
         self._freehand_points = []
         self._poly_points = []
+        self.update()
 
     def _finish_polyline(self):
         if len(self._poly_points) < 2:
