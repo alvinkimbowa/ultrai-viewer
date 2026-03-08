@@ -1655,6 +1655,8 @@ class MainWindow(QMainWindow):
 
         input_line = QLineEdit(dialog)
         output_line = QLineEdit(dialog)
+        base_dir = Path(__file__).resolve().parent.parent
+        output_line.setText(str(base_dir / "data" / "annotations"))
         input_line.setReadOnly(True)
 
         selected_paths = []

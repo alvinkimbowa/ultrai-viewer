@@ -21,6 +21,7 @@ class Canvas(QWidget):
         self.mask = None
         self.mask_pixmap = None
         self.mask_opacity = 0.5
+        self.mask_visible = True
         self.show_contour_only = True
         self._undo_stack = []
         self._redo_stack = []
@@ -197,6 +198,10 @@ class Canvas(QWidget):
         self.show_contour_only = bool(enabled)
         if self.mask is not None:
             self._refresh_mask_pixmap()
+        self.update()
+
+    def set_mask_visible(self, enabled):
+        self.mask_visible = bool(enabled)
         self.update()
 
     def set_tool(self, tool_name):
@@ -684,10 +689,10 @@ class Canvas(QWidget):
         draw_h = int(pix_h * scale)
         target = QRect(offset_x, offset_y, draw_w, draw_h)
         painter.drawPixmap(target, self.pixmap)
-        if self.mask_pixmap is not None:
+        if self.mask_visible and self.mask_pixmap is not None:
             painter.drawPixmap(target, self.mask_pixmap)
 
-        if self.tool == "polyline" and self._poly_points:
+        if self.mask_visible and self.tool == "polyline" and self._poly_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for point in self._poly_points:
                 screen_point = self._image_to_screen(point)
@@ -696,13 +701,13 @@ class Canvas(QWidget):
                 start = self._image_to_screen(self._poly_points[idx])
                 end = self._image_to_screen(self._poly_points[idx + 1])
                 painter.drawLine(start, end)
-        if self.tool == "freehand" and self._freehand_points:
+        if self.mask_visible and self.tool == "freehand" and self._freehand_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._freehand_points) - 1):
                 start = self._image_to_screen(self._freehand_points[idx])
                 end = self._image_to_screen(self._freehand_points[idx + 1])
                 painter.drawLine(start, end)
-        if self._last_outline:
+        if self.mask_visible and self._last_outline:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._last_outline) - 1):
                 start = self._image_to_screen(self._last_outline[idx])
