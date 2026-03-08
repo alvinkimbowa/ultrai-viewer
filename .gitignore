@@ -1,5 +1,7 @@
 assets/
 data/
+annotations/
+videos/
 
 
 # Byte-compiled / optimized / DLL files
