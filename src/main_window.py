@@ -859,7 +859,8 @@ class MainWindow(QMainWindow):
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
-        self._open_video_at_index(0, start_frame=0)
+        resume_video_index, resume_frame_index = self._find_resume_video_position()
+        self._open_video_at_index(resume_video_index, start_frame=resume_frame_index)
 
     def _clear_sequence_state(self, clear_canvas):
         self._sequence_paths = []
@@ -916,6 +917,37 @@ class MainWindow(QMainWindow):
         if root is None:
             return None
         return root / f"frame_{int(frame_index):06d}.png"
+
+    def _last_annotated_frame_for_video(self, video_path):
+        video_output_root = self._video_output_root_for_path(video_path)
+        if video_output_root is None or not video_output_root.exists():
+            return -1
+        last_frame = -1
+        for mask_path in sorted(video_output_root.glob("frame_*.png")):
+            stem = mask_path.stem
+            if not stem.startswith("frame_"):
+                continue
+            try:
+                frame_index = int(stem.split("_")[-1])
+            except ValueError:
+                continue
+            if frame_index > last_frame:
+                last_frame = frame_index
+        return last_frame
+
+    def _find_resume_video_position(self):
+        if not self._video_paths:
+            return 0, 0
+        last_video_index = -1
+        last_frame_index = -1
+        for video_index, video_path in enumerate(self._video_paths):
+            frame_index = self._last_annotated_frame_for_video(video_path)
+            if frame_index >= 0:
+                last_video_index = video_index
+                last_frame_index = frame_index
+        if last_video_index < 0:
+            return 0, 0
+        return last_video_index, last_frame_index
 
     def _load_saved_video_mask_for_frame(self, video_path, frame_index):
         mask_path = self._video_mask_path(video_path, frame_index)
