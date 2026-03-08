@@ -447,6 +447,7 @@ class MainWindow(QMainWindow):
         payload = {
             "version": 1,
             "label_set": list(self._nerve_labels),
+            "video_count": len(self._video_paths),
             "videos": videos,
         }
         try:
@@ -1031,7 +1032,7 @@ class MainWindow(QMainWindow):
         dialog_result = self._show_video_dialog()
         if dialog_result is None:
             return
-        video_paths, output_dir = dialog_result
+        video_paths, output_dir, input_dir = dialog_result
         self._stop_playback()
         if self._mode == "sequence":
             self._save_sequence_mask_if_needed()
@@ -1040,6 +1041,10 @@ class MainWindow(QMainWindow):
         self._clear_video_state()
         self._video_paths = sorted(str(Path(p)) for p in video_paths)
         self._video_list_index = 0
+        input_name = Path(input_dir).name.strip() if input_dir else ""
+        if not input_name:
+            input_name = "videos"
+        self._video_manifest_name = f"{input_name}_nerve_manifest.json"
         self._video_output_dir = output_dir
         self._last_video_output_dir = output_dir
         self._save_persisted_paths()
@@ -1760,8 +1765,10 @@ class MainWindow(QMainWindow):
         input_line.setReadOnly(True)
 
         selected_paths = []
+        selected_input_dir = ""
 
         def select_folder():
+            nonlocal selected_input_dir
             directory = QFileDialog.getExistingDirectory(
                 dialog, "Select input folder", self._last_video_input_dir
             )
@@ -1774,6 +1781,7 @@ class MainWindow(QMainWindow):
                 if paths:
                     selected_paths[:] = paths
                     input_line.setText(f"{directory} ({len(paths)} videos)")
+                    selected_input_dir = directory
                     self._last_video_input_dir = directory
                     self._save_persisted_paths()
                 else:
@@ -1782,6 +1790,7 @@ class MainWindow(QMainWindow):
                     )
 
         def select_files():
+            nonlocal selected_input_dir
             files, _ = QFileDialog.getOpenFileNames(
                 dialog,
                 "Select video(s)",
@@ -1791,7 +1800,12 @@ class MainWindow(QMainWindow):
             if files:
                 selected_paths[:] = list(files)
                 input_line.setText(f"{len(files)} videos selected")
-                self._last_video_input_dir = str(Path(files[0]).parent)
+                parent_dirs = sorted({str(Path(path).parent) for path in files})
+                if len(parent_dirs) == 1:
+                    selected_input_dir = parent_dirs[0]
+                else:
+                    selected_input_dir = str(Path(parent_dirs[0]))
+                self._last_video_input_dir = selected_input_dir
                 self._save_persisted_paths()
 
         def browse_output():
@@ -1838,9 +1852,11 @@ class MainWindow(QMainWindow):
             return None
         self._last_video_output_dir = output_dir
         if selected_paths:
-            self._last_video_input_dir = str(Path(selected_paths[0]).parent)
+            if not selected_input_dir:
+                selected_input_dir = str(Path(selected_paths[0]).parent)
+            self._last_video_input_dir = selected_input_dir
         self._save_persisted_paths()
-        return selected_paths, output_dir
+        return selected_paths, output_dir, selected_input_dir
 
     def _preload_model(self):
         if not self._model.has_model():
