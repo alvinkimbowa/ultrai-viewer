@@ -39,6 +39,7 @@ class Canvas(QWidget):
         self.scale = 1.0
         self.min_scale = 0.1
         self.max_scale = 10.0
+        self._auto_fit_to_window = True
         self._scroll_x = 0
         self._scroll_y = 0
 
@@ -681,6 +682,9 @@ class Canvas(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if self._auto_fit_to_window and self.pixmap is not None:
+            self.fit_to_window()
+            return
         self._update_scrollbars()
 
     def wheelEvent(self, event):
