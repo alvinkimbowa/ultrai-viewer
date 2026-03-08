@@ -450,6 +450,17 @@ class Canvas(QWidget):
             self._brush_thickness(),
         )
 
+    def _begin_replacement_roi(self):
+        if self.image is None:
+            return
+        self._ensure_mask()
+        height, width = self.image.shape[:2]
+        self.mask = np.zeros((height, width), dtype=np.float32)
+        self._last_outline = []
+        self._refresh_mask_pixmap()
+        self._mask_touched = True
+        self._push_history()
+
     def _finish_polyline(self):
         if len(self._poly_points) < 2:
             self._poly_points = []
@@ -479,9 +490,9 @@ class Canvas(QWidget):
             if point is None:
                 return
             if self.tool == "freehand":
+                self._begin_replacement_roi()
                 self._drawing = True
                 self._freehand_points = [point]
-                self._last_outline = []
                 self.update()
             elif self.tool == "brush":
                 self._ensure_mask()
@@ -498,6 +509,8 @@ class Canvas(QWidget):
                 self._refresh_mask_pixmap()
                 self.update()
             elif self.tool == "polyline":
+                if not self._poly_points:
+                    self._begin_replacement_roi()
                 self._poly_points.append(point)
                 self.update()
         elif event.button() == Qt.MouseButton.RightButton:
