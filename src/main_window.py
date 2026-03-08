@@ -34,6 +34,7 @@ from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from threading import Event
 from collections import OrderedDict
 from pathlib import Path
+import sys
 import numpy as np
 import cv2
 import tifffile
@@ -252,6 +253,11 @@ class MainWindow(QMainWindow):
 
     def _settings(self):
         return QSettings("UltAI", "UltAI Viewer")
+
+    def _runtime_base_dir(self):
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parent.parent
 
     def _load_persisted_paths(self):
         settings = self._settings()
@@ -1663,8 +1669,8 @@ class MainWindow(QMainWindow):
 
         input_line = QLineEdit(dialog)
         output_line = QLineEdit(dialog)
-        base_dir = Path(__file__).resolve().parent.parent
-        output_line.setText(str(base_dir / "data" / "annotations"))
+        base_dir = self._runtime_base_dir()
+        output_line.setText(str(base_dir / "annotations"))
         input_line.setReadOnly(True)
 
         selected_paths = []
