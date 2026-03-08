@@ -923,6 +923,69 @@ class MainWindow(QMainWindow):
             return None
         return (mask_gray >= 128).astype(np.float32)
 
+    def _propagate_mask_with_optical_flow(self, src_frame, dst_frame, src_mask):
+        if src_frame is None or dst_frame is None or src_mask is None:
+            return None
+        src_gray = cv2.cvtColor(np.asarray(src_frame), cv2.COLOR_RGB2GRAY)
+        dst_gray = cv2.cvtColor(np.asarray(dst_frame), cv2.COLOR_RGB2GRAY)
+        mask = (np.asarray(src_mask, dtype=np.float32) >= 0.5).astype(np.uint8)
+        if mask.ndim != 2 or not np.any(mask):
+            return None
+
+        flow = cv2.calcOpticalFlowFarneback(
+            src_gray,
+            dst_gray,
+            None,
+            pyr_scale=0.5,
+            levels=3,
+            winsize=21,
+            iterations=3,
+            poly_n=5,
+            poly_sigma=1.2,
+            flags=0,
+        )
+
+        height, width = src_gray.shape
+        grid_x, grid_y = np.meshgrid(
+            np.arange(width, dtype=np.float32),
+            np.arange(height, dtype=np.float32),
+        )
+        map_x = grid_x - flow[:, :, 0]
+        map_y = grid_y - flow[:, :, 1]
+        warped = cv2.remap(
+            mask.astype(np.float32),
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        binary = (warped >= 0.5).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        if not np.any(binary):
+            return None
+        return binary.astype(np.float32)
+
+    def _maybe_propagate_mask_to_next_frame(self, src_index, dst_index, src_frame, dst_frame):
+        if self._mode != "video":
+            return None
+        if src_index < 0 or dst_index < 0:
+            return None
+        if dst_index != src_index + 1:
+            return None
+        if self._load_saved_video_mask_for_frame(self._video_path, dst_index) is not None:
+            return None
+        self._commit_pending_outline()
+        if not self._canvas_has_roi():
+            return None
+        try:
+            propagated = self._propagate_mask_with_optical_flow(src_frame, dst_frame, self.canvas.mask)
+        except Exception:
+            return None
+        return propagated
+
     def _open_video_at_index(self, video_index, start_frame=0):
         if video_index < 0 or video_index >= len(self._video_paths):
             return
@@ -1160,17 +1223,30 @@ class MainWindow(QMainWindow):
             return
         if not force and frame_index == self._video_frame_index:
             return
+        previous_index = self._video_frame_index
+        source_frame = None if self.canvas.image is None else np.copy(self.canvas.image)
         self._stash_video_mask_for_current_frame()
         frame = self._decode_video_frame(frame_index)
         if frame is None:
             self._stop_playback()
             QMessageBox.warning(self, "Frame error", f"Could not decode frame {frame_index}.")
             return
+        propagated_mask = None
+        if source_frame is not None:
+            propagated_mask = self._maybe_propagate_mask_to_next_frame(
+                previous_index,
+                frame_index,
+                source_frame,
+                frame,
+            )
         self._video_frame_index = frame_index
         self.canvas.load_image_array(frame, self._video_path or "")
         cached_mask = self._load_saved_video_mask_for_frame(self._video_path, frame_index)
         if cached_mask is not None:
             self.canvas.set_mask(np.copy(cached_mask))
+        elif propagated_mask is not None:
+            self.canvas.set_mask(propagated_mask)
+            self.statusBar().showMessage(f"Propagated mask to frame {frame_index + 1}")
         else:
             self.canvas.clear_mask()
         self._set_slider_value(frame_index)
@@ -1196,8 +1272,8 @@ class MainWindow(QMainWindow):
         mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
         if mask_path is None:
             return
-        mask_path.parent.mkdir(parents=True, exist_ok=True)
         if self._canvas_has_roi():
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
             mask = np.asarray(self.canvas.mask, dtype=np.float32)
             mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
             if not cv2.imwrite(str(mask_path), mask_uint8):
