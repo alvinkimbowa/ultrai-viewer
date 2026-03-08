@@ -147,8 +147,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
         self._prev_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
         self._next_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
+        self._play_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         self._prev_shortcut.setEnabled(False)
         self._next_shortcut.setEnabled(False)
+        self._play_shortcut.setEnabled(True)
         self._arrow_repeat_timer = QTimer(self)
         self._arrow_repeat_timer.timeout.connect(self._on_arrow_repeat_timeout)
         self._arrow_repeat_direction = 0
@@ -176,7 +178,18 @@ class MainWindow(QMainWindow):
         self._video_decode_pos = -1
         self._video_cache_limit = 9
         self._video_use_random_seek = False
-        self._default_nerves = ["ulnar", "median", "radial", "plex", "unknown"]
+        self._default_nerves = [
+            "ulnar",
+            "median",
+            "radial",
+            "plex",
+            "lfcn",
+            "peroneal",
+            "fibular",
+            "tibial",
+            "sural branch",
+            "unknown",
+        ]
         self._nerve_labels = list(self._default_nerves)
         self._video_nerve_map = {}
         self._video_nerve_updated_at = {}
@@ -447,7 +460,7 @@ class MainWindow(QMainWindow):
         payload = {
             "version": 1,
             "label_set": list(self._nerve_labels),
-            "video_count": len(self._video_paths),
+            "video_count": len(videos),
             "videos": videos,
         }
         try:
@@ -731,6 +744,7 @@ class MainWindow(QMainWindow):
         self.prev_btn.clicked.connect(self._show_previous_sequence)
         self.next_btn.clicked.connect(self._show_next_sequence)
         self.add_nerve_btn.clicked.connect(self._add_custom_nerve_label)
+        self._play_shortcut.activated.connect(self._toggle_playback)
         self.play_btn.clicked.connect(self._toggle_playback)
         self.frame_first_btn.clicked.connect(self._show_first_frame)
         self.frame_prev_btn.clicked.connect(self._show_previous_frame)
