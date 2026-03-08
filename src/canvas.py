@@ -30,11 +30,15 @@ class Canvas(QWidget):
         self.brush_radius = 4
         self.fill_roi = False
         self._drawing = False
+        self._moving_annotation = False
         self._last_point = None
         self._poly_points = []
         self._freehand_points = []
         self._last_outline = []
         self._cursor_pos = None
+        self._move_anchor_point = None
+        self._move_source_mask = None
+        self._move_source_outline = []
 
         self.scale = 1.0
         self.min_scale = 0.1
@@ -198,6 +202,7 @@ class Canvas(QWidget):
     def set_tool(self, tool_name):
         self.tool = tool_name
         self._drawing = False
+        self._moving_annotation = False
         self._poly_points = []
         self._freehand_points = []
         self.update()
@@ -451,16 +456,87 @@ class Canvas(QWidget):
             self._brush_thickness(),
         )
 
-    def _begin_replacement_roi(self):
-        if self.image is None:
+    def _has_annotation_at_point(self, point):
+        if point is None:
+            return False
+        if self.mask is not None:
+            x = max(0, min(self.mask.shape[1] - 1, point.x()))
+            y = max(0, min(self.mask.shape[0] - 1, point.y()))
+            if self.mask[y, x] >= 0.5:
+                return True
+        if len(self._last_outline) >= 3:
+            contour = np.array(
+                [[p.x(), p.y()] for p in self._last_outline],
+                dtype=np.float32,
+            ).reshape((-1, 1, 2))
+            inside = cv2.pointPolygonTest(contour, (float(point.x()), float(point.y())), False)
+            if inside >= 0:
+                return True
+        return False
+
+    def _translate_mask(self, mask, dx, dy):
+        if mask is None:
+            return None
+        height, width = mask.shape[:2]
+        matrix = np.float32([[1, 0, dx], [0, 1, dy]])
+        shifted = cv2.warpAffine(
+            mask.astype(np.float32),
+            matrix,
+            (width, height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        return shifted
+
+    def _translate_outline(self, outline, dx, dy):
+        if not outline:
+            return []
+        translated = []
+        width = self.image.shape[1] if self.image is not None else 0
+        height = self.image.shape[0] if self.image is not None else 0
+        for point in outline:
+            x = point.x() + dx
+            y = point.y() + dy
+            if width > 0:
+                x = max(0, min(width - 1, x))
+            if height > 0:
+                y = max(0, min(height - 1, y))
+            translated.append(QPoint(x, y))
+        return translated
+
+    def _start_annotation_move(self, point):
+        self._moving_annotation = True
+        self._drawing = False
+        self._move_anchor_point = QPoint(point)
+        self._move_source_mask = None if self.mask is None else np.copy(self.mask)
+        self._move_source_outline = [QPoint(p) for p in self._last_outline]
+
+    def _update_annotation_move(self, point):
+        if not self._moving_annotation or self._move_anchor_point is None:
             return
-        self._ensure_mask()
-        height, width = self.image.shape[:2]
-        self.mask = np.zeros((height, width), dtype=np.float32)
-        self._last_outline = []
+        dx = int(point.x() - self._move_anchor_point.x())
+        dy = int(point.y() - self._move_anchor_point.y())
+        self.mask = self._translate_mask(self._move_source_mask, dx, dy)
+        self._last_outline = self._translate_outline(self._move_source_outline, dx, dy)
         self._refresh_mask_pixmap()
+        self.update()
+
+    def _finish_annotation_move(self):
+        if not self._moving_annotation:
+            return
+        self._moving_annotation = False
+        self._move_anchor_point = None
+        self._move_source_mask = None
+        self._move_source_outline = []
         self._mask_touched = True
         self._push_history()
+        self.update()
+
+    def _prepare_for_new_outline(self):
+        self.commit_pending_outline_to_mask()
+        self._freehand_points = []
+        self._poly_points = []
 
     def _finish_polyline(self):
         if len(self._poly_points) < 2:
@@ -490,8 +566,11 @@ class Canvas(QWidget):
             point = self._screen_to_image(event.position().toPoint())
             if point is None:
                 return
+            if self.tool in ("select", "freehand", "polyline") and self._has_annotation_at_point(point):
+                self._start_annotation_move(point)
+                return
             if self.tool == "freehand":
-                self._begin_replacement_roi()
+                self._prepare_for_new_outline()
                 self._drawing = True
                 self._freehand_points = [point]
                 self.update()
@@ -511,7 +590,7 @@ class Canvas(QWidget):
                 self.update()
             elif self.tool == "polyline":
                 if not self._poly_points:
-                    self._begin_replacement_roi()
+                    self._prepare_for_new_outline()
                 self._poly_points.append(point)
                 self.update()
         elif event.button() == Qt.MouseButton.RightButton:
@@ -522,6 +601,10 @@ class Canvas(QWidget):
         if self.image is None:
             return
         self._cursor_pos = self._screen_to_image(event.position().toPoint())
+        if self._moving_annotation:
+            if self._cursor_pos is not None:
+                self._update_annotation_move(self._cursor_pos)
+            return
         if not self._drawing:
             if self.tool in ("brush", "eraser"):
                 self.update()
@@ -545,6 +628,9 @@ class Canvas(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._moving_annotation:
+                self._finish_annotation_move()
+                return
             if self.tool == "freehand":
                 if self.fill_roi and len(self._freehand_points) > 2:
                     self._ensure_mask()
