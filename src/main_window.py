@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QRadioButton,
     QInputDialog,
+    QGridLayout,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
@@ -337,14 +338,14 @@ class MainWindow(QMainWindow):
         self._nerve_button_group = QButtonGroup(self)
         self._nerve_button_group.setExclusive(True)
 
-        for label in self._nerve_labels:
+        for index, label in enumerate(self._nerve_labels):
             button = QRadioButton(label)
             button.toggled.connect(lambda checked, lbl=label: self._on_nerve_label_selected(lbl, checked))
             self._nerve_button_group.addButton(button)
             self._nerve_buttons[label] = button
-            self.nerve_labels_layout.addWidget(button)
-
-        self.nerve_labels_layout.addStretch()
+            row = index // 2
+            col = index % 2
+            self.nerve_labels_layout.addWidget(button, row, col)
         has_video = self._mode == "video" and bool(self._video_path)
         self.nerve_labels_container.setEnabled(has_video)
         self.add_nerve_btn.setEnabled(self._mode == "video")
@@ -366,8 +367,12 @@ class MainWindow(QMainWindow):
         self._classification_ui_updating = True
         try:
             selected = self._video_nerve_map.get(video_path)
+            if self._nerve_button_group is not None:
+                self._nerve_button_group.setExclusive(False)
             for label, button in self._nerve_buttons.items():
                 button.setChecked(bool(selected and label == selected))
+            if self._nerve_button_group is not None:
+                self._nerve_button_group.setExclusive(True)
         finally:
             self._classification_ui_updating = False
         self._update_nerve_summary_label()
@@ -561,7 +566,7 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(QLabel("Nerve class:"))
         self.nerve_labels_container = QWidget()
-        self.nerve_labels_layout = QVBoxLayout(self.nerve_labels_container)
+        self.nerve_labels_layout = QGridLayout(self.nerve_labels_container)
         self.nerve_labels_layout.setContentsMargins(0, 0, 0, 0)
         self.nerve_labels_layout.setSpacing(3)
         layout.addWidget(self.nerve_labels_container)
@@ -757,9 +762,9 @@ class MainWindow(QMainWindow):
         self._arrow_repeat_direction = int(direction)
         self._arrow_repeat_started = False
         if self._arrow_repeat_direction < 0:
-            self._show_previous_frame()
+            self._show_previous_sequence()
         else:
-            self._show_next_frame()
+            self._show_next_sequence()
         self._arrow_repeat_timer.start(250)
 
     def _stop_arrow_repeat(self):
@@ -777,9 +782,9 @@ class MainWindow(QMainWindow):
             self._arrow_repeat_started = True
             self._arrow_repeat_timer.setInterval(40)
         if self._arrow_repeat_direction < 0:
-            self._show_previous_frame()
+            self._show_previous_sequence()
         else:
-            self._show_next_frame()
+            self._show_next_sequence()
 
     def _center_window(self):
         screen = QApplication.primaryScreen()
@@ -1396,8 +1401,8 @@ class MainWindow(QMainWindow):
         mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
         if mask_path is None:
             return
-        mask_path.parent.mkdir(parents=True, exist_ok=True)
         if self._canvas_has_roi():
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
             mask = np.asarray(self.canvas.mask, dtype=np.float32)
             mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
             if not cv2.imwrite(str(mask_path), mask_uint8):
