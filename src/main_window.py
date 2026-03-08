@@ -25,6 +25,10 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QDialogButtonBox,
     QFrame,
+    QButtonGroup,
+    QRadioButton,
+    QInputDialog,
+    QGridLayout,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
@@ -34,6 +38,8 @@ from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from threading import Event
 from collections import OrderedDict
 from pathlib import Path
+from datetime import datetime, timezone
+import json
 import sys
 import numpy as np
 import cv2
@@ -185,11 +191,37 @@ class MainWindow(QMainWindow):
         self._video_decode_pos = -1
         self._video_cache_limit = 9
         self._video_use_random_seek = False
+        self._default_nerves = [
+            "ulnar",
+            "median",
+            "radial",
+            "plex",
+            "lfcn",
+            "peroneal",
+            "fibular",
+            "tibial",
+            "sural",
+            "proximal",
+            "accessory",
+            "quad",
+            "sciatic",
+            "unknown",
+        ]
+        self._nerve_labels = list(self._default_nerves)
+        self._video_nerve_map = {}
+        self._video_nerve_updated_at = {}
+        self._video_manifest_name = "nerve_manifest.json"
+        self._classification_ui_updating = False
+        self._nerve_button_group = None
+        self._nerve_buttons = {}
+        self._nerve_manifest_warning_shown = False
         self._last_image_input_dir = ""
         self._last_image_output_dir = ""
         self._last_video_input_dir = ""
         self._last_video_output_dir = ""
         self._load_persisted_paths()
+        self._build_nerve_label_controls()
+        self._update_nerve_summary_label()
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
         self._playback_interval_ms = 33
@@ -258,6 +290,174 @@ class MainWindow(QMainWindow):
         if getattr(sys, "frozen", False):
             return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parent.parent
+
+    def _manifest_path(self):
+        output_dir = (self._video_output_dir or "").strip()
+        if not output_dir:
+            return None
+        return Path(output_dir) / self._video_manifest_name
+
+    def _build_nerve_label_controls(self):
+        if not hasattr(self, "nerve_labels_layout"):
+            return
+        while self.nerve_labels_layout.count():
+            item = self.nerve_labels_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._nerve_buttons = {}
+        self._nerve_button_group = QButtonGroup(self)
+        self._nerve_button_group.setExclusive(True)
+        for index, label in enumerate(self._nerve_labels):
+            button = QRadioButton(label)
+            button.toggled.connect(lambda checked, lbl=label: self._on_nerve_label_selected(lbl, checked))
+            self._nerve_button_group.addButton(button)
+            self._nerve_buttons[label] = button
+            self.nerve_labels_layout.addWidget(button, index // 2, index % 2)
+        has_video = self._mode == "video" and bool(self._video_path)
+        self.nerve_labels_container.setEnabled(has_video)
+        self.add_nerve_btn.setEnabled(self._mode == "video")
+
+    def _labeled_video_count(self):
+        if not self._video_paths:
+            return 0
+        return sum(1 for path in self._video_paths if self._video_nerve_map.get(path))
+
+    def _update_nerve_summary_label(self):
+        if not hasattr(self, "nerve_summary_label"):
+            return
+        total = len(self._video_paths)
+        labeled = self._labeled_video_count()
+        label_text = "-"
+        if self._mode == "video" and self._video_path:
+            label_text = self._video_nerve_map.get(self._video_path, "-")
+        self.nerve_summary_label.setText(f"Label: {label_text} ({labeled}/{total} labeled)")
+
+    def _set_current_video_label_ui(self, video_path):
+        if not hasattr(self, "nerve_labels_container"):
+            return
+        self._classification_ui_updating = True
+        try:
+            selected = self._video_nerve_map.get(video_path)
+            if self._nerve_button_group is not None:
+                self._nerve_button_group.setExclusive(False)
+            for label, button in self._nerve_buttons.items():
+                button.setChecked(bool(selected and label == selected))
+            if self._nerve_button_group is not None:
+                self._nerve_button_group.setExclusive(True)
+        finally:
+            self._classification_ui_updating = False
+        self._update_nerve_summary_label()
+
+    def _load_nerve_manifest(self):
+        self._nerve_labels = list(self._default_nerves)
+        self._video_nerve_map = {}
+        self._video_nerve_updated_at = {}
+        self._nerve_manifest_warning_shown = False
+        manifest_path = self._manifest_path()
+        if manifest_path is None or not manifest_path.exists():
+            return
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            labels = data.get("label_set", [])
+            if isinstance(labels, list):
+                merged = list(self._default_nerves)
+                seen = set(merged)
+                for label in labels:
+                    if not isinstance(label, str):
+                        continue
+                    clean = label.strip().lower()
+                    if not clean or clean in seen:
+                        continue
+                    seen.add(clean)
+                    merged.append(clean)
+                self._nerve_labels = merged
+            videos = data.get("videos", [])
+            if isinstance(videos, list):
+                for item in videos:
+                    if not isinstance(item, dict):
+                        continue
+                    video_path = str(item.get("video_path", "")).strip()
+                    label = str(item.get("nerve_label", "")).strip().lower()
+                    if not video_path or not label:
+                        continue
+                    self._video_nerve_map[video_path] = label
+                    updated = str(item.get("updated_at", "")).strip()
+                    if updated:
+                        self._video_nerve_updated_at[video_path] = updated
+        except Exception as exc:
+            self._video_nerve_map = {}
+            self._video_nerve_updated_at = {}
+            self._nerve_labels = list(self._default_nerves)
+            if not self._nerve_manifest_warning_shown:
+                QMessageBox.warning(self, "Manifest warning", f"Could not read nerve manifest: {exc}")
+                self._nerve_manifest_warning_shown = True
+
+    def _save_nerve_manifest(self, show_errors=True):
+        manifest_path = self._manifest_path()
+        if manifest_path is None:
+            if show_errors:
+                QMessageBox.information(self, "Missing output folder", "Select video output folder first.")
+            return False
+        videos = []
+        for video_path in self._video_paths:
+            label = self._video_nerve_map.get(video_path)
+            if not label:
+                continue
+            videos.append(
+                {
+                    "video_path": str(video_path),
+                    "video_name": Path(video_path).name,
+                    "nerve_label": str(label),
+                    "updated_at": self._video_nerve_updated_at.get(video_path, ""),
+                }
+            )
+        payload = {
+            "version": 1,
+            "label_set": list(self._nerve_labels),
+            "video_count": len(videos),
+            "videos": videos,
+        }
+        try:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return True
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Manifest save error", str(exc))
+            return False
+
+    def _on_nerve_label_selected(self, label, checked):
+        if not checked or self._classification_ui_updating:
+            return
+        if self._mode != "video" or not self._video_path:
+            return
+        clean = str(label).strip().lower()
+        if not clean:
+            return
+        self._video_nerve_map[self._video_path] = clean
+        self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
+        self._update_nerve_summary_label()
+        if self._save_nerve_manifest(show_errors=True):
+            self.statusBar().showMessage(f"Saved label '{clean}' for {Path(self._video_path).name}")
+
+    def _add_custom_nerve_label(self):
+        text, ok = QInputDialog.getText(self, "Add nerve", "Nerve name:")
+        if not ok:
+            return
+        label = str(text).strip().lower()
+        if not label:
+            QMessageBox.information(self, "Invalid label", "Nerve name cannot be empty.")
+            return
+        existing = {lbl.lower() for lbl in self._nerve_labels}
+        if label in existing:
+            QMessageBox.information(self, "Duplicate label", "That nerve label already exists.")
+            return
+        self._nerve_labels.append(label)
+        self._build_nerve_label_controls()
+        if self._mode == "video" and self._video_path:
+            self._set_current_video_label_ui(self._video_path)
+        self._save_nerve_manifest(show_errors=True)
 
     def _load_persisted_paths(self):
         settings = self._settings()
@@ -396,6 +596,18 @@ class MainWindow(QMainWindow):
         configure_button(self.next_btn)
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
+
+        layout.addWidget(QLabel("Nerve class:"))
+        self.nerve_labels_container = QWidget()
+        self.nerve_labels_layout = QGridLayout(self.nerve_labels_container)
+        self.nerve_labels_layout.setContentsMargins(0, 0, 0, 0)
+        self.nerve_labels_layout.setSpacing(3)
+        layout.addWidget(self.nerve_labels_container)
+        self.add_nerve_btn = QPushButton("+ Add nerve")
+        configure_button(self.add_nerve_btn)
+        layout.addWidget(self.add_nerve_btn)
+        self.nerve_summary_label = QLabel("Label: - (0/0 labeled)")
+        layout.addWidget(self.nerve_summary_label)
         self.save_video_btn = QPushButton("Save masks")
         configure_button(self.save_video_btn)
         layout.addWidget(self.save_video_btn)
@@ -552,6 +764,7 @@ class MainWindow(QMainWindow):
         self._prev_video_shortcut.activated.connect(self._show_previous_sequence)
         self._next_video_shortcut.activated.connect(self._show_next_sequence)
         self._play_pause_shortcut.activated.connect(self._toggle_playback)
+        self.add_nerve_btn.clicked.connect(self._add_custom_nerve_label)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
@@ -874,11 +1087,24 @@ class MainWindow(QMainWindow):
         self._video_list_index = 0
         self._video_output_dir = output_dir
         self._last_video_output_dir = output_dir
+        input_name = Path(video_paths[0]).parent.name.strip() if video_paths else ""
+        self._video_manifest_name = f"{input_name}_nerve_manifest.json" if input_name else "nerve_manifest.json"
         self._save_persisted_paths()
         self._mode = "video"
+        self._load_nerve_manifest()
+        allowed_paths = set(self._video_paths)
+        self._video_nerve_map = {
+            path: label for path, label in self._video_nerve_map.items() if path in allowed_paths
+        }
+        self._video_nerve_updated_at = {
+            path: ts for path, ts in self._video_nerve_updated_at.items() if path in allowed_paths
+        }
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
+        self._build_nerve_label_controls()
+        self._update_nerve_summary_label()
+        self._save_nerve_manifest(show_errors=False)
         resume_video_index, resume_frame_index = self._find_resume_video_position()
         self._open_video_at_index(resume_video_index, start_frame=resume_frame_index)
 
@@ -908,6 +1134,11 @@ class MainWindow(QMainWindow):
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
         self._video_use_random_seek = False
+        self._video_nerve_map = {}
+        self._video_nerve_updated_at = {}
+        self._nerve_labels = list(self._default_nerves)
+        self._build_nerve_label_controls()
+        self._update_nerve_summary_label()
 
     def _clear_video_sequence(self):
         if self._mode != "video":
@@ -1080,6 +1311,7 @@ class MainWindow(QMainWindow):
             target_frame = frame_count - 1
         target_frame = min(frame_count - 1, max(0, target_frame))
         self._set_video_frame_index(target_frame, force=True)
+        self._set_current_video_label_ui(self._video_path)
         self.statusBar().showMessage(
             f"Video loaded: {Path(self._video_path).name} "
             f"({video_index + 1}/{len(self._video_paths)})"
@@ -1356,6 +1588,9 @@ class MainWindow(QMainWindow):
             self.frame_prev_btn.setEnabled(can_prev_frame)
             self.frame_next_btn.setEnabled(can_next_frame)
             self.frame_last_btn.setEnabled(can_next_frame)
+            self.nerve_labels_container.setEnabled(True)
+            self.add_nerve_btn.setEnabled(True)
+            self._update_nerve_summary_label()
             return
         if self._mode == "sequence":
             self.image_prev_btn.setEnabled(self._sequence_index > 0)
@@ -1367,6 +1602,9 @@ class MainWindow(QMainWindow):
             self.frame_prev_btn.setEnabled(False)
             self.frame_next_btn.setEnabled(False)
             self.frame_last_btn.setEnabled(False)
+            self.nerve_labels_container.setEnabled(False)
+            self.add_nerve_btn.setEnabled(False)
+            self._update_nerve_summary_label()
             return
         self.image_prev_btn.setEnabled(False)
         self.image_next_btn.setEnabled(False)
@@ -1377,6 +1615,9 @@ class MainWindow(QMainWindow):
         self.frame_prev_btn.setEnabled(False)
         self.frame_next_btn.setEnabled(False)
         self.frame_last_btn.setEnabled(False)
+        self.nerve_labels_container.setEnabled(False)
+        self.add_nerve_btn.setEnabled(False)
+        self._update_nerve_summary_label()
 
     def _set_slider_state(self, minimum, maximum, enabled):
         self.frame_slider.blockSignals(True)
