@@ -1370,11 +1370,8 @@ class MainWindow(QMainWindow):
         if self._mode != "video":
             return
         if self._video_frame_index >= self._video_frame_count - 1:
-            if self._video_list_index >= 0 and self._video_list_index < len(self._video_paths) - 1:
-                self._stash_video_mask_for_current_frame()
-                self._open_video_at_index(self._video_list_index + 1, start_frame=0)
-            else:
-                self._set_video_frame_index(0)
+            self._stop_playback()
+            return
         self._play_btn_set_pause()
         self._play_timer.start(max(1, int(self._playback_interval_ms)))
 
@@ -1389,10 +1386,6 @@ class MainWindow(QMainWindow):
             return
         if self._video_frame_index < self._video_frame_count - 1:
             self._set_video_frame_index(self._video_frame_index + 1)
-            return
-        if self._video_list_index >= 0 and self._video_list_index < len(self._video_paths) - 1:
-            self._stash_video_mask_for_current_frame()
-            self._open_video_at_index(self._video_list_index + 1, start_frame=0)
             return
         if self._video_frame_index >= self._video_frame_count - 1:
             self._stop_playback()
