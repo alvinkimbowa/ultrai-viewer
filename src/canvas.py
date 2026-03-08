@@ -467,6 +467,7 @@ class Canvas(QWidget):
             self._mask_touched = True
         else:
             self._last_outline = list(self._poly_points)
+            self._push_history()
         self._poly_points = []
         self.update()
 
@@ -543,6 +544,7 @@ class Canvas(QWidget):
                     self._mask_touched = True
                 elif len(self._freehand_points) > 1:
                     self._last_outline = list(self._freehand_points)
+                    self._push_history()
                 self._freehand_points = []
             elif self.tool in ("brush", "eraser"):
                 if self._drawing:
@@ -618,30 +620,48 @@ class Canvas(QWidget):
             return
         current = self._undo_stack.pop()
         self._redo_stack.append(current)
-        self.mask = np.copy(self._undo_stack[-1])
-        self._refresh_mask_pixmap()
+        self._restore_state(self._undo_stack[-1])
         self.update()
 
     def redo(self):
         if not self._redo_stack:
             return
         state = self._redo_stack.pop()
-        self._undo_stack.append(np.copy(state))
-        self.mask = np.copy(state)
-        self._refresh_mask_pixmap()
+        self._undo_stack.append(self._clone_state(state))
+        self._restore_state(state)
         self.update()
 
     def _reset_history(self):
         self._undo_stack = []
         self._redo_stack = []
-        if self.mask is not None:
-            self._undo_stack.append(np.copy(self.mask))
+        self._undo_stack.append(self._snapshot_state())
 
     def _push_history(self):
-        if self.mask is None:
-            return
-        self._undo_stack.append(np.copy(self.mask))
+        self._undo_stack.append(self._snapshot_state())
         self._redo_stack = []
+
+    def _snapshot_state(self):
+        mask = None if self.mask is None else np.copy(self.mask)
+        outline = [QPoint(point) for point in self._last_outline]
+        return {
+            "mask": mask,
+            "last_outline": outline,
+            "mask_touched": bool(self._mask_touched),
+        }
+
+    def _clone_state(self, state):
+        mask = state["mask"]
+        return {
+            "mask": None if mask is None else np.copy(mask),
+            "last_outline": [QPoint(point) for point in state["last_outline"]],
+            "mask_touched": bool(state["mask_touched"]),
+        }
+
+    def _restore_state(self, state):
+        self.mask = None if state["mask"] is None else np.copy(state["mask"])
+        self._last_outline = [QPoint(point) for point in state["last_outline"]]
+        self._mask_touched = bool(state["mask_touched"])
+        self._refresh_mask_pixmap()
 
     def has_mask_data(self):
         return self.mask is not None and self._mask_touched
