@@ -439,6 +439,10 @@ class MainWindow(QMainWindow):
         self.fill_roi_checkbox.setChecked(False)
         layout.addLayout(tools_row)
 
+        self.show_mask_checkbox = QCheckBox("Toggle mask")
+        self.show_mask_checkbox.setChecked(True)
+        layout.addWidget(self.show_mask_checkbox)
+
         layout.addSpacing(5)
 
         opacity_row = QHBoxLayout()
@@ -525,6 +529,7 @@ class MainWindow(QMainWindow):
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
         self.fill_roi_checkbox.toggled.connect(self.canvas.set_fill_roi)
+        self.show_mask_checkbox.toggled.connect(self.canvas.set_mask_visible)
         self.undo_btn.clicked.connect(self.canvas.undo)
         self.redo_btn.clicked.connect(self.canvas.redo)
         self.undo_action.triggered.connect(self.canvas.undo)
