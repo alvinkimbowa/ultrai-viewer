@@ -187,7 +187,11 @@ class MainWindow(QMainWindow):
             "peroneal",
             "fibular",
             "tibial",
-            "sural branch",
+            "sural",
+            "proximal",
+            "accessory",
+            "quad",
+            "sciatic",
             "unknown",
         ]
         self._nerve_labels = list(self._default_nerves)
