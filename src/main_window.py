@@ -914,8 +914,7 @@ class MainWindow(QMainWindow):
         if not output_dir:
             return None
         video_path = Path(video_path)
-        source_dir = video_path.parent.name.strip() or "videos"
-        return Path(output_dir) / source_dir / video_path.stem
+        return Path(output_dir) / video_path.stem
 
     def _video_mask_path(self, video_path, frame_index):
         root = self._video_output_root_for_path(video_path)
