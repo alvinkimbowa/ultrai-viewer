@@ -26,7 +26,7 @@ class Canvas(QWidget):
         self._redo_stack = []
         self._mask_touched = False
 
-        self.tool = "select"
+        self.tool = "freehand"
         self.brush_radius = 4
         self.fill_roi = False
         self._drawing = False

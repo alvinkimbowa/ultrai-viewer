@@ -426,7 +426,7 @@ class MainWindow(QMainWindow):
         self.tool_picker.addItems(
             ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser"]
         )
-        self.tool_picker.setCurrentIndex(0)
+        self.tool_picker.setCurrentIndex(1)
         tools_row.addWidget(self.tool_picker)
         self.fill_roi_checkbox = QCheckBox("Fill ROI")
         tools_row.addWidget(self.fill_roi_checkbox)
