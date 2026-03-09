@@ -1,8 +1,9 @@
 onnx
 onnxscript
-onnxruntime-gpu
+onnxruntime
 opencv-python
 numpy
 pyinstaller
 scikit-image
 PyQt6
+tifffile

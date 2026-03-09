@@ -13,7 +13,7 @@ a = Analysis(
     pathex=[],
     binaries=onnxruntime_bins,
     datas=[
-        ("assets", "assets"),
+        ("assets/icons", "assets/icons"),
         ("VERSION", "."),
     ],
     hiddenimports=[],
