@@ -27,7 +27,6 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
     QButtonGroup,
-    QRadioButton,
     QInputDialog,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot, QRect, QPoint
@@ -119,6 +118,24 @@ class MainWindow(QMainWindow):
         self._base_title = "UltAI Viewer"
         self.setWindowTitle(self._base_title)
         self._sidebar_width = 260
+        self._nerve_button_style = """
+            QPushButton {
+                padding: 4px 10px;
+                border: 1px solid #9a9a9a;
+                border-radius: 10px;
+                background: #f2f2f2;
+            }
+            QPushButton:checked {
+                background: #5f8fbd;
+                border-color: #4f789e;
+                color: white;
+            }
+            QPushButton:disabled {
+                color: #777777;
+                background: #e5e5e5;
+                border-color: #c8c8c8;
+            }
+        """
 
         self._create_menu_bar()
 
@@ -397,7 +414,9 @@ class MainWindow(QMainWindow):
         self._nerve_button_group = QButtonGroup(self)
         self._nerve_button_group.setExclusive(True)
         for index, label in enumerate(self._nerve_labels):
-            button = QRadioButton(self._display_nerve_label(label))
+            button = QPushButton(self._display_nerve_label(label))
+            button.setCheckable(True)
+            button.setStyleSheet(self._nerve_button_style)
             button.toggled.connect(lambda checked, lbl=label: self._on_nerve_label_selected(lbl, checked))
             self._nerve_button_group.addButton(button)
             self._nerve_buttons[label] = button
