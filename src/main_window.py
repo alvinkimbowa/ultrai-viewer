@@ -391,7 +391,7 @@ class MainWindow(QMainWindow):
         while self.nerve_labels_layout.count():
             item = self.nerve_labels_layout.takeAt(0)
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and widget is not getattr(self, "add_nerve_btn", None):
                 widget.deleteLater()
         self._nerve_buttons = {}
         self._nerve_button_group = QButtonGroup(self)
