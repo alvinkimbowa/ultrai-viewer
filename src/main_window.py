@@ -40,6 +40,7 @@ from collections import OrderedDict
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import re
 import sys
 import numpy as np
 import cv2
@@ -370,6 +371,16 @@ class MainWindow(QMainWindow):
         finally:
             self._classification_ui_updating = False
         self._update_nerve_summary_label()
+
+    def _infer_nerve_label_from_video_path(self, video_path):
+        folder_name = Path(video_path).parent.name.strip().lower()
+        if not folder_name:
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", " ", folder_name)
+        for label in sorted(self._nerve_labels, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(label.lower())}\b", normalized):
+                return label
+        return None
 
     def _load_nerve_manifest(self):
         self._nerve_labels = list(self._default_nerves)
@@ -1109,6 +1120,14 @@ class MainWindow(QMainWindow):
         self._video_nerve_updated_at = {
             path: ts for path, ts in self._video_nerve_updated_at.items() if path in allowed_paths
         }
+        for video_path in self._video_paths:
+            if self._video_nerve_map.get(video_path):
+                continue
+            inferred_label = self._infer_nerve_label_from_video_path(video_path)
+            if not inferred_label:
+                continue
+            self._video_nerve_map[video_path] = inferred_label
+            self._video_nerve_updated_at[video_path] = datetime.now(timezone.utc).isoformat()
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
