@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
+    QLayout,
     QPushButton,
     QLabel,
     QSlider,
@@ -28,9 +29,8 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QRadioButton,
     QInputDialog,
-    QGridLayout,
 )
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot, QRect, QPoint
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
 from .canvas import Canvas
@@ -45,6 +45,72 @@ import sys
 import numpy as np
 import cv2
 import tifffile
+
+
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, margin=0, h_spacing=6, v_spacing=3):
+        super().__init__(parent)
+        self._items = []
+        self._h_spacing = h_spacing
+        self._v_spacing = v_spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize(0, 0)
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        margins = self.contentsMargins()
+        effective = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        max_right = effective.right()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width()
+            if line_height > 0 and next_x > max_right:
+                x = effective.x()
+                y += line_height + self._v_spacing
+                next_x = x + hint.width()
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x + self._h_spacing
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
 
 
 class MainWindow(QMainWindow):
@@ -85,18 +151,10 @@ class MainWindow(QMainWindow):
         nerve_panel_layout.setSpacing(4)
         nerve_panel_layout.addWidget(QLabel("Nerve:"))
         self.nerve_labels_container = QWidget()
-        self.nerve_labels_layout = QGridLayout(self.nerve_labels_container)
-        self.nerve_labels_layout.setContentsMargins(0, 0, 0, 0)
-        self.nerve_labels_layout.setSpacing(3)
+        self.nerve_labels_layout = FlowLayout(self.nerve_labels_container, margin=0, h_spacing=6, v_spacing=3)
+        self.nerve_labels_container.setLayout(self.nerve_labels_layout)
         nerve_panel_layout.addWidget(self.nerve_labels_container)
-        nerve_actions_row = QHBoxLayout()
-        nerve_actions_row.setContentsMargins(0, 0, 0, 0)
-        nerve_actions_row.setSpacing(6)
         self.add_nerve_btn = QPushButton("+ Add nerve")
-        self.nerve_summary_label = QLabel("Label: - (0/0 labeled)")
-        nerve_actions_row.addWidget(self.add_nerve_btn, stretch=0)
-        nerve_actions_row.addWidget(self.nerve_summary_label, stretch=1)
-        nerve_panel_layout.addLayout(nerve_actions_row)
         nerve_sep = QFrame()
         nerve_sep.setFrameShape(QFrame.Shape.HLine)
         nerve_sep.setFrameShadow(QFrame.Shadow.Sunken)
@@ -314,6 +372,13 @@ class MainWindow(QMainWindow):
             return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parent.parent
 
+    def _display_nerve_label(self, label):
+        clean = str(label).strip().lower()
+        special = {
+            "lfcn": "LFCN",
+        }
+        return special.get(clean, clean.title())
+
     def _manifest_path(self):
         output_dir = (self._video_output_dir or "").strip()
         if not output_dir:
@@ -332,11 +397,13 @@ class MainWindow(QMainWindow):
         self._nerve_button_group = QButtonGroup(self)
         self._nerve_button_group.setExclusive(True)
         for index, label in enumerate(self._nerve_labels):
-            button = QRadioButton(label)
+            button = QRadioButton(self._display_nerve_label(label))
             button.toggled.connect(lambda checked, lbl=label: self._on_nerve_label_selected(lbl, checked))
             self._nerve_button_group.addButton(button)
             self._nerve_buttons[label] = button
-            self.nerve_labels_layout.addWidget(button, index % 2, index // 2)
+            self.nerve_labels_layout.addWidget(button)
+        if hasattr(self, "add_nerve_btn"):
+            self.nerve_labels_layout.addWidget(self.add_nerve_btn)
         has_video = self._mode == "video" and bool(self._video_path)
         self.nerve_labels_container.setEnabled(has_video)
         self.add_nerve_btn.setEnabled(self._mode == "video")
