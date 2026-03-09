@@ -382,6 +382,29 @@ class MainWindow(QMainWindow):
                 return label
         return None
 
+    def _ensure_current_video_nerve_label(self):
+        if self._mode != "video" or not self._video_path:
+            return None
+        current = self._video_nerve_map.get(self._video_path)
+        if current:
+            return current
+        inferred_label = self._infer_nerve_label_from_video_path(self._video_path)
+        if not inferred_label:
+            return None
+        self._video_nerve_map[self._video_path] = inferred_label
+        self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
+        return inferred_label
+
+    def _persist_current_video_nerve_label(self):
+        if self._mode != "video" or not self._video_path:
+            return
+        label = self._video_nerve_map.get(self._video_path)
+        if not label:
+            return
+        if self._video_path not in self._video_nerve_updated_at:
+            self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
+        self._save_nerve_manifest(show_errors=False)
+
     def _load_nerve_manifest(self):
         self._nerve_labels = list(self._default_nerves)
         self._video_nerve_map = {}
@@ -432,22 +455,61 @@ class MainWindow(QMainWindow):
             if show_errors:
                 QMessageBox.information(self, "Missing output folder", "Select video output folder first.")
             return False
-        videos = []
+        existing_videos = {}
+        existing_labels = []
+        if manifest_path.exists():
+            try:
+                existing_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                raw_labels = existing_data.get("label_set", [])
+                if isinstance(raw_labels, list):
+                    existing_labels = [str(label).strip().lower() for label in raw_labels if str(label).strip()]
+                raw_videos = existing_data.get("videos", [])
+                if isinstance(raw_videos, list):
+                    for item in raw_videos:
+                        if not isinstance(item, dict):
+                            continue
+                        video_path = str(item.get("video_path", "")).strip()
+                        if not video_path:
+                            continue
+                        existing_videos[video_path] = {
+                            "video_path": video_path,
+                            "video_name": str(item.get("video_name", Path(video_path).name)),
+                            "nerve_label": str(item.get("nerve_label", "")).strip().lower(),
+                            "updated_at": str(item.get("updated_at", "")).strip(),
+                        }
+            except Exception:
+                # Fall back to rewriting a clean manifest from current in-memory state.
+                existing_videos = {}
+                existing_labels = []
         for video_path in self._video_paths:
             label = self._video_nerve_map.get(video_path)
             if not label:
                 continue
-            videos.append(
-                {
-                    "video_path": str(video_path),
-                    "video_name": Path(video_path).name,
-                    "nerve_label": str(label),
-                    "updated_at": self._video_nerve_updated_at.get(video_path, ""),
-                }
-            )
+            existing_videos[str(video_path)] = {
+                "video_path": str(video_path),
+                "video_name": Path(video_path).name,
+                "nerve_label": str(label),
+                "updated_at": self._video_nerve_updated_at.get(video_path, ""),
+            }
+        merged_labels = list(self._default_nerves)
+        seen_labels = set(merged_labels)
+        for label in list(existing_labels) + list(self._nerve_labels):
+            clean = str(label).strip().lower()
+            if not clean or clean in seen_labels:
+                continue
+            seen_labels.add(clean)
+            merged_labels.append(clean)
+        videos = sorted(
+            (
+                item
+                for item in existing_videos.values()
+                if item.get("video_path") and item.get("nerve_label")
+            ),
+            key=lambda item: str(item["video_path"]).lower(),
+        )
         payload = {
             "version": 1,
-            "label_set": list(self._nerve_labels),
+            "label_set": merged_labels,
             "video_count": len(videos),
             "videos": videos,
         }
@@ -1108,8 +1170,7 @@ class MainWindow(QMainWindow):
         self._video_list_index = 0
         self._video_output_dir = output_dir
         self._last_video_output_dir = output_dir
-        input_name = Path(video_paths[0]).parent.name.strip() if video_paths else ""
-        self._video_manifest_name = f"{input_name}_nerve_manifest.json" if input_name else "nerve_manifest.json"
+        self._video_manifest_name = "nerve_manifest.json"
         self._save_persisted_paths()
         self._mode = "video"
         self._load_nerve_manifest()
@@ -1120,20 +1181,11 @@ class MainWindow(QMainWindow):
         self._video_nerve_updated_at = {
             path: ts for path, ts in self._video_nerve_updated_at.items() if path in allowed_paths
         }
-        for video_path in self._video_paths:
-            if self._video_nerve_map.get(video_path):
-                continue
-            inferred_label = self._infer_nerve_label_from_video_path(video_path)
-            if not inferred_label:
-                continue
-            self._video_nerve_map[video_path] = inferred_label
-            self._video_nerve_updated_at[video_path] = datetime.now(timezone.utc).isoformat()
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
         self._build_nerve_label_controls()
         self._update_nerve_summary_label()
-        self._save_nerve_manifest(show_errors=False)
         resume_video_index, resume_frame_index = self._find_resume_video_position()
         self._open_video_at_index(resume_video_index, start_frame=resume_frame_index)
 
@@ -1334,6 +1386,7 @@ class MainWindow(QMainWindow):
         self.video_combo.blockSignals(True)
         self.video_combo.setCurrentIndex(video_index)
         self.video_combo.blockSignals(False)
+        self._ensure_current_video_nerve_label()
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
         target_frame = int(start_frame)
         if target_frame < 0:
@@ -1377,6 +1430,7 @@ class MainWindow(QMainWindow):
             return
         if index == self._video_list_index:
             return
+        self._persist_current_video_nerve_label()
         self._stash_video_mask_for_current_frame()
         self._open_video_at_index(index, start_frame=0)
 
@@ -1384,6 +1438,7 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             if self._video_list_index <= 0:
                 return
+            self._persist_current_video_nerve_label()
             self._stash_video_mask_for_current_frame()
             self._open_video_at_index(self._video_list_index - 1, start_frame=0)
             return
@@ -1398,6 +1453,7 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             if self._video_list_index >= len(self._video_paths) - 1:
                 return
+            self._persist_current_video_nerve_label()
             self._stash_video_mask_for_current_frame()
             self._open_video_at_index(self._video_list_index + 1, start_frame=0)
             return
