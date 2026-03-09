@@ -2083,8 +2083,8 @@ class MainWindow(QMainWindow):
 
         input_line = QLineEdit(dialog)
         output_line = QLineEdit(dialog)
-        base_dir = self._runtime_base_dir()
-        output_line.setText(str(base_dir / "annotations"))
+        if self._last_video_output_dir:
+            output_line.setText(self._last_video_output_dir)
         input_line.setReadOnly(True)
 
         selected_paths = []
