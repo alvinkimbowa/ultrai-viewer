@@ -2139,7 +2139,12 @@ class MainWindow(QMainWindow):
             return
         self._video_clips_map[self._video_path] = self._reindex_clips(updated_clips)
         self._save_clip_manifest(show_errors=False)
-        self._set_current_clip_label_ui()
+        if edge == "start":
+            self._set_video_frame_index(target_clip["start_frame"], force=True)
+        elif edge == "end":
+            self._set_video_frame_index(target_clip["end_frame"], force=True)
+        else:
+            self._set_current_clip_label_ui()
 
     def _toggle_playback(self):
         if self._play_timer.isActive():
