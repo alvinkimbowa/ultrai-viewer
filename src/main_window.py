@@ -1946,16 +1946,21 @@ class MainWindow(QMainWindow):
     def _show_first_frame(self):
         if self._mode != "video":
             return
-        if self._video_frame_index <= 0:
+        clips = self._current_video_clips()
+        if not clips:
             return
-        self._set_video_frame_index(0)
+        first_index = int(clips[0]["start_frame"])
+        if self._video_frame_index <= first_index:
+            return
+        self._set_video_frame_index(first_index)
 
     def _show_last_frame(self):
         if self._mode != "video":
             return
-        if self._video_frame_count <= 0:
+        clips = self._current_video_clips()
+        if not clips:
             return
-        last_index = self._video_frame_count - 1
+        last_index = int(clips[-1]["end_frame"])
         if self._video_frame_index >= last_index:
             return
         self._set_video_frame_index(last_index)
