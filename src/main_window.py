@@ -327,8 +327,26 @@ class MainWindow(QMainWindow):
         clip_row = QHBoxLayout()
         clip_row.setContentsMargins(0, 0, 0, 0)
         clip_row.setSpacing(4)
-        self.clip_summary_label = QLabel("Clip: -")
+        self.clip_summary_label = QLabel("Clip:")
         clip_row.addWidget(self.clip_summary_label, stretch=0)
+        self.clip_start_spin = QSpinBox()
+        self.clip_start_spin.setMinimum(0)
+        self.clip_start_spin.setMaximum(0)
+        self.clip_start_spin.setEnabled(False)
+        self.clip_start_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.clip_start_spin.setKeyboardTracking(False)
+        self.clip_start_spin.setFixedWidth(70)
+        clip_row.addWidget(self.clip_start_spin, stretch=0)
+        clip_row.addWidget(QLabel("["), stretch=0)
+        self.clip_end_spin = QSpinBox()
+        self.clip_end_spin.setMinimum(0)
+        self.clip_end_spin.setMaximum(0)
+        self.clip_end_spin.setEnabled(False)
+        self.clip_end_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.clip_end_spin.setKeyboardTracking(False)
+        self.clip_end_spin.setFixedWidth(70)
+        clip_row.addWidget(self.clip_end_spin, stretch=0)
+        clip_row.addWidget(QLabel("]"), stretch=0)
         self.new_clip_btn = QPushButton("Start new clip")
         self.new_clip_btn.setEnabled(False)
         self.new_clip_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -462,6 +480,7 @@ class MainWindow(QMainWindow):
         self._organ_button_group = None
         self._organ_buttons = {}
         self._clip_manifest_warning_shown = False
+        self._clip_range_ui_updating = False
         self._last_image_input_dir = ""
         self._last_image_output_dir = ""
         self._last_video_input_dir = ""
@@ -683,15 +702,42 @@ class MainWindow(QMainWindow):
         clip = None
         if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
             clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        self._clip_range_ui_updating = True
         if clip is None:
             self.organ_summary_label.setText("Organ: -")
-            self.clip_summary_label.setText("Clip: -")
+            self.clip_summary_label.setText("Clip:")
+            self.clip_start_spin.blockSignals(True)
+            self.clip_end_spin.blockSignals(True)
+            self.clip_start_spin.setEnabled(False)
+            self.clip_end_spin.setEnabled(False)
+            self.clip_start_spin.setMinimum(0)
+            self.clip_start_spin.setMaximum(0)
+            self.clip_end_spin.setMinimum(0)
+            self.clip_end_spin.setMaximum(0)
+            self.clip_start_spin.setValue(0)
+            self.clip_end_spin.setValue(0)
+            self.clip_start_spin.blockSignals(False)
+            self.clip_end_spin.blockSignals(False)
+            self._clip_range_ui_updating = False
             return
         organ = self._display_organ_label(clip.get("organ_label"))
         self.organ_summary_label.setText(f"Organ: {organ}")
-        self.clip_summary_label.setText(
-            f"Clip: {clip['clip_index']} [{clip['start_frame']}-{clip['end_frame']}]"
-        )
+        self.clip_summary_label.setText(f"Clip: {clip['clip_index']}")
+        min_frame = self._current_video_clips()[0]["start_frame"]
+        max_frame = self._current_video_clips()[-1]["end_frame"]
+        self.clip_start_spin.blockSignals(True)
+        self.clip_end_spin.blockSignals(True)
+        self.clip_start_spin.setEnabled(True)
+        self.clip_end_spin.setEnabled(True)
+        self.clip_start_spin.setMinimum(min_frame)
+        self.clip_start_spin.setMaximum(max_frame)
+        self.clip_end_spin.setMinimum(min_frame)
+        self.clip_end_spin.setMaximum(max_frame)
+        self.clip_start_spin.setValue(int(clip["start_frame"]))
+        self.clip_end_spin.setValue(int(clip["end_frame"]))
+        self.clip_start_spin.blockSignals(False)
+        self.clip_end_spin.blockSignals(False)
+        self._clip_range_ui_updating = False
 
     def _set_current_clip_label_ui(self):
         if not hasattr(self, "organ_labels_container"):
@@ -715,6 +761,31 @@ class MainWindow(QMainWindow):
         if hasattr(self, "frame_slider"):
             edges = self._clip_edges_for_video(self._video_path) if self._video_path else [0, 0]
             self.frame_slider.setEdges(edges)
+
+    def _apply_edge_update(self, edge_index, value):
+        if self._mode != "video" or not self._video_path:
+            return
+        clips = self._current_video_clips()
+        if not clips:
+            return
+        edges = self._clip_edges_for_video(self._video_path)
+        if edge_index < 0 or edge_index >= len(edges):
+            return
+        clamped_value = int(value)
+        if edge_index == 0:
+            clamped_value = min(max(clamped_value, 0), edges[1])
+        elif edge_index == len(edges) - 1:
+            clamped_value = max(min(clamped_value, self._video_frame_count - 1), edges[-2])
+        else:
+            clamped_value = min(max(clamped_value, edges[edge_index - 1] + 1), edges[edge_index + 1] - 1)
+        edges[edge_index] = clamped_value
+        updated_clips = self._clips_from_edges(edges, [self._copy_clip(clip) for clip in clips])
+        timestamp = datetime.now(timezone.utc).isoformat()
+        for clip in updated_clips:
+            clip["updated_at"] = timestamp
+        self._video_clips_map[self._video_path] = self._reindex_clips(updated_clips)
+        self._save_clip_manifest(show_errors=False)
+        self._set_video_frame_index(clamped_value, force=True)
 
     def _load_clip_manifest(self):
         self._organ_labels = list(self._default_organs)
@@ -1238,6 +1309,8 @@ class MainWindow(QMainWindow):
         self.postprocess_clips_btn.clicked.connect(self._postprocess_clips)
         self.postprocess_sidebar_btn.clicked.connect(self._postprocess_clips)
         self.postprocess_clips_action.triggered.connect(self._postprocess_clips)
+        self.clip_start_spin.valueChanged.connect(self._on_clip_start_spin_changed)
+        self.clip_end_spin.valueChanged.connect(self._on_clip_end_spin_changed)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
@@ -2134,23 +2207,27 @@ class MainWindow(QMainWindow):
         self._set_sequence_index(index)
 
     def _on_timeline_edge_moved(self, edge_index, value):
-        if self._mode != "video" or not self._video_path:
+        self._apply_edge_update(edge_index, value)
+
+    def _on_clip_start_spin_changed(self, value):
+        if self._clip_range_ui_updating or self._mode != "video" or not self._video_path:
+            return
+        clips = self._current_video_clips()
+        current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        if current_clip is None:
+            return
+        self._apply_edge_update(current_clip["clip_index"] - 1, int(value))
+
+    def _on_clip_end_spin_changed(self, value):
+        if self._clip_range_ui_updating or self._mode != "video" or not self._video_path:
             return
         clips = self._current_video_clips()
         if not clips:
             return
-        edges = self._clip_edges_for_video(self._video_path)
-        if edge_index < 0 or edge_index >= len(edges):
+        current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        if current_clip is None:
             return
-        edges[edge_index] = int(value)
-        updated_clips = self._clips_from_edges(edges, [self._copy_clip(clip) for clip in clips])
-        timestamp = datetime.now(timezone.utc).isoformat()
-        for clip in updated_clips:
-            clip["updated_at"] = timestamp
-        self._video_clips_map[self._video_path] = self._reindex_clips(updated_clips)
-        self._save_clip_manifest(show_errors=False)
-        snapped_value = int(value)
-        self._set_video_frame_index(snapped_value, force=True)
+        self._apply_edge_update(current_clip["clip_index"], int(value))
 
     def _toggle_playback(self):
         if self._play_timer.isActive():
