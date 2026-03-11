@@ -297,6 +297,16 @@ class ClipTimeline(QWidget):
             return
         super().mouseReleaseEvent(event)
 
+    def wheelEvent(self, event):
+        if not self._enabled:
+            return super().wheelEvent(event)
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return super().wheelEvent(event)
+        step = 1 if delta > 0 else -1
+        self.valueChanged.emit(min(max(self._value + step, self._minimum), self._maximum))
+        event.accept()
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
