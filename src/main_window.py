@@ -114,17 +114,16 @@ class FlowLayout(QLayout):
 
 class ClipTimeline(QWidget):
     valueChanged = pyqtSignal(int)
-    clipEdgeMoved = pyqtSignal(str, int)
+    edgeMoved = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._minimum = 0
         self._maximum = 0
         self._value = 0
-        self._clip_start = 0
-        self._clip_end = 0
+        self._edges = [0, 0]
         self._enabled = False
-        self._drag_edge = None
+        self._drag_edge_index = None
         self._drag_value = None
         self.setMinimumHeight(26)
         self.setMouseTracking(True)
@@ -133,8 +132,7 @@ class ClipTimeline(QWidget):
         self._minimum = int(minimum)
         self._maximum = max(int(minimum), int(maximum))
         self._value = min(max(self._value, self._minimum), self._maximum)
-        self._clip_start = min(max(self._clip_start, self._minimum), self._maximum)
-        self._clip_end = min(max(self._clip_end, self._minimum), self._maximum)
+        self._edges = [min(max(edge, self._minimum), self._maximum) for edge in self._edges] or [self._minimum, self._maximum]
         self.update()
 
     def setValue(self, value):
@@ -153,11 +151,14 @@ class ClipTimeline(QWidget):
         super().setEnabled(enabled)
         self.update()
 
-    def setClipRange(self, start_frame, end_frame):
-        self._clip_start = min(max(int(start_frame), self._minimum), self._maximum)
-        self._clip_end = min(max(int(end_frame), self._minimum), self._maximum)
-        if self._clip_end < self._clip_start:
-            self._clip_end = self._clip_start
+    def setEdges(self, edges):
+        normalized = []
+        for edge in edges:
+            normalized.append(min(max(int(edge), self._minimum), self._maximum))
+        normalized = sorted(normalized)
+        if len(normalized) < 2:
+            normalized = [self._minimum, self._maximum]
+        self._edges = normalized
         self.update()
 
     def _groove_rect(self):
@@ -183,13 +184,21 @@ class ClipTimeline(QWidget):
         return int(round(value))
 
     def _edge_hit(self, x, tolerance=7):
-        start_x = self._value_to_x(self._clip_start)
-        end_x = self._value_to_x(self._clip_end)
-        if abs(start_x - int(x)) <= tolerance:
-            return "start"
-        if abs(end_x - int(x)) <= tolerance:
-            return "end"
+        for index, edge in enumerate(self._edges):
+            if abs(self._value_to_x(edge) - int(x)) <= tolerance:
+                return index
         return None
+
+    def _clamp_edge_value(self, edge_index, value):
+        if edge_index <= 0:
+            next_edge = self._edges[1]
+            return min(max(int(value), self._minimum), next_edge)
+        if edge_index >= len(self._edges) - 1:
+            prev_edge = self._edges[-2]
+            return max(min(int(value), self._maximum), prev_edge)
+        prev_edge = self._edges[edge_index - 1]
+        next_edge = self._edges[edge_index + 1]
+        return min(max(int(value), prev_edge + 1), next_edge - 1)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -208,7 +217,7 @@ class ClipTimeline(QWidget):
         edge_pen = QPen(QColor("#f2b84a") if self._enabled else QColor("#8c6c2d"))
         edge_pen.setWidth(2)
         painter.setPen(edge_pen)
-        for boundary in (self._clip_start, self._clip_end):
+        for boundary in self._edges:
             x = self._value_to_x(boundary)
             painter.drawLine(x, groove.top() - 4, x, groove.bottom() + 4)
         handle_rect = QRect(handle_x - 8, groove.center().y() - 8, 16, 16)
@@ -219,14 +228,14 @@ class ClipTimeline(QWidget):
     def mousePressEvent(self, event):
         if not self._enabled or event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
-        edge = self._edge_hit(event.position().x())
-        if edge is not None:
-            self._drag_edge = edge
-            self._drag_value = self._clip_start if edge == "start" else self._clip_end
+        edge_index = self._edge_hit(event.position().x())
+        if edge_index is not None:
+            self._drag_edge_index = edge_index
+            self._drag_value = self._edges[edge_index]
             self.setCursor(Qt.CursorShape.SizeHorCursor)
             event.accept()
             return
-        self._drag_edge = None
+        self._drag_edge_index = None
         self._drag_value = None
         self.valueChanged.emit(self._x_to_value(event.position().x()))
         event.accept()
@@ -234,14 +243,9 @@ class ClipTimeline(QWidget):
     def mouseMoveEvent(self, event):
         if not self._enabled:
             return super().mouseMoveEvent(event)
-        if self._drag_edge is not None:
-            new_value = self._x_to_value(event.position().x())
-            if self._drag_edge == "start":
-                new_value = min(max(new_value, self._minimum), self._clip_end)
-                self._clip_start = new_value
-            else:
-                new_value = max(min(new_value, self._maximum), self._clip_start)
-                self._clip_end = new_value
+        if self._drag_edge_index is not None:
+            new_value = self._clamp_edge_value(self._drag_edge_index, self._x_to_value(event.position().x()))
+            self._edges[self._drag_edge_index] = new_value
             self._drag_value = new_value
             self.update()
             event.accept()
@@ -253,13 +257,13 @@ class ClipTimeline(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._drag_edge is not None and event.button() == Qt.MouseButton.LeftButton:
-            edge = self._drag_edge
+        if self._drag_edge_index is not None and event.button() == Qt.MouseButton.LeftButton:
+            edge_index = self._drag_edge_index
             edge_value = self._drag_value
-            self._drag_edge = None
+            self._drag_edge_index = None
             self._drag_value = None
             self.unsetCursor()
-            self.clipEdgeMoved.emit(edge, int(edge_value))
+            self.edgeMoved.emit(edge_index, int(edge_value))
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -570,20 +574,18 @@ class MainWindow(QMainWindow):
 
     def _normalized_clips_with_frame_count(self, clips, frame_count):
         normalized = []
-        next_start = 0
+        next_start = None
         for raw_clip in clips:
             clip = self._normalize_clip(raw_clip, len(normalized) + 1)
             if clip is None:
                 continue
-            if clip["start_frame"] != next_start:
+            if next_start is not None and clip["start_frame"] != next_start:
                 return []
             if clip["end_frame"] >= frame_count:
                 return []
             normalized.append(clip)
             next_start = clip["end_frame"] + 1
-        if not normalized or next_start != frame_count:
-            return []
-        return normalized
+        return normalized if normalized else []
 
     def _copy_clip(self, clip):
         return {
@@ -613,6 +615,36 @@ class MainWindow(QMainWindow):
             if clip["start_frame"] <= frame_index <= clip["end_frame"]:
                 return clip
         return None
+
+    def _clip_edges_for_video(self, video_path):
+        clips = self._video_clips_map.get(video_path, [])
+        if not clips:
+            return [0, max(0, self._video_frame_count - 1)]
+        edges = [clips[0]["start_frame"]]
+        for clip in clips[1:]:
+            edges.append(clip["start_frame"])
+        edges.append(clips[-1]["end_frame"])
+        return edges
+
+    def _clips_from_edges(self, edges, existing_clips):
+        built = []
+        for index in range(len(edges) - 1):
+            start_frame = int(edges[index])
+            if index < len(edges) - 2:
+                end_frame = int(edges[index + 1]) - 1
+            else:
+                end_frame = int(edges[index + 1])
+            prior = existing_clips[index] if index < len(existing_clips) else None
+            built.append(
+                {
+                    "clip_index": index + 1,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "organ_label": prior.get("organ_label") if prior else None,
+                    "updated_at": prior.get("updated_at", "") if prior else "",
+                }
+            )
+        return built
 
     def _build_organ_label_controls(self):
         if not hasattr(self, "organ_labels_layout"):
@@ -681,12 +713,8 @@ class MainWindow(QMainWindow):
             self._classification_ui_updating = False
         self._update_clip_summary_label()
         if hasattr(self, "frame_slider"):
-            if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
-                clip = self._clip_for_frame(self._video_path, self._video_frame_index)
-                if clip is not None:
-                    self.frame_slider.setClipRange(clip["start_frame"], clip["end_frame"])
-                    return
-            self.frame_slider.setClipRange(self.frame_slider.value(), self.frame_slider.value())
+            edges = self._clip_edges_for_video(self._video_path) if self._video_path else [0, 0]
+            self.frame_slider.setEdges(edges)
 
     def _load_clip_manifest(self):
         self._organ_labels = list(self._default_organs)
@@ -894,31 +922,31 @@ class MainWindow(QMainWindow):
         current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
         if current_clip is None or not clips:
             return
+        global_start = clips[0]["start_frame"]
+        global_end = clips[-1]["end_frame"]
+        if not (global_start < self._video_frame_index <= global_end):
+            QMessageBox.information(self, "Invalid clip edge", "New clip must be inside the current video clip range.")
+            return
         if self._video_frame_index <= current_clip["start_frame"]:
             QMessageBox.information(self, "Existing boundary", "That frame is already the start of a clip.")
             return
         split_frame = int(self._video_frame_index)
-        new_clips = []
-        for clip in clips:
-            if clip["clip_index"] != current_clip["clip_index"]:
-                new_clips.append(self._copy_clip(clip))
-                continue
-            previous_clip = self._copy_clip(clip)
-            previous_clip["end_frame"] = split_frame - 1
-            new_clips.append(previous_clip)
-            new_clips.append(
-                {
-                    "clip_index": 0,
-                    "start_frame": split_frame,
-                    "end_frame": clip["end_frame"],
-                    "organ_label": None,
-                    "updated_at": "",
-                }
-            )
+        edges = self._clip_edges_for_video(self._video_path)
+        if split_frame in edges[:-1]:
+            QMessageBox.information(self, "Existing boundary", "That frame is already a clip boundary.")
+            return
+        insert_index = current_clip["clip_index"]
+        edges.insert(insert_index, split_frame)
+        existing = [self._copy_clip(clip) for clip in clips]
+        new_clips = self._clips_from_edges(edges, existing[:insert_index] + [{}] + existing[insert_index:])
+        if insert_index - 1 >= 0 and insert_index - 1 < len(existing):
+            new_clips[insert_index - 1]["organ_label"] = existing[insert_index - 1].get("organ_label")
+        new_clips[insert_index]["organ_label"] = None
+        new_clips[insert_index]["updated_at"] = ""
         self._video_clips_map[self._video_path] = self._reindex_clips(new_clips)
         self._save_clip_manifest(show_errors=False)
-        self._set_current_clip_label_ui()
-        self.statusBar().showMessage(f"Created new clip at frame {split_frame}")
+        self._set_video_frame_index(split_frame, force=True)
+        self.statusBar().showMessage(f"Created new clip boundary at frame {split_frame}")
 
     def _transport_icon(self, name):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
@@ -1226,7 +1254,7 @@ class MainWindow(QMainWindow):
         self.frame_next_btn.clicked.connect(self._show_next_frame)
         self.frame_last_btn.clicked.connect(self._show_last_frame)
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
-        self.frame_slider.clipEdgeMoved.connect(self._on_timeline_clip_edge_moved)
+        self.frame_slider.edgeMoved.connect(self._on_timeline_edge_moved)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
@@ -2079,7 +2107,7 @@ class MainWindow(QMainWindow):
         self.frame_slider.blockSignals(True)
         self.frame_slider.setRange(int(minimum), int(maximum))
         self.frame_slider.setEnabled(bool(enabled))
-        self.frame_slider.setClipRange(int(minimum), int(maximum))
+        self.frame_slider.setEdges([int(minimum), int(maximum)])
         self.frame_slider.blockSignals(False)
         if not enabled:
             self.play_btn.setEnabled(False)
@@ -2105,46 +2133,24 @@ class MainWindow(QMainWindow):
         self._save_sequence_mask_if_needed()
         self._set_sequence_index(index)
 
-    def _on_timeline_clip_edge_moved(self, edge, value):
+    def _on_timeline_edge_moved(self, edge_index, value):
         if self._mode != "video" or not self._video_path:
             return
         clips = self._current_video_clips()
-        current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
-        if current_clip is None:
+        if not clips:
             return
-        current_index = current_clip["clip_index"] - 1
-        updated_clips = [self._copy_clip(clip) for clip in clips]
-        target_clip = updated_clips[current_index]
-        if edge == "start":
-            if current_index == 0:
-                target_clip["start_frame"] = 0
-            else:
-                previous_clip = updated_clips[current_index - 1]
-                new_start = min(max(int(value), previous_clip["start_frame"] + 1), target_clip["end_frame"])
-                target_clip["start_frame"] = new_start
-                previous_clip["end_frame"] = new_start - 1
-                previous_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
-            target_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
-        elif edge == "end":
-            if current_index == len(updated_clips) - 1:
-                target_clip["end_frame"] = self._video_frame_count - 1
-            else:
-                next_clip = updated_clips[current_index + 1]
-                new_end = max(min(int(value), next_clip["end_frame"] - 1), target_clip["start_frame"])
-                target_clip["end_frame"] = new_end
-                next_clip["start_frame"] = new_end + 1
-                next_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
-            target_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
-        else:
+        edges = self._clip_edges_for_video(self._video_path)
+        if edge_index < 0 or edge_index >= len(edges):
             return
+        edges[edge_index] = int(value)
+        updated_clips = self._clips_from_edges(edges, [self._copy_clip(clip) for clip in clips])
+        timestamp = datetime.now(timezone.utc).isoformat()
+        for clip in updated_clips:
+            clip["updated_at"] = timestamp
         self._video_clips_map[self._video_path] = self._reindex_clips(updated_clips)
         self._save_clip_manifest(show_errors=False)
-        if edge == "start":
-            self._set_video_frame_index(target_clip["start_frame"], force=True)
-        elif edge == "end":
-            self._set_video_frame_index(target_clip["end_frame"], force=True)
-        else:
-            self._set_current_clip_label_ui()
+        snapped_value = int(value)
+        self._set_video_frame_index(snapped_value, force=True)
 
     def _toggle_playback(self):
         if self._play_timer.isActive():
