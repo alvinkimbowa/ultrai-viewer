@@ -306,9 +306,10 @@ class MainWindow(QMainWindow):
         self._video_cache_limit = 9
         self._video_use_random_seek = False
         self._default_organs = [
+            "cartilage",
+            "left ventricle",
             "kidney",
-            "liver",
-            "stomach",
+            "thyroid",
         ]
         self._organ_labels = list(self._default_organs)
         self._video_clips_map = {}
@@ -555,19 +556,7 @@ class MainWindow(QMainWindow):
             return
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            labels = data.get("label_set", [])
-            if isinstance(labels, list):
-                merged = list(self._default_organs)
-                seen = set(merged)
-                for label in labels:
-                    if not isinstance(label, str):
-                        continue
-                    clean = label.strip().lower()
-                    if not clean or clean in seen:
-                        continue
-                    seen.add(clean)
-                    merged.append(clean)
-                self._organ_labels = merged
+            seen_labels = set(self._organ_labels)
             videos = data.get("videos", [])
             if isinstance(videos, list):
                 for item in videos:
@@ -588,6 +577,11 @@ class MainWindow(QMainWindow):
                     clips = self._normalized_clips_with_frame_count(raw_clips, frame_count)
                     if not clips:
                         continue
+                    for clip in clips:
+                        organ_label = clip.get("organ_label")
+                        if organ_label and organ_label not in seen_labels:
+                            seen_labels.add(organ_label)
+                            self._organ_labels.append(organ_label)
                     self._video_clips_map[video_path] = clips
                     self._video_clip_metadata[video_path] = {
                         "video_name": str(item.get("video_name", Path(video_path).name)),
@@ -609,13 +603,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Missing output folder", "Select video output folder first.")
             return False
         existing_videos = {}
-        existing_labels = []
         if manifest_path.exists():
             try:
                 existing_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-                raw_labels = existing_data.get("label_set", [])
-                if isinstance(raw_labels, list):
-                    existing_labels = [str(label).strip().lower() for label in raw_labels if str(label).strip()]
                 raw_videos = existing_data.get("videos", [])
                 if isinstance(raw_videos, list):
                     for item in raw_videos:
@@ -633,7 +623,6 @@ class MainWindow(QMainWindow):
                         }
             except Exception:
                 existing_videos = {}
-                existing_labels = []
         for video_path, clips in self._video_clips_map.items():
             metadata = self._video_clip_metadata.get(video_path, {})
             existing_videos[str(video_path)] = {
@@ -652,14 +641,6 @@ class MainWindow(QMainWindow):
                     for clip in clips
                 ],
             }
-        merged_labels = list(self._default_organs)
-        seen_labels = set(merged_labels)
-        for label in list(existing_labels) + list(self._organ_labels):
-            clean = str(label).strip().lower()
-            if not clean or clean in seen_labels:
-                continue
-            seen_labels.add(clean)
-            merged_labels.append(clean)
         videos = sorted(
             (
                 item
@@ -670,7 +651,6 @@ class MainWindow(QMainWindow):
         )
         payload = {
             "version": 1,
-            "label_set": merged_labels,
             "video_count": len(videos),
             "videos": videos,
         }
