@@ -371,13 +371,11 @@ class MainWindow(QMainWindow):
         clip_row.addWidget(self.postprocess_clips_btn, stretch=0)
         clip_row.addStretch(1)
         organ_panel_layout.addLayout(clip_row)
-        self.organ_summary_label = QLabel("Organ: -")
-        organ_panel_layout.addWidget(self.organ_summary_label)
         self.organ_labels_container = QWidget()
         self.organ_labels_layout = FlowLayout(self.organ_labels_container, margin=0, h_spacing=6, v_spacing=3)
         self.organ_labels_container.setLayout(self.organ_labels_layout)
         organ_panel_layout.addWidget(self.organ_labels_container)
-        self.add_organ_btn = QPushButton("+ Add organ")
+        self.add_organ_btn = QPushButton("+ Add cine loop label")
         organ_panel_layout.addWidget(self.add_organ_btn)
         organ_sep = QFrame()
         organ_sep.setFrameShape(QFrame.Shape.HLine)
@@ -705,14 +703,13 @@ class MainWindow(QMainWindow):
         return total
 
     def _update_clip_summary_label(self):
-        if not hasattr(self, "organ_summary_label"):
+        if not hasattr(self, "clip_summary_label"):
             return
         clip = None
         if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
             clip = self._clip_for_frame(self._video_path, self._video_frame_index)
         self._clip_range_ui_updating = True
         if clip is None:
-            self.organ_summary_label.setText("Organ: -")
             self.clip_summary_label.setText("Clip:")
             self.clip_start_spin.blockSignals(True)
             self.clip_end_spin.blockSignals(True)
@@ -730,8 +727,6 @@ class MainWindow(QMainWindow):
             self.clip_end_spin.blockSignals(False)
             self._clip_range_ui_updating = False
             return
-        organ = self._display_organ_label(clip.get("organ_label"))
-        self.organ_summary_label.setText(f"Organ: {organ}")
         self.clip_summary_label.setText(f"Clip: {clip['clip_index']}")
         min_frame = self._current_video_clips()[0]["start_frame"]
         max_frame = self._current_video_clips()[-1]["end_frame"]
@@ -933,20 +928,20 @@ class MainWindow(QMainWindow):
         self._update_clip_summary_label()
         if self._save_clip_manifest(show_errors=True):
             self.statusBar().showMessage(
-                f"Saved organ '{clean}' for clip {clip['clip_index']} in {Path(self._video_path).name}"
+                f"Saved cine loop label '{clean}' for clip {clip['clip_index']} in {Path(self._video_path).name}"
             )
 
     def _add_custom_organ_label(self):
-        text, ok = QInputDialog.getText(self, "Add organ", "Organ name:")
+        text, ok = QInputDialog.getText(self, "Add cine loop label", "Cine loop label:")
         if not ok:
             return
         label = str(text).strip().lower()
         if not label:
-            QMessageBox.information(self, "Invalid label", "Organ name cannot be empty.")
+            QMessageBox.information(self, "Invalid label", "Cine loop label cannot be empty.")
             return
         existing = {lbl.lower() for lbl in self._organ_labels}
         if label in existing:
-            QMessageBox.information(self, "Duplicate label", "That organ label already exists.")
+            QMessageBox.information(self, "Duplicate label", "That cine loop label already exists.")
             return
         self._organ_labels.append(label)
         self._build_organ_label_controls()
