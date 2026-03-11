@@ -369,7 +369,7 @@ class MainWindow(QMainWindow):
         self.organ_labels_layout = FlowLayout(self.organ_labels_container, margin=0, h_spacing=6, v_spacing=3)
         self.organ_labels_container.setLayout(self.organ_labels_layout)
         organ_panel_layout.addWidget(self.organ_labels_container)
-        self.add_organ_btn = QPushButton("Add organ")
+        self.add_organ_btn = QPushButton("+ Add organ")
         organ_panel_layout.addWidget(self.add_organ_btn)
         organ_sep = QFrame()
         organ_sep.setFrameShape(QFrame.Shape.HLine)
