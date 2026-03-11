@@ -758,13 +758,18 @@ class MainWindow(QMainWindow):
             )
         return clips
 
+    def _prepare_detection_frame(self, frame, size=(160, 160)):
+        if frame is None:
+            return None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+
     def _decode_gray_for_detection(self, capture, frame_index, size=(160, 160)):
         capture.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
         success, frame = capture.read()
         if not success or frame is None:
             return None
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        return cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+        return self._prepare_detection_frame(frame, size=size)
 
     def _flow_residual_score(self, prev_gray, curr_gray):
         flow = cv2.calcOpticalFlowFarneback(
@@ -798,13 +803,16 @@ class MainWindow(QMainWindow):
         if not capture.isOpened():
             return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
         scores = []
-        prev_gray = self._decode_gray_for_detection(capture, start_frame)
+        capture.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame))
+        success, frame = capture.read()
+        prev_gray = self._prepare_detection_frame(frame if success else None)
         if prev_gray is None:
             capture.release()
             return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
         prev_edges = cv2.Canny(prev_gray, 60, 120)
         for frame_index in range(start_frame + 1, frame_count):
-            curr_gray = self._decode_gray_for_detection(capture, frame_index)
+            success, frame = capture.read()
+            curr_gray = self._prepare_detection_frame(frame if success else None)
             if curr_gray is None:
                 break
             curr_edges = cv2.Canny(curr_gray, 60, 120)
@@ -2344,6 +2352,7 @@ class MainWindow(QMainWindow):
                 self._export_video_clip(video_path, clip, export_path)
                 exported += 1
                 progress.setValue(index)
+                QApplication.processEvents()
         except Exception as exc:
             progress.close()
             QMessageBox.warning(self, "Export error", str(exc))
