@@ -347,6 +347,14 @@ class MainWindow(QMainWindow):
         self.clip_end_spin.setFixedWidth(self.clip_end_spin.fontMetrics().horizontalAdvance("0000") + 18)
         clip_row.addWidget(self.clip_end_spin, stretch=0)
         clip_row.addWidget(QLabel("]"), stretch=0)
+        self.clip_prev_btn = QPushButton("Prev")
+        self.clip_prev_btn.setEnabled(False)
+        self.clip_prev_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        clip_row.addWidget(self.clip_prev_btn, stretch=0)
+        self.clip_next_btn = QPushButton("Next")
+        self.clip_next_btn.setEnabled(False)
+        self.clip_next_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        clip_row.addWidget(self.clip_next_btn, stretch=0)
         self.new_clip_btn = QPushButton("Start new clip")
         self.new_clip_btn.setEnabled(False)
         self.new_clip_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -716,6 +724,8 @@ class MainWindow(QMainWindow):
             self.clip_end_spin.setMaximum(0)
             self.clip_start_spin.setValue(0)
             self.clip_end_spin.setValue(0)
+            self.clip_prev_btn.setEnabled(False)
+            self.clip_next_btn.setEnabled(False)
             self.clip_start_spin.blockSignals(False)
             self.clip_end_spin.blockSignals(False)
             self._clip_range_ui_updating = False
@@ -735,6 +745,9 @@ class MainWindow(QMainWindow):
         self.clip_end_spin.setMaximum(max_frame)
         self.clip_start_spin.setValue(int(clip["start_frame"]))
         self.clip_end_spin.setValue(int(clip["end_frame"]))
+        clips = self._current_video_clips()
+        self.clip_prev_btn.setEnabled(clip["clip_index"] > 1)
+        self.clip_next_btn.setEnabled(clip["clip_index"] < len(clips))
         self.clip_start_spin.blockSignals(False)
         self.clip_end_spin.blockSignals(False)
         self._clip_range_ui_updating = False
@@ -1309,6 +1322,8 @@ class MainWindow(QMainWindow):
         self.postprocess_clips_btn.clicked.connect(self._postprocess_clips)
         self.postprocess_sidebar_btn.clicked.connect(self._postprocess_clips)
         self.postprocess_clips_action.triggered.connect(self._postprocess_clips)
+        self.clip_prev_btn.clicked.connect(self._show_previous_clip)
+        self.clip_next_btn.clicked.connect(self._show_next_clip)
         self.clip_start_spin.valueChanged.connect(self._on_clip_start_spin_changed)
         self.clip_end_spin.valueChanged.connect(self._on_clip_end_spin_changed)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
@@ -2160,6 +2175,8 @@ class MainWindow(QMainWindow):
             self.frame_last_btn.setEnabled(False)
             self.organ_labels_container.setEnabled(False)
             self.add_organ_btn.setEnabled(False)
+            self.clip_prev_btn.setEnabled(False)
+            self.clip_next_btn.setEnabled(False)
             self.new_clip_btn.setEnabled(False)
             self.postprocess_clips_btn.setEnabled(False)
             self.postprocess_sidebar_btn.setEnabled(False)
@@ -2176,6 +2193,8 @@ class MainWindow(QMainWindow):
         self.frame_last_btn.setEnabled(False)
         self.organ_labels_container.setEnabled(False)
         self.add_organ_btn.setEnabled(False)
+        self.clip_prev_btn.setEnabled(False)
+        self.clip_next_btn.setEnabled(False)
         self.new_clip_btn.setEnabled(False)
         self.postprocess_clips_btn.setEnabled(False)
         self.postprocess_sidebar_btn.setEnabled(False)
@@ -2233,6 +2252,25 @@ class MainWindow(QMainWindow):
         if current_clip is None:
             return
         self._apply_edge_update(current_clip["clip_index"], int(value))
+
+    def _show_previous_clip(self):
+        if self._mode != "video" or not self._video_path:
+            return
+        current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        if current_clip is None or current_clip["clip_index"] <= 1:
+            return
+        previous_clip = self._current_video_clips()[current_clip["clip_index"] - 2]
+        self._set_video_frame_index(int(previous_clip["start_frame"]), force=True)
+
+    def _show_next_clip(self):
+        if self._mode != "video" or not self._video_path:
+            return
+        current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        clips = self._current_video_clips()
+        if current_clip is None or current_clip["clip_index"] >= len(clips):
+            return
+        next_clip = clips[current_clip["clip_index"]]
+        self._set_video_frame_index(int(next_clip["start_frame"]), force=True)
 
     def _toggle_playback(self):
         if self._play_timer.isActive():
