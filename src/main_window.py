@@ -519,21 +519,17 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "organ_summary_label"):
             return
         clip = None
-        total_clips = len(self._current_video_clips())
-        labeled = self._labeled_clip_count()
         if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
             clip = self._clip_for_frame(self._video_path, self._video_frame_index)
         if clip is None:
-            self.organ_summary_label.setText(f"Clip: - ({labeled} labeled)")
+            self.organ_summary_label.setText("Clip: -")
             self.clip_summary_label.setText("Range: -")
             return
         organ = self._display_organ_label(clip.get("organ_label"))
         self.organ_summary_label.setText(
-            f"Clip {clip['clip_index']}/{max(total_clips, 1)} | Organ: {organ} ({labeled} labeled)"
+            f"Clip {clip['clip_index']} [{clip['start_frame']}-{clip['end_frame']}]"
         )
-        self.clip_summary_label.setText(
-            f"Range: {clip['start_frame']}-{clip['end_frame']}"
-        )
+        self.clip_summary_label.setText(f"Organ: {organ}")
 
     def _set_current_clip_label_ui(self):
         if not hasattr(self, "organ_labels_container"):
