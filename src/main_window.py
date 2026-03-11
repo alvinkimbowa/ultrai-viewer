@@ -167,8 +167,7 @@ class MainWindow(QMainWindow):
         organ_panel_layout = QVBoxLayout(organ_panel)
         organ_panel_layout.setContentsMargins(0, 0, 0, 0)
         organ_panel_layout.setSpacing(4)
-        organ_panel_layout.addWidget(QLabel("Organ:"))
-        self.organ_summary_label = QLabel("Clip: -")
+        self.organ_summary_label = QLabel("Organ: -")
         organ_panel_layout.addWidget(self.organ_summary_label)
         self.organ_labels_container = QWidget()
         self.organ_labels_layout = FlowLayout(self.organ_labels_container, margin=0, h_spacing=6, v_spacing=3)
@@ -176,7 +175,7 @@ class MainWindow(QMainWindow):
         organ_panel_layout.addWidget(self.organ_labels_container)
         self.add_organ_btn = QPushButton("Add organ")
         organ_panel_layout.addWidget(self.add_organ_btn)
-        self.clip_summary_label = QLabel("Range: -")
+        self.clip_summary_label = QLabel("Clip: -")
         organ_panel_layout.addWidget(self.clip_summary_label)
         clip_actions_row = QHBoxLayout()
         clip_actions_row.setContentsMargins(0, 0, 0, 0)
@@ -522,14 +521,14 @@ class MainWindow(QMainWindow):
         if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
             clip = self._clip_for_frame(self._video_path, self._video_frame_index)
         if clip is None:
-            self.organ_summary_label.setText("Clip: -")
-            self.clip_summary_label.setText("Range: -")
+            self.organ_summary_label.setText("Organ: -")
+            self.clip_summary_label.setText("Clip: -")
             return
         organ = self._display_organ_label(clip.get("organ_label"))
-        self.organ_summary_label.setText(
-            f"Clip {clip['clip_index']} [{clip['start_frame']}-{clip['end_frame']}]"
+        self.organ_summary_label.setText(f"Organ: {organ}")
+        self.clip_summary_label.setText(
+            f"Clip: {clip['clip_index']} [{clip['start_frame']}-{clip['end_frame']}]"
         )
-        self.clip_summary_label.setText(f"Organ: {organ}")
 
     def _set_current_clip_label_ui(self):
         if not hasattr(self, "organ_labels_container"):
