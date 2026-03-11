@@ -184,10 +184,16 @@ class MainWindow(QMainWindow):
         self.new_clip_btn = QPushButton("Start new clip")
         self.new_clip_btn.setEnabled(False)
         self.new_clip_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        clip_actions_row.addWidget(self.new_clip_btn, stretch=0)
         self.postprocess_clips_btn = QPushButton("Postprocess clips")
         self.postprocess_clips_btn.setEnabled(False)
         self.postprocess_clips_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        clip_button_width = max(
+            self.new_clip_btn.sizeHint().width(),
+            self.postprocess_clips_btn.sizeHint().width(),
+        )
+        self.new_clip_btn.setFixedWidth(clip_button_width)
+        self.postprocess_clips_btn.setFixedWidth(clip_button_width)
+        clip_actions_row.addWidget(self.new_clip_btn, stretch=0)
         clip_actions_row.addWidget(self.postprocess_clips_btn, stretch=0)
         clip_actions_row.addStretch(1)
         organ_panel_layout.addLayout(clip_actions_row)
