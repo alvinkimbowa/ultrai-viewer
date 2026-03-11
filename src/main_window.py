@@ -124,6 +124,7 @@ class ClipTimeline(QWidget):
         self._edges = [0, 0]
         self._enabled = False
         self._drag_edge_index = None
+        self._dragging_value = False
         self._drag_value = None
         self.setMinimumHeight(26)
         self.setMouseTracking(True)
@@ -189,6 +190,12 @@ class ClipTimeline(QWidget):
                 return index
         return None
 
+    def _handle_hit(self, x, y, tolerance=10):
+        groove = self._groove_rect()
+        handle_x = self._value_to_x(self._value)
+        handle_y = groove.center().y()
+        return abs(handle_x - int(x)) <= tolerance and abs(handle_y - int(y)) <= tolerance
+
     def _clamp_edge_value(self, edge_index, value):
         if edge_index <= 0:
             next_edge = self._edges[1]
@@ -228,6 +235,14 @@ class ClipTimeline(QWidget):
     def mousePressEvent(self, event):
         if not self._enabled or event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
+        self._dragging_value = False
+        if self._handle_hit(event.position().x(), event.position().y()):
+            self._drag_edge_index = None
+            self._dragging_value = True
+            self._drag_value = self._x_to_value(event.position().x())
+            self.valueChanged.emit(int(self._drag_value))
+            event.accept()
+            return
         edge_index = self._edge_hit(event.position().x())
         if edge_index is not None:
             self._drag_edge_index = edge_index
@@ -236,6 +251,7 @@ class ClipTimeline(QWidget):
             event.accept()
             return
         self._drag_edge_index = None
+        self._dragging_value = True
         self._drag_value = None
         self.valueChanged.emit(self._x_to_value(event.position().x()))
         event.accept()
@@ -250,8 +266,15 @@ class ClipTimeline(QWidget):
             self.update()
             event.accept()
             return
+        if self._dragging_value:
+            self._drag_value = self._x_to_value(event.position().x())
+            self.valueChanged.emit(int(self._drag_value))
+            event.accept()
+            return
         if self._edge_hit(event.position().x()) is not None:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif self._handle_hit(event.position().x(), event.position().y()):
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             self.unsetCursor()
         super().mouseMoveEvent(event)
@@ -264,6 +287,12 @@ class ClipTimeline(QWidget):
             self._drag_value = None
             self.unsetCursor()
             self.edgeMoved.emit(edge_index, int(edge_value))
+            event.accept()
+            return
+        if self._dragging_value and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging_value = False
+            self._drag_value = None
+            self.unsetCursor()
             event.accept()
             return
         super().mouseReleaseEvent(event)
