@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #9a9a9a;
                 border-radius: 10px;
                 background: #f2f2f2;
+                color: #202020;
             }
             QPushButton:checked {
                 background: #5f8fbd;
