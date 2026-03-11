@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot, QRect, QPoint
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut, QPainter, QColor, QPen, QBrush
 
 from .canvas import Canvas
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
@@ -110,6 +110,159 @@ class FlowLayout(QLayout):
             x = next_x + self._h_spacing
             line_height = max(line_height, hint.height())
         return y + line_height - rect.y() + margins.bottom()
+
+
+class ClipTimeline(QWidget):
+    valueChanged = pyqtSignal(int)
+    clipEdgeMoved = pyqtSignal(str, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._minimum = 0
+        self._maximum = 0
+        self._value = 0
+        self._clip_start = 0
+        self._clip_end = 0
+        self._enabled = False
+        self._drag_edge = None
+        self._drag_value = None
+        self.setMinimumHeight(26)
+        self.setMouseTracking(True)
+
+    def setRange(self, minimum, maximum):
+        self._minimum = int(minimum)
+        self._maximum = max(int(minimum), int(maximum))
+        self._value = min(max(self._value, self._minimum), self._maximum)
+        self._clip_start = min(max(self._clip_start, self._minimum), self._maximum)
+        self._clip_end = min(max(self._clip_end, self._minimum), self._maximum)
+        self.update()
+
+    def setValue(self, value):
+        clamped = min(max(int(value), self._minimum), self._maximum)
+        if clamped == self._value:
+            self.update()
+            return
+        self._value = clamped
+        self.update()
+
+    def value(self):
+        return self._value
+
+    def setEnabled(self, enabled):
+        self._enabled = bool(enabled)
+        super().setEnabled(enabled)
+        self.update()
+
+    def setClipRange(self, start_frame, end_frame):
+        self._clip_start = min(max(int(start_frame), self._minimum), self._maximum)
+        self._clip_end = min(max(int(end_frame), self._minimum), self._maximum)
+        if self._clip_end < self._clip_start:
+            self._clip_end = self._clip_start
+        self.update()
+
+    def _groove_rect(self):
+        margin = 8
+        groove_height = 12
+        top = (self.height() - groove_height) // 2
+        return QRect(margin, top, max(1, self.width() - (margin * 2)), groove_height)
+
+    def _value_to_x(self, value):
+        groove = self._groove_rect()
+        if self._maximum <= self._minimum:
+            return groove.left()
+        ratio = (float(value) - self._minimum) / float(self._maximum - self._minimum)
+        return int(round(groove.left() + ratio * groove.width()))
+
+    def _x_to_value(self, x):
+        groove = self._groove_rect()
+        if groove.width() <= 0 or self._maximum <= self._minimum:
+            return self._minimum
+        clamped_x = min(max(int(x), groove.left()), groove.right())
+        ratio = float(clamped_x - groove.left()) / float(max(1, groove.width()))
+        value = self._minimum + ratio * float(self._maximum - self._minimum)
+        return int(round(value))
+
+    def _edge_hit(self, x, tolerance=7):
+        start_x = self._value_to_x(self._clip_start)
+        end_x = self._value_to_x(self._clip_end)
+        if abs(start_x - int(x)) <= tolerance:
+            return "start"
+        if abs(end_x - int(x)) <= tolerance:
+            return "end"
+        return None
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        groove = self._groove_rect()
+        groove_color = QColor("#6b6b6b") if self._enabled else QColor("#4a4a4a")
+        fill_color = QColor("#9a9a9a") if self._enabled else QColor("#666666")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(groove_color))
+        painter.drawRoundedRect(groove, 6, 6)
+        handle_x = self._value_to_x(self._value)
+        fill_rect = QRect(groove.left(), groove.top(), max(0, handle_x - groove.left()), groove.height())
+        if fill_rect.width() > 0:
+            painter.setBrush(QBrush(fill_color))
+            painter.drawRoundedRect(fill_rect, 6, 6)
+        edge_pen = QPen(QColor("#f2b84a") if self._enabled else QColor("#8c6c2d"))
+        edge_pen.setWidth(2)
+        painter.setPen(edge_pen)
+        for boundary in (self._clip_start, self._clip_end):
+            x = self._value_to_x(boundary)
+            painter.drawLine(x, groove.top() - 4, x, groove.bottom() + 4)
+        handle_rect = QRect(handle_x - 8, groove.center().y() - 8, 16, 16)
+        painter.setPen(QPen(QColor("#4a4a4a")))
+        painter.setBrush(QBrush(QColor("#e6e6e6") if self._enabled else QColor("#a0a0a0")))
+        painter.drawEllipse(handle_rect)
+
+    def mousePressEvent(self, event):
+        if not self._enabled or event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        edge = self._edge_hit(event.position().x())
+        if edge is not None:
+            self._drag_edge = edge
+            self._drag_value = self._clip_start if edge == "start" else self._clip_end
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            event.accept()
+            return
+        self._drag_edge = None
+        self._drag_value = None
+        self.valueChanged.emit(self._x_to_value(event.position().x()))
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if not self._enabled:
+            return super().mouseMoveEvent(event)
+        if self._drag_edge is not None:
+            new_value = self._x_to_value(event.position().x())
+            if self._drag_edge == "start":
+                new_value = min(max(new_value, self._minimum), self._clip_end)
+                self._clip_start = new_value
+            else:
+                new_value = max(min(new_value, self._maximum), self._clip_start)
+                self._clip_end = new_value
+            self._drag_value = new_value
+            self.update()
+            event.accept()
+            return
+        if self._edge_hit(event.position().x()) is not None:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._drag_edge is not None and event.button() == Qt.MouseButton.LeftButton:
+            edge = self._drag_edge
+            edge_value = self._drag_value
+            self._drag_edge = None
+            self._drag_value = None
+            self.unsetCursor()
+            self.clipEdgeMoved.emit(edge, int(edge_value))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -237,32 +390,10 @@ class MainWindow(QMainWindow):
         frame_nav_row.addWidget(self.frame_next_btn, stretch=0)
         frame_nav_row.addWidget(self.frame_last_btn, stretch=0)
         self._init_transport_icons()
-        self.frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self.frame_slider = ClipTimeline(self)
         self.frame_slider.setEnabled(False)
         self.frame_slider.setRange(0, 0)
         self.frame_slider.setFixedHeight(26)
-        self.frame_slider.setSingleStep(1)
-        self.frame_slider.setPageStep(1)
-        self.frame_slider.setStyleSheet(
-            """
-            QSlider::groove:horizontal {
-                height: 12px;
-                background: #6b6b6b;
-                border-radius: 6px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #9a9a9a;
-                border-radius: 6px;
-            }
-            QSlider::handle:horizontal {
-                background: #e6e6e6;
-                border: 1px solid #4a4a4a;
-                width: 16px;
-                margin: -4px 0;
-                border-radius: 8px;
-            }
-            """
-        )
         frame_nav_row.addWidget(self.frame_slider, stretch=1)
         canvas_layout.addLayout(frame_nav_row, stretch=0)
         root_layout.addWidget(canvas_panel, stretch=1)
@@ -549,6 +680,13 @@ class MainWindow(QMainWindow):
         finally:
             self._classification_ui_updating = False
         self._update_clip_summary_label()
+        if hasattr(self, "frame_slider"):
+            if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+                clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+                if clip is not None:
+                    self.frame_slider.setClipRange(clip["start_frame"], clip["end_frame"])
+                    return
+            self.frame_slider.setClipRange(self.frame_slider.value(), self.frame_slider.value())
 
     def _load_clip_manifest(self):
         self._organ_labels = list(self._default_organs)
@@ -1088,6 +1226,7 @@ class MainWindow(QMainWindow):
         self.frame_next_btn.clicked.connect(self._show_next_frame)
         self.frame_last_btn.clicked.connect(self._show_last_frame)
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
+        self.frame_slider.clipEdgeMoved.connect(self._on_timeline_clip_edge_moved)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
@@ -1940,6 +2079,7 @@ class MainWindow(QMainWindow):
         self.frame_slider.blockSignals(True)
         self.frame_slider.setRange(int(minimum), int(maximum))
         self.frame_slider.setEnabled(bool(enabled))
+        self.frame_slider.setClipRange(int(minimum), int(maximum))
         self.frame_slider.blockSignals(False)
         if not enabled:
             self.play_btn.setEnabled(False)
@@ -1964,6 +2104,42 @@ class MainWindow(QMainWindow):
             return
         self._save_sequence_mask_if_needed()
         self._set_sequence_index(index)
+
+    def _on_timeline_clip_edge_moved(self, edge, value):
+        if self._mode != "video" or not self._video_path:
+            return
+        clips = self._current_video_clips()
+        current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        if current_clip is None:
+            return
+        current_index = current_clip["clip_index"] - 1
+        updated_clips = [self._copy_clip(clip) for clip in clips]
+        target_clip = updated_clips[current_index]
+        if edge == "start":
+            if current_index == 0:
+                target_clip["start_frame"] = 0
+            else:
+                previous_clip = updated_clips[current_index - 1]
+                new_start = min(max(int(value), previous_clip["start_frame"] + 1), target_clip["end_frame"])
+                target_clip["start_frame"] = new_start
+                previous_clip["end_frame"] = new_start - 1
+                previous_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
+            target_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
+        elif edge == "end":
+            if current_index == len(updated_clips) - 1:
+                target_clip["end_frame"] = self._video_frame_count - 1
+            else:
+                next_clip = updated_clips[current_index + 1]
+                new_end = max(min(int(value), next_clip["end_frame"] - 1), target_clip["start_frame"])
+                target_clip["end_frame"] = new_end
+                next_clip["start_frame"] = new_end + 1
+                next_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
+            target_clip["updated_at"] = datetime.now(timezone.utc).isoformat()
+        else:
+            return
+        self._video_clips_map[self._video_path] = self._reindex_clips(updated_clips)
+        self._save_clip_manifest(show_errors=False)
+        self._set_current_clip_label_ui()
 
     def _toggle_playback(self):
         if self._play_timer.isActive():
