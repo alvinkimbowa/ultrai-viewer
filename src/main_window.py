@@ -162,21 +162,36 @@ class MainWindow(QMainWindow):
         canvas_layout = QVBoxLayout(canvas_panel)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
         canvas_layout.setSpacing(6)
-        nerve_panel = QWidget()
-        nerve_panel_layout = QVBoxLayout(nerve_panel)
-        nerve_panel_layout.setContentsMargins(0, 0, 0, 0)
-        nerve_panel_layout.setSpacing(4)
-        nerve_panel_layout.addWidget(QLabel("Nerve:"))
-        self.nerve_labels_container = QWidget()
-        self.nerve_labels_layout = FlowLayout(self.nerve_labels_container, margin=0, h_spacing=6, v_spacing=3)
-        self.nerve_labels_container.setLayout(self.nerve_labels_layout)
-        nerve_panel_layout.addWidget(self.nerve_labels_container)
-        self.add_nerve_btn = QPushButton("+ Add nerve")
-        nerve_sep = QFrame()
-        nerve_sep.setFrameShape(QFrame.Shape.HLine)
-        nerve_sep.setFrameShadow(QFrame.Shadow.Sunken)
-        nerve_panel_layout.addWidget(nerve_sep)
-        canvas_layout.addWidget(nerve_panel, stretch=0)
+        organ_panel = QWidget()
+        organ_panel_layout = QVBoxLayout(organ_panel)
+        organ_panel_layout.setContentsMargins(0, 0, 0, 0)
+        organ_panel_layout.setSpacing(4)
+        organ_panel_layout.addWidget(QLabel("Organ:"))
+        self.organ_summary_label = QLabel("Clip: -")
+        organ_panel_layout.addWidget(self.organ_summary_label)
+        self.organ_labels_container = QWidget()
+        self.organ_labels_layout = FlowLayout(self.organ_labels_container, margin=0, h_spacing=6, v_spacing=3)
+        self.organ_labels_container.setLayout(self.organ_labels_layout)
+        organ_panel_layout.addWidget(self.organ_labels_container)
+        self.add_organ_btn = QPushButton("Add organ")
+        organ_panel_layout.addWidget(self.add_organ_btn)
+        self.clip_summary_label = QLabel("Range: -")
+        organ_panel_layout.addWidget(self.clip_summary_label)
+        clip_actions_row = QHBoxLayout()
+        clip_actions_row.setContentsMargins(0, 0, 0, 0)
+        clip_actions_row.setSpacing(4)
+        self.new_clip_btn = QPushButton("New clip")
+        self.new_clip_btn.setEnabled(False)
+        clip_actions_row.addWidget(self.new_clip_btn)
+        self.postprocess_clips_btn = QPushButton("Postprocess clips")
+        self.postprocess_clips_btn.setEnabled(False)
+        clip_actions_row.addWidget(self.postprocess_clips_btn)
+        organ_panel_layout.addLayout(clip_actions_row)
+        organ_sep = QFrame()
+        organ_sep.setFrameShape(QFrame.Shape.HLine)
+        organ_sep.setFrameShadow(QFrame.Shadow.Sunken)
+        organ_panel_layout.addWidget(organ_sep)
+        canvas_layout.addWidget(organ_panel, stretch=0)
         canvas_layout.addWidget(self.canvas, stretch=1)
         frame_nav_row = QHBoxLayout()
         frame_nav_row.setContentsMargins(0, 0, 0, 0)
@@ -289,37 +304,27 @@ class MainWindow(QMainWindow):
         self._video_decode_pos = -1
         self._video_cache_limit = 9
         self._video_use_random_seek = False
-        self._default_nerves = [
-            "ulnar",
-            "median",
-            "radial",
-            "plex",
-            "lfcn",
-            "peroneal",
-            "fibular",
-            "tibial",
-            "sural",
-            "proximal",
-            "accessory",
-            "quad",
-            "sciatic",
-            "unknown",
+        self._default_organs = [
+            "kidney",
+            "liver",
+            "stomach",
         ]
-        self._nerve_labels = list(self._default_nerves)
-        self._video_nerve_map = {}
-        self._video_nerve_updated_at = {}
-        self._video_manifest_name = "nerve_manifest.json"
+        self._organ_labels = list(self._default_organs)
+        self._video_clips_map = {}
+        self._video_clip_metadata = {}
+        self._video_manifest_name = "clip_manifest.json"
         self._classification_ui_updating = False
-        self._nerve_button_group = None
-        self._nerve_buttons = {}
-        self._nerve_manifest_warning_shown = False
+        self._organ_button_group = None
+        self._organ_buttons = {}
+        self._clip_manifest_warning_shown = False
+        self._auto_split_min_clip_frames = 10
         self._last_image_input_dir = ""
         self._last_image_output_dir = ""
         self._last_video_input_dir = ""
         self._last_video_output_dir = ""
         self._load_persisted_paths()
-        self._build_nerve_label_controls()
-        self._update_nerve_summary_label()
+        self._build_organ_label_controls()
+        self._update_clip_summary_label()
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
         self._playback_interval_ms = 33
@@ -355,6 +360,8 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_mask_action)
         self.save_video_masks_action = QAction("Save video masks...", self)
         file_menu.addAction(self.save_video_masks_action)
+        self.postprocess_clips_action = QAction("Postprocess clips...", self)
+        file_menu.addAction(self.postprocess_clips_action)
         self.clear_mask_action = QAction("Clear Mask", self)
         file_menu.addAction(self.clear_mask_action)
         self.close_image_action = QAction("Close Image", self)
@@ -389,12 +396,9 @@ class MainWindow(QMainWindow):
             return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parent.parent
 
-    def _display_nerve_label(self, label):
+    def _display_organ_label(self, label):
         clean = str(label).strip().lower()
-        special = {
-            "lfcn": "LFCN",
-        }
-        return special.get(clean, clean.title())
+        return clean.title() if clean else "-"
 
     def _manifest_path(self):
         output_dir = (self._video_output_dir or "").strip()
@@ -402,100 +406,150 @@ class MainWindow(QMainWindow):
             return None
         return Path(output_dir) / self._video_manifest_name
 
-    def _build_nerve_label_controls(self):
-        if not hasattr(self, "nerve_labels_layout"):
+    def _normalize_clip(self, clip, clip_index):
+        if not isinstance(clip, dict):
+            return None
+        try:
+            start_frame = int(clip.get("start_frame"))
+            end_frame = int(clip.get("end_frame"))
+        except (TypeError, ValueError):
+            return None
+        if start_frame < 0 or end_frame < start_frame:
+            return None
+        organ_label = clip.get("organ_label")
+        if organ_label is not None:
+            organ_label = str(organ_label).strip().lower() or None
+        updated_at = str(clip.get("updated_at", "")).strip()
+        return {
+            "clip_index": int(clip_index),
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "organ_label": organ_label,
+            "updated_at": updated_at,
+        }
+
+    def _normalized_clips_with_frame_count(self, clips, frame_count):
+        normalized = []
+        next_start = 0
+        for raw_clip in clips:
+            clip = self._normalize_clip(raw_clip, len(normalized) + 1)
+            if clip is None:
+                continue
+            if clip["start_frame"] != next_start:
+                return []
+            if clip["end_frame"] >= frame_count:
+                return []
+            normalized.append(clip)
+            next_start = clip["end_frame"] + 1
+        if not normalized or next_start != frame_count:
+            return []
+        return normalized
+
+    def _copy_clip(self, clip):
+        return {
+            "clip_index": int(clip["clip_index"]),
+            "start_frame": int(clip["start_frame"]),
+            "end_frame": int(clip["end_frame"]),
+            "organ_label": clip.get("organ_label"),
+            "updated_at": clip.get("updated_at", ""),
+        }
+
+    def _reindex_clips(self, clips):
+        updated = []
+        for index, clip in enumerate(clips, start=1):
+            item = self._copy_clip(clip)
+            item["clip_index"] = index
+            updated.append(item)
+        return updated
+
+    def _current_video_clips(self):
+        if not self._video_path:
+            return []
+        return self._video_clips_map.get(self._video_path, [])
+
+    def _clip_for_frame(self, video_path, frame_index):
+        clips = self._video_clips_map.get(video_path, [])
+        for clip in clips:
+            if clip["start_frame"] <= frame_index <= clip["end_frame"]:
+                return clip
+        return None
+
+    def _build_organ_label_controls(self):
+        if not hasattr(self, "organ_labels_layout"):
             return
-        while self.nerve_labels_layout.count():
-            item = self.nerve_labels_layout.takeAt(0)
+        while self.organ_labels_layout.count():
+            item = self.organ_labels_layout.takeAt(0)
             widget = item.widget()
-            if widget is not None and widget is not getattr(self, "add_nerve_btn", None):
+            if widget is not None and widget is not getattr(self, "add_organ_btn", None):
                 widget.deleteLater()
-        self._nerve_buttons = {}
-        self._nerve_button_group = QButtonGroup(self)
-        self._nerve_button_group.setExclusive(True)
-        for index, label in enumerate(self._nerve_labels):
-            button = QPushButton(self._display_nerve_label(label))
+        self._organ_buttons = {}
+        self._organ_button_group = QButtonGroup(self)
+        self._organ_button_group.setExclusive(True)
+        for label in self._organ_labels:
+            button = QPushButton(self._display_organ_label(label))
             button.setCheckable(True)
             button.setStyleSheet(self._nerve_button_style)
-            button.toggled.connect(lambda checked, lbl=label: self._on_nerve_label_selected(lbl, checked))
-            self._nerve_button_group.addButton(button)
-            self._nerve_buttons[label] = button
-            self.nerve_labels_layout.addWidget(button)
-        if hasattr(self, "add_nerve_btn"):
-            self.nerve_labels_layout.addWidget(self.add_nerve_btn)
+            button.toggled.connect(lambda checked, lbl=label: self._on_organ_label_selected(lbl, checked))
+            self._organ_button_group.addButton(button)
+            self._organ_buttons[label] = button
+            self.organ_labels_layout.addWidget(button)
+        if hasattr(self, "add_organ_btn"):
+            self.organ_labels_layout.addWidget(self.add_organ_btn)
         has_video = self._mode == "video" and bool(self._video_path)
-        self.nerve_labels_container.setEnabled(has_video)
-        self.add_nerve_btn.setEnabled(self._mode == "video")
+        self.organ_labels_container.setEnabled(has_video)
+        self.add_organ_btn.setEnabled(self._mode == "video")
 
-    def _labeled_video_count(self):
-        if not self._video_paths:
-            return 0
-        return sum(1 for path in self._video_paths if self._video_nerve_map.get(path))
+    def _labeled_clip_count(self):
+        total = 0
+        for clips in self._video_clips_map.values():
+            total += sum(1 for clip in clips if clip.get("organ_label"))
+        return total
 
-    def _update_nerve_summary_label(self):
-        if not hasattr(self, "nerve_summary_label"):
+    def _update_clip_summary_label(self):
+        if not hasattr(self, "organ_summary_label"):
             return
-        total = len(self._video_paths)
-        labeled = self._labeled_video_count()
-        label_text = "-"
-        if self._mode == "video" and self._video_path:
-            label_text = self._video_nerve_map.get(self._video_path, "-")
-        self.nerve_summary_label.setText(f"Label: {label_text} ({labeled}/{total} labeled)")
+        clip = None
+        total_clips = len(self._current_video_clips())
+        labeled = self._labeled_clip_count()
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        if clip is None:
+            self.organ_summary_label.setText(f"Clip: - ({labeled} labeled)")
+            self.clip_summary_label.setText("Range: -")
+            return
+        organ = self._display_organ_label(clip.get("organ_label"))
+        self.organ_summary_label.setText(
+            f"Clip {clip['clip_index']}/{max(total_clips, 1)} | Organ: {organ} ({labeled} labeled)"
+        )
+        self.clip_summary_label.setText(
+            f"Range: {clip['start_frame']}-{clip['end_frame']}"
+        )
 
-    def _set_current_video_label_ui(self, video_path):
-        if not hasattr(self, "nerve_labels_container"):
+    def _set_current_clip_label_ui(self):
+        if not hasattr(self, "organ_labels_container"):
             return
         self._classification_ui_updating = True
         try:
-            selected = self._video_nerve_map.get(video_path)
-            if self._nerve_button_group is not None:
-                self._nerve_button_group.setExclusive(False)
-            for label, button in self._nerve_buttons.items():
+            selected = None
+            if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+                clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+                if clip is not None:
+                    selected = clip.get("organ_label")
+            if self._organ_button_group is not None:
+                self._organ_button_group.setExclusive(False)
+            for label, button in self._organ_buttons.items():
                 button.setChecked(bool(selected and label == selected))
-            if self._nerve_button_group is not None:
-                self._nerve_button_group.setExclusive(True)
+            if self._organ_button_group is not None:
+                self._organ_button_group.setExclusive(True)
         finally:
             self._classification_ui_updating = False
-        self._update_nerve_summary_label()
+        self._update_clip_summary_label()
 
-    def _infer_nerve_label_from_video_path(self, video_path):
-        folder_name = Path(video_path).parent.name.strip().lower()
-        if not folder_name:
-            return None
-        normalized = re.sub(r"[^a-z0-9]+", " ", folder_name)
-        for label in sorted(self._nerve_labels, key=len, reverse=True):
-            if re.search(rf"\b{re.escape(label.lower())}\b", normalized):
-                return label
-        return None
-
-    def _ensure_current_video_nerve_label(self):
-        if self._mode != "video" or not self._video_path:
-            return None
-        current = self._video_nerve_map.get(self._video_path)
-        if current:
-            return current
-        inferred_label = self._infer_nerve_label_from_video_path(self._video_path)
-        if not inferred_label:
-            return None
-        self._video_nerve_map[self._video_path] = inferred_label
-        self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
-        return inferred_label
-
-    def _persist_current_video_nerve_label(self):
-        if self._mode != "video" or not self._video_path:
-            return
-        label = self._video_nerve_map.get(self._video_path)
-        if not label:
-            return
-        if self._video_path not in self._video_nerve_updated_at:
-            self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
-        self._save_nerve_manifest(show_errors=False)
-
-    def _load_nerve_manifest(self):
-        self._nerve_labels = list(self._default_nerves)
-        self._video_nerve_map = {}
-        self._video_nerve_updated_at = {}
-        self._nerve_manifest_warning_shown = False
+    def _load_clip_manifest(self):
+        self._organ_labels = list(self._default_organs)
+        self._video_clips_map = {}
+        self._video_clip_metadata = {}
+        self._clip_manifest_warning_shown = False
         manifest_path = self._manifest_path()
         if manifest_path is None or not manifest_path.exists():
             return
@@ -503,7 +557,7 @@ class MainWindow(QMainWindow):
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
             labels = data.get("label_set", [])
             if isinstance(labels, list):
-                merged = list(self._default_nerves)
+                merged = list(self._default_organs)
                 seen = set(merged)
                 for label in labels:
                     if not isinstance(label, str):
@@ -513,29 +567,42 @@ class MainWindow(QMainWindow):
                         continue
                     seen.add(clean)
                     merged.append(clean)
-                self._nerve_labels = merged
+                self._organ_labels = merged
             videos = data.get("videos", [])
             if isinstance(videos, list):
                 for item in videos:
                     if not isinstance(item, dict):
                         continue
                     video_path = str(item.get("video_path", "")).strip()
-                    label = str(item.get("nerve_label", "")).strip().lower()
-                    if not video_path or not label:
+                    if not video_path:
                         continue
-                    self._video_nerve_map[video_path] = label
-                    updated = str(item.get("updated_at", "")).strip()
-                    if updated:
-                        self._video_nerve_updated_at[video_path] = updated
+                    try:
+                        frame_count = int(item.get("frame_count", 0))
+                    except (TypeError, ValueError):
+                        frame_count = 0
+                    if frame_count <= 0:
+                        continue
+                    raw_clips = item.get("clips", [])
+                    if not isinstance(raw_clips, list):
+                        continue
+                    clips = self._normalized_clips_with_frame_count(raw_clips, frame_count)
+                    if not clips:
+                        continue
+                    self._video_clips_map[video_path] = clips
+                    self._video_clip_metadata[video_path] = {
+                        "video_name": str(item.get("video_name", Path(video_path).name)),
+                        "frame_count": frame_count,
+                        "fps": float(item.get("fps", 0.0) or 0.0),
+                    }
         except Exception as exc:
-            self._video_nerve_map = {}
-            self._video_nerve_updated_at = {}
-            self._nerve_labels = list(self._default_nerves)
-            if not self._nerve_manifest_warning_shown:
-                QMessageBox.warning(self, "Manifest warning", f"Could not read nerve manifest: {exc}")
-                self._nerve_manifest_warning_shown = True
+            self._video_clips_map = {}
+            self._video_clip_metadata = {}
+            self._organ_labels = list(self._default_organs)
+            if not self._clip_manifest_warning_shown:
+                QMessageBox.warning(self, "Manifest warning", f"Could not read clip manifest: {exc}")
+                self._clip_manifest_warning_shown = True
 
-    def _save_nerve_manifest(self, show_errors=True):
+    def _save_clip_manifest(self, show_errors=True):
         manifest_path = self._manifest_path()
         if manifest_path is None:
             if show_errors:
@@ -560,26 +627,34 @@ class MainWindow(QMainWindow):
                         existing_videos[video_path] = {
                             "video_path": video_path,
                             "video_name": str(item.get("video_name", Path(video_path).name)),
-                            "nerve_label": str(item.get("nerve_label", "")).strip().lower(),
-                            "updated_at": str(item.get("updated_at", "")).strip(),
+                            "frame_count": int(item.get("frame_count", 0) or 0),
+                            "fps": float(item.get("fps", 0.0) or 0.0),
+                            "clips": item.get("clips", []),
                         }
             except Exception:
-                # Fall back to rewriting a clean manifest from current in-memory state.
                 existing_videos = {}
                 existing_labels = []
-        for video_path in self._video_paths:
-            label = self._video_nerve_map.get(video_path)
-            if not label:
-                continue
+        for video_path, clips in self._video_clips_map.items():
+            metadata = self._video_clip_metadata.get(video_path, {})
             existing_videos[str(video_path)] = {
                 "video_path": str(video_path),
-                "video_name": Path(video_path).name,
-                "nerve_label": str(label),
-                "updated_at": self._video_nerve_updated_at.get(video_path, ""),
+                "video_name": metadata.get("video_name", Path(video_path).name),
+                "frame_count": int(metadata.get("frame_count", 0) or 0),
+                "fps": float(metadata.get("fps", 0.0) or 0.0),
+                "clips": [
+                    {
+                        "clip_index": int(clip["clip_index"]),
+                        "start_frame": int(clip["start_frame"]),
+                        "end_frame": int(clip["end_frame"]),
+                        "organ_label": clip.get("organ_label"),
+                        "updated_at": clip.get("updated_at", ""),
+                    }
+                    for clip in clips
+                ],
             }
-        merged_labels = list(self._default_nerves)
+        merged_labels = list(self._default_organs)
         seen_labels = set(merged_labels)
-        for label in list(existing_labels) + list(self._nerve_labels):
+        for label in list(existing_labels) + list(self._organ_labels):
             clean = str(label).strip().lower()
             if not clean or clean in seen_labels:
                 continue
@@ -589,7 +664,7 @@ class MainWindow(QMainWindow):
             (
                 item
                 for item in existing_videos.values()
-                if item.get("video_path") and item.get("nerve_label")
+                if item.get("video_path") and item.get("clips")
             ),
             key=lambda item: str(item["video_path"]).lower(),
         )
@@ -608,7 +683,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Manifest save error", str(exc))
             return False
 
-    def _on_nerve_label_selected(self, label, checked):
+    def _on_organ_label_selected(self, label, checked):
         if not checked or self._classification_ui_updating:
             return
         if self._mode != "video" or not self._video_path:
@@ -616,29 +691,34 @@ class MainWindow(QMainWindow):
         clean = str(label).strip().lower()
         if not clean:
             return
-        self._video_nerve_map[self._video_path] = clean
-        self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
-        self._update_nerve_summary_label()
-        if self._save_nerve_manifest(show_errors=True):
-            self.statusBar().showMessage(f"Saved label '{clean}' for {Path(self._video_path).name}")
+        clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        if clip is None:
+            return
+        clip["organ_label"] = clean
+        clip["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._update_clip_summary_label()
+        if self._save_clip_manifest(show_errors=True):
+            self.statusBar().showMessage(
+                f"Saved organ '{clean}' for clip {clip['clip_index']} in {Path(self._video_path).name}"
+            )
 
-    def _add_custom_nerve_label(self):
-        text, ok = QInputDialog.getText(self, "Add nerve", "Nerve name:")
+    def _add_custom_organ_label(self):
+        text, ok = QInputDialog.getText(self, "Add organ", "Organ name:")
         if not ok:
             return
         label = str(text).strip().lower()
         if not label:
-            QMessageBox.information(self, "Invalid label", "Nerve name cannot be empty.")
+            QMessageBox.information(self, "Invalid label", "Organ name cannot be empty.")
             return
-        existing = {lbl.lower() for lbl in self._nerve_labels}
+        existing = {lbl.lower() for lbl in self._organ_labels}
         if label in existing:
-            QMessageBox.information(self, "Duplicate label", "That nerve label already exists.")
+            QMessageBox.information(self, "Duplicate label", "That organ label already exists.")
             return
-        self._nerve_labels.append(label)
-        self._build_nerve_label_controls()
+        self._organ_labels.append(label)
+        self._build_organ_label_controls()
         if self._mode == "video" and self._video_path:
-            self._set_current_video_label_ui(self._video_path)
-        self._save_nerve_manifest(show_errors=True)
+            self._set_current_clip_label_ui()
+        self._save_clip_manifest(show_errors=True)
 
     def _load_persisted_paths(self):
         settings = self._settings()
@@ -653,6 +733,191 @@ class MainWindow(QMainWindow):
         settings.setValue("paths/image_output_dir", self._last_image_output_dir)
         settings.setValue("paths/video_input_dir", self._last_video_input_dir)
         settings.setValue("paths/video_output_dir", self._last_video_output_dir)
+
+    def _generate_clips_from_boundaries(self, frame_count, boundaries, start_frame=0, exact_match_map=None):
+        exact_match_map = exact_match_map or {}
+        clip_starts = [int(start_frame)]
+        for boundary in sorted({int(value) for value in boundaries if start_frame < int(value) < frame_count}):
+            clip_starts.append(boundary)
+        clip_starts.append(frame_count)
+        clips = []
+        for index in range(len(clip_starts) - 1):
+            clip_start = clip_starts[index]
+            clip_end = clip_starts[index + 1] - 1
+            match = exact_match_map.get((clip_start, clip_end))
+            organ_label = match.get("organ_label") if match else None
+            updated_at = match.get("updated_at", "") if match else ""
+            clips.append(
+                {
+                    "clip_index": index + 1,
+                    "start_frame": clip_start,
+                    "end_frame": clip_end,
+                    "organ_label": organ_label,
+                    "updated_at": updated_at,
+                }
+            )
+        return clips
+
+    def _decode_gray_for_detection(self, capture, frame_index, size=(160, 160)):
+        capture.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+        success, frame = capture.read()
+        if not success or frame is None:
+            return None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+
+    def _flow_residual_score(self, prev_gray, curr_gray):
+        flow = cv2.calcOpticalFlowFarneback(
+            prev_gray,
+            curr_gray,
+            None,
+            pyr_scale=0.5,
+            levels=2,
+            winsize=15,
+            iterations=3,
+            poly_n=5,
+            poly_sigma=1.2,
+            flags=0,
+        )
+        height, width = prev_gray.shape[:2]
+        grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+        warped = cv2.remap(
+            prev_gray,
+            grid_x + flow[..., 0],
+            grid_y + flow[..., 1],
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT,
+        )
+        residual = np.mean(np.abs(curr_gray.astype(np.float32) - warped.astype(np.float32))) / 255.0
+        return float(np.clip(residual, 0.0, 1.0))
+
+    def _auto_detect_clip_boundaries(self, video_path, frame_count, start_frame=0, forced_boundary=None):
+        if frame_count <= 1 or start_frame >= frame_count - 1:
+            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
+        scores = []
+        prev_gray = self._decode_gray_for_detection(capture, start_frame)
+        if prev_gray is None:
+            capture.release()
+            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
+        prev_edges = cv2.Canny(prev_gray, 60, 120)
+        for frame_index in range(start_frame + 1, frame_count):
+            curr_gray = self._decode_gray_for_detection(capture, frame_index)
+            if curr_gray is None:
+                break
+            curr_edges = cv2.Canny(curr_gray, 60, 120)
+            intensity_diff = float(np.mean(np.abs(curr_gray.astype(np.float32) - prev_gray.astype(np.float32))) / 255.0)
+            edge_diff = float(np.mean(np.abs(curr_edges.astype(np.float32) - prev_edges.astype(np.float32))) / 255.0)
+            flow_residual = self._flow_residual_score(prev_gray, curr_gray)
+            score = (0.35 * intensity_diff) + (0.25 * edge_diff) + (0.40 * flow_residual)
+            scores.append((frame_index, score))
+            prev_gray = curr_gray
+            prev_edges = curr_edges
+        capture.release()
+        if not scores:
+            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
+        values = np.asarray([score for _, score in scores], dtype=np.float32)
+        smoothed = values.copy()
+        if len(values) >= 3:
+            smoothed = np.convolve(values, np.array([0.25, 0.5, 0.25], dtype=np.float32), mode="same")
+        mean_score = float(np.mean(smoothed))
+        std_score = float(np.std(smoothed))
+        threshold = max(0.18, mean_score + max(0.06, 1.4 * std_score))
+        boundaries = []
+        min_gap = max(self._auto_split_min_clip_frames, int(round(max(1.0, self._video_fps) * 0.35)))
+        last_boundary = start_frame
+        for idx, (frame_index, _) in enumerate(scores):
+            score = float(smoothed[idx])
+            prev_score = float(smoothed[idx - 1]) if idx > 0 else -1.0
+            next_score = float(smoothed[idx + 1]) if idx + 1 < len(smoothed) else -1.0
+            if score < threshold or score < prev_score or score < next_score:
+                continue
+            if frame_index - last_boundary < min_gap:
+                continue
+            boundaries.append(frame_index)
+            last_boundary = frame_index
+        if forced_boundary is not None and start_frame < int(forced_boundary) < frame_count:
+            boundaries.append(int(forced_boundary))
+        return sorted(set(boundaries))
+
+    def _ensure_video_clips_loaded(self):
+        if not self._video_path:
+            return
+        metadata = self._video_clip_metadata.setdefault(
+            self._video_path,
+            {
+                "video_name": Path(self._video_path).name,
+                "frame_count": self._video_frame_count,
+                "fps": self._video_fps,
+            },
+        )
+        metadata["video_name"] = Path(self._video_path).name
+        metadata["frame_count"] = self._video_frame_count
+        metadata["fps"] = self._video_fps
+        clips = self._video_clips_map.get(self._video_path)
+        if clips:
+            normalized = self._normalized_clips_with_frame_count(clips, self._video_frame_count)
+            if normalized:
+                self._video_clips_map[self._video_path] = normalized
+                return
+        boundaries = self._auto_detect_clip_boundaries(self._video_path, self._video_frame_count, start_frame=0)
+        self._video_clips_map[self._video_path] = self._generate_clips_from_boundaries(
+            self._video_frame_count,
+            boundaries,
+            start_frame=0,
+        )
+        self._save_clip_manifest(show_errors=False)
+
+    def _regenerate_clips_from_frame(self, start_frame, forced_boundary):
+        if not self._video_path:
+            return False
+        clips = self._current_video_clips()
+        if not clips:
+            return False
+        prefix = []
+        for clip in clips:
+            if clip["end_frame"] < start_frame:
+                prefix.append(self._copy_clip(clip))
+        exact_match_map = {
+            (clip["start_frame"], clip["end_frame"]): clip
+            for clip in clips
+            if clip["end_frame"] < start_frame
+        }
+        boundaries = self._auto_detect_clip_boundaries(
+            self._video_path,
+            self._video_frame_count,
+            start_frame=start_frame,
+            forced_boundary=forced_boundary,
+        )
+        regenerated = self._generate_clips_from_boundaries(
+            self._video_frame_count,
+            boundaries,
+            start_frame=start_frame,
+            exact_match_map=exact_match_map,
+        )
+        for clip in regenerated:
+            clip["organ_label"] = None
+            clip["updated_at"] = ""
+        self._video_clips_map[self._video_path] = self._reindex_clips(prefix + regenerated)
+        self._save_clip_manifest(show_errors=False)
+        return True
+
+    def _start_new_clip_at_current_frame(self):
+        if self._mode != "video" or not self._video_path or self._video_frame_index <= 0:
+            return
+        current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
+        if current_clip is None:
+            return
+        if self._video_frame_index <= current_clip["start_frame"]:
+            QMessageBox.information(self, "Existing boundary", "That frame is already the start of a clip.")
+            return
+        if self._regenerate_clips_from_frame(current_clip["start_frame"], self._video_frame_index):
+            self._set_current_clip_label_ui()
+            self.statusBar().showMessage(
+                f"Created new clip at frame {self._video_frame_index} and regenerated downstream clips"
+            )
 
     def _transport_icon(self, name):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
@@ -782,6 +1047,10 @@ class MainWindow(QMainWindow):
         self.save_video_btn = QPushButton("Save masks")
         configure_button(self.save_video_btn)
         layout.addWidget(self.save_video_btn)
+        self.postprocess_sidebar_btn = QPushButton("Postprocess clips")
+        configure_button(self.postprocess_sidebar_btn)
+        self.postprocess_sidebar_btn.setEnabled(False)
+        layout.addWidget(self.postprocess_sidebar_btn)
 
         layout.addSpacing(16)
         sep3 = QFrame()
@@ -935,7 +1204,11 @@ class MainWindow(QMainWindow):
         self._prev_video_shortcut.activated.connect(self._show_previous_sequence)
         self._next_video_shortcut.activated.connect(self._show_next_sequence)
         self._play_pause_shortcut.activated.connect(self._toggle_playback)
-        self.add_nerve_btn.clicked.connect(self._add_custom_nerve_label)
+        self.add_organ_btn.clicked.connect(self._add_custom_organ_label)
+        self.new_clip_btn.clicked.connect(self._start_new_clip_at_current_frame)
+        self.postprocess_clips_btn.clicked.connect(self._postprocess_clips)
+        self.postprocess_sidebar_btn.clicked.connect(self._postprocess_clips)
+        self.postprocess_clips_action.triggered.connect(self._postprocess_clips)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
@@ -1258,22 +1531,22 @@ class MainWindow(QMainWindow):
         self._video_list_index = 0
         self._video_output_dir = output_dir
         self._last_video_output_dir = output_dir
-        self._video_manifest_name = "nerve_manifest.json"
+        self._video_manifest_name = "clip_manifest.json"
         self._save_persisted_paths()
         self._mode = "video"
-        self._load_nerve_manifest()
+        self._load_clip_manifest()
         allowed_paths = set(self._video_paths)
-        self._video_nerve_map = {
-            path: label for path, label in self._video_nerve_map.items() if path in allowed_paths
+        self._video_clips_map = {
+            path: clips for path, clips in self._video_clips_map.items() if path in allowed_paths
         }
-        self._video_nerve_updated_at = {
-            path: ts for path, ts in self._video_nerve_updated_at.items() if path in allowed_paths
+        self._video_clip_metadata = {
+            path: meta for path, meta in self._video_clip_metadata.items() if path in allowed_paths
         }
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
-        self._build_nerve_label_controls()
-        self._update_nerve_summary_label()
+        self._build_organ_label_controls()
+        self._update_clip_summary_label()
         resume_video_index, resume_frame_index = self._find_resume_video_position()
         self._open_video_at_index(resume_video_index, start_frame=resume_frame_index)
 
@@ -1303,11 +1576,11 @@ class MainWindow(QMainWindow):
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
         self._video_use_random_seek = False
-        self._video_nerve_map = {}
-        self._video_nerve_updated_at = {}
-        self._nerve_labels = list(self._default_nerves)
-        self._build_nerve_label_controls()
-        self._update_nerve_summary_label()
+        self._video_clips_map = {}
+        self._video_clip_metadata = {}
+        self._organ_labels = list(self._default_organs)
+        self._build_organ_label_controls()
+        self._update_clip_summary_label()
 
     def _clear_video_sequence(self):
         if self._mode != "video":
@@ -1474,14 +1747,14 @@ class MainWindow(QMainWindow):
         self.video_combo.blockSignals(True)
         self.video_combo.setCurrentIndex(video_index)
         self.video_combo.blockSignals(False)
-        self._ensure_current_video_nerve_label()
+        self._ensure_video_clips_loaded()
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
         target_frame = int(start_frame)
         if target_frame < 0:
             target_frame = frame_count - 1
         target_frame = min(frame_count - 1, max(0, target_frame))
         self._set_video_frame_index(target_frame, force=True)
-        self._set_current_video_label_ui(self._video_path)
+        self._set_current_clip_label_ui()
         self.statusBar().showMessage(
             f"Video loaded: {Path(self._video_path).name} "
             f"({video_index + 1}/{len(self._video_paths)})"
@@ -1518,7 +1791,6 @@ class MainWindow(QMainWindow):
             return
         if index == self._video_list_index:
             return
-        self._persist_current_video_nerve_label()
         self._stash_video_mask_for_current_frame()
         self._open_video_at_index(index, start_frame=0)
 
@@ -1526,7 +1798,6 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             if self._video_list_index <= 0:
                 return
-            self._persist_current_video_nerve_label()
             self._stash_video_mask_for_current_frame()
             self._open_video_at_index(self._video_list_index - 1, start_frame=0)
             return
@@ -1541,7 +1812,6 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             if self._video_list_index >= len(self._video_paths) - 1:
                 return
-            self._persist_current_video_nerve_label()
             self._stash_video_mask_for_current_frame()
             self._open_video_at_index(self._video_list_index + 1, start_frame=0)
             return
@@ -1709,6 +1979,7 @@ class MainWindow(QMainWindow):
         else:
             self.canvas.clear_mask()
         self._set_slider_value(frame_index)
+        self._set_current_clip_label_ui()
         self._update_navigation_buttons()
         self._update_title_with_image(self._video_path or "")
 
@@ -1761,9 +2032,13 @@ class MainWindow(QMainWindow):
             self.frame_prev_btn.setEnabled(can_prev_frame)
             self.frame_next_btn.setEnabled(can_next_frame)
             self.frame_last_btn.setEnabled(can_next_frame)
-            self.nerve_labels_container.setEnabled(True)
-            self.add_nerve_btn.setEnabled(True)
-            self._update_nerve_summary_label()
+            has_frame = self._video_frame_index >= 0
+            self.organ_labels_container.setEnabled(True)
+            self.add_organ_btn.setEnabled(True)
+            self.new_clip_btn.setEnabled(has_frame)
+            self.postprocess_clips_btn.setEnabled(bool(self._current_video_clips()))
+            self.postprocess_sidebar_btn.setEnabled(bool(self._current_video_clips()))
+            self._update_clip_summary_label()
             return
         if self._mode == "sequence":
             self.image_prev_btn.setEnabled(self._sequence_index > 0)
@@ -1775,9 +2050,12 @@ class MainWindow(QMainWindow):
             self.frame_prev_btn.setEnabled(False)
             self.frame_next_btn.setEnabled(False)
             self.frame_last_btn.setEnabled(False)
-            self.nerve_labels_container.setEnabled(False)
-            self.add_nerve_btn.setEnabled(False)
-            self._update_nerve_summary_label()
+            self.organ_labels_container.setEnabled(False)
+            self.add_organ_btn.setEnabled(False)
+            self.new_clip_btn.setEnabled(False)
+            self.postprocess_clips_btn.setEnabled(False)
+            self.postprocess_sidebar_btn.setEnabled(False)
+            self._update_clip_summary_label()
             return
         self.image_prev_btn.setEnabled(False)
         self.image_next_btn.setEnabled(False)
@@ -1788,9 +2066,12 @@ class MainWindow(QMainWindow):
         self.frame_prev_btn.setEnabled(False)
         self.frame_next_btn.setEnabled(False)
         self.frame_last_btn.setEnabled(False)
-        self.nerve_labels_container.setEnabled(False)
-        self.add_nerve_btn.setEnabled(False)
-        self._update_nerve_summary_label()
+        self.organ_labels_container.setEnabled(False)
+        self.add_organ_btn.setEnabled(False)
+        self.new_clip_btn.setEnabled(False)
+        self.postprocess_clips_btn.setEnabled(False)
+        self.postprocess_sidebar_btn.setEnabled(False)
+        self._update_clip_summary_label()
 
     def _set_slider_state(self, minimum, maximum, enabled):
         self.frame_slider.blockSignals(True)
@@ -1972,6 +2253,103 @@ class MainWindow(QMainWindow):
             f"Saved {annotated_count}/{self._video_frame_count} annotated frames "
             f"for {Path(self._video_path).name}"
         )
+
+    def _next_export_path(self, export_root, organ_label, next_indices):
+        organ_dir = Path(export_root) / organ_label
+        organ_dir.mkdir(parents=True, exist_ok=True)
+        next_index = next_indices.get(organ_label)
+        if next_index is None:
+            existing = []
+            for path in organ_dir.glob(f"{organ_label}_clip*.mp4"):
+                match = re.search(r"_clip(\d+)\.mp4$", path.name, re.IGNORECASE)
+                if match:
+                    existing.append(int(match.group(1)))
+            next_index = (max(existing) + 1) if existing else 1
+        while True:
+            candidate = organ_dir / f"{organ_label}_clip{next_index:03d}.mp4"
+            if not candidate.exists():
+                next_indices[organ_label] = next_index + 1
+                return candidate
+            next_index += 1
+
+    def _export_video_clip(self, video_path, clip, export_path):
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise RuntimeError(f"Could not open video: {Path(video_path).name}")
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        if width <= 0 or height <= 0:
+            capture.release()
+            raise RuntimeError(f"Could not read video size: {Path(video_path).name}")
+        if fps <= 0:
+            fps = 30.0
+        capture.set(cv2.CAP_PROP_POS_FRAMES, int(clip["start_frame"]))
+        writer = cv2.VideoWriter(
+            str(export_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            capture.release()
+            raise RuntimeError(f"Could not create output file: {export_path.name}")
+        try:
+            frame_total = clip["end_frame"] - clip["start_frame"] + 1
+            for _ in range(frame_total):
+                success, frame = capture.read()
+                if not success or frame is None:
+                    raise RuntimeError(f"Could not decode frames for {Path(video_path).name}")
+                writer.write(frame)
+        finally:
+            writer.release()
+            capture.release()
+
+    def _postprocess_clips(self):
+        if not self._video_paths:
+            QMessageBox.information(self, "No videos", "Load video(s) first.")
+            return
+        self._stash_video_mask_for_current_frame()
+        if not self._save_clip_manifest(show_errors=True):
+            return
+        export_root = QFileDialog.getExistingDirectory(
+            self,
+            "Select clip export folder",
+            self._video_output_dir or self._last_video_output_dir or self._last_video_input_dir,
+        )
+        if not export_root:
+            return
+        clips_to_export = []
+        for video_path in self._video_paths:
+            for clip in self._video_clips_map.get(video_path, []):
+                clips_to_export.append((video_path, clip))
+        if not clips_to_export:
+            QMessageBox.information(self, "No clips", "No clips are available to export.")
+            return
+        progress = QProgressDialog("Exporting clips...", "Cancel", 0, len(clips_to_export), self)
+        progress.setWindowTitle("Postprocess clips")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        next_indices = {}
+        exported = 0
+        try:
+            for index, (video_path, clip) in enumerate(clips_to_export, start=1):
+                if progress.wasCanceled():
+                    break
+                organ_label = str(clip.get("organ_label") or "unlabeled").strip().lower() or "unlabeled"
+                export_path = self._next_export_path(export_root, organ_label, next_indices)
+                progress.setLabelText(
+                    f"Exporting {Path(video_path).name} clip {clip['clip_index']} to {organ_label}"
+                )
+                self._export_video_clip(video_path, clip, export_path)
+                exported += 1
+                progress.setValue(index)
+        except Exception as exc:
+            progress.close()
+            QMessageBox.warning(self, "Export error", str(exc))
+            return
+        progress.close()
+        self.statusBar().showMessage(f"Exported {exported} clip(s) to {export_root}")
 
     def _find_sequence_mask_path(self, image_path):
         if not self._sequence_output_dir:
