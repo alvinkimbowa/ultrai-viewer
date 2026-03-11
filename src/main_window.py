@@ -317,7 +317,6 @@ class MainWindow(QMainWindow):
         self._organ_button_group = None
         self._organ_buttons = {}
         self._clip_manifest_warning_shown = False
-        self._auto_split_min_clip_frames = 10
         self._last_image_input_dir = ""
         self._last_image_output_dir = ""
         self._last_video_input_dir = ""
@@ -734,123 +733,7 @@ class MainWindow(QMainWindow):
         settings.setValue("paths/video_input_dir", self._last_video_input_dir)
         settings.setValue("paths/video_output_dir", self._last_video_output_dir)
 
-    def _generate_clips_from_boundaries(self, frame_count, boundaries, start_frame=0, exact_match_map=None):
-        exact_match_map = exact_match_map or {}
-        clip_starts = [int(start_frame)]
-        for boundary in sorted({int(value) for value in boundaries if start_frame < int(value) < frame_count}):
-            clip_starts.append(boundary)
-        clip_starts.append(frame_count)
-        clips = []
-        for index in range(len(clip_starts) - 1):
-            clip_start = clip_starts[index]
-            clip_end = clip_starts[index + 1] - 1
-            match = exact_match_map.get((clip_start, clip_end))
-            organ_label = match.get("organ_label") if match else None
-            updated_at = match.get("updated_at", "") if match else ""
-            clips.append(
-                {
-                    "clip_index": index + 1,
-                    "start_frame": clip_start,
-                    "end_frame": clip_end,
-                    "organ_label": organ_label,
-                    "updated_at": updated_at,
-                }
-            )
-        return clips
-
-    def _prepare_detection_frame(self, frame, size=(160, 160)):
-        if frame is None:
-            return None
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        return cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
-
-    def _decode_gray_for_detection(self, capture, frame_index, size=(160, 160)):
-        capture.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
-        success, frame = capture.read()
-        if not success or frame is None:
-            return None
-        return self._prepare_detection_frame(frame, size=size)
-
-    def _flow_residual_score(self, prev_gray, curr_gray):
-        flow = cv2.calcOpticalFlowFarneback(
-            prev_gray,
-            curr_gray,
-            None,
-            pyr_scale=0.5,
-            levels=2,
-            winsize=15,
-            iterations=3,
-            poly_n=5,
-            poly_sigma=1.2,
-            flags=0,
-        )
-        height, width = prev_gray.shape[:2]
-        grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-        warped = cv2.remap(
-            prev_gray,
-            grid_x + flow[..., 0],
-            grid_y + flow[..., 1],
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REFLECT,
-        )
-        residual = np.mean(np.abs(curr_gray.astype(np.float32) - warped.astype(np.float32))) / 255.0
-        return float(np.clip(residual, 0.0, 1.0))
-
-    def _auto_detect_clip_boundaries(self, video_path, frame_count, start_frame=0, forced_boundary=None):
-        if frame_count <= 1 or start_frame >= frame_count - 1:
-            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
-        capture = cv2.VideoCapture(str(video_path))
-        if not capture.isOpened():
-            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
-        scores = []
-        capture.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame))
-        success, frame = capture.read()
-        prev_gray = self._prepare_detection_frame(frame if success else None)
-        if prev_gray is None:
-            capture.release()
-            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
-        prev_edges = cv2.Canny(prev_gray, 60, 120)
-        for frame_index in range(start_frame + 1, frame_count):
-            success, frame = capture.read()
-            curr_gray = self._prepare_detection_frame(frame if success else None)
-            if curr_gray is None:
-                break
-            curr_edges = cv2.Canny(curr_gray, 60, 120)
-            intensity_diff = float(np.mean(np.abs(curr_gray.astype(np.float32) - prev_gray.astype(np.float32))) / 255.0)
-            edge_diff = float(np.mean(np.abs(curr_edges.astype(np.float32) - prev_edges.astype(np.float32))) / 255.0)
-            flow_residual = self._flow_residual_score(prev_gray, curr_gray)
-            score = (0.35 * intensity_diff) + (0.25 * edge_diff) + (0.40 * flow_residual)
-            scores.append((frame_index, score))
-            prev_gray = curr_gray
-            prev_edges = curr_edges
-        capture.release()
-        if not scores:
-            return [int(forced_boundary)] if forced_boundary is not None and start_frame < forced_boundary < frame_count else []
-        values = np.asarray([score for _, score in scores], dtype=np.float32)
-        smoothed = values.copy()
-        if len(values) >= 3:
-            smoothed = np.convolve(values, np.array([0.25, 0.5, 0.25], dtype=np.float32), mode="same")
-        mean_score = float(np.mean(smoothed))
-        std_score = float(np.std(smoothed))
-        threshold = max(0.18, mean_score + max(0.06, 1.4 * std_score))
-        boundaries = []
-        min_gap = max(self._auto_split_min_clip_frames, int(round(max(1.0, self._video_fps) * 0.35)))
-        last_boundary = start_frame
-        for idx, (frame_index, _) in enumerate(scores):
-            score = float(smoothed[idx])
-            prev_score = float(smoothed[idx - 1]) if idx > 0 else -1.0
-            next_score = float(smoothed[idx + 1]) if idx + 1 < len(smoothed) else -1.0
-            if score < threshold or score < prev_score or score < next_score:
-                continue
-            if frame_index - last_boundary < min_gap:
-                continue
-            boundaries.append(frame_index)
-            last_boundary = frame_index
-        if forced_boundary is not None and start_frame < int(forced_boundary) < frame_count:
-            boundaries.append(int(forced_boundary))
-        return sorted(set(boundaries))
-
-    def _ensure_video_clips_loaded(self):
+    def _create_default_video_clips(self):
         if not self._video_path:
             return
         metadata = self._video_clip_metadata.setdefault(
@@ -870,62 +753,49 @@ class MainWindow(QMainWindow):
             if normalized:
                 self._video_clips_map[self._video_path] = normalized
                 return
-        boundaries = self._auto_detect_clip_boundaries(self._video_path, self._video_frame_count, start_frame=0)
-        self._video_clips_map[self._video_path] = self._generate_clips_from_boundaries(
-            self._video_frame_count,
-            boundaries,
-            start_frame=0,
-        )
+        self._video_clips_map[self._video_path] = [
+            {
+                "clip_index": 1,
+                "start_frame": 0,
+                "end_frame": self._video_frame_count - 1,
+                "organ_label": None,
+                "updated_at": "",
+            }
+        ]
         self._save_clip_manifest(show_errors=False)
-
-    def _regenerate_clips_from_frame(self, start_frame, forced_boundary):
-        if not self._video_path:
-            return False
-        clips = self._current_video_clips()
-        if not clips:
-            return False
-        prefix = []
-        for clip in clips:
-            if clip["end_frame"] < start_frame:
-                prefix.append(self._copy_clip(clip))
-        exact_match_map = {
-            (clip["start_frame"], clip["end_frame"]): clip
-            for clip in clips
-            if clip["end_frame"] < start_frame
-        }
-        boundaries = self._auto_detect_clip_boundaries(
-            self._video_path,
-            self._video_frame_count,
-            start_frame=start_frame,
-            forced_boundary=forced_boundary,
-        )
-        regenerated = self._generate_clips_from_boundaries(
-            self._video_frame_count,
-            boundaries,
-            start_frame=start_frame,
-            exact_match_map=exact_match_map,
-        )
-        for clip in regenerated:
-            clip["organ_label"] = None
-            clip["updated_at"] = ""
-        self._video_clips_map[self._video_path] = self._reindex_clips(prefix + regenerated)
-        self._save_clip_manifest(show_errors=False)
-        return True
 
     def _start_new_clip_at_current_frame(self):
         if self._mode != "video" or not self._video_path or self._video_frame_index <= 0:
             return
+        clips = self._current_video_clips()
         current_clip = self._clip_for_frame(self._video_path, self._video_frame_index)
-        if current_clip is None:
+        if current_clip is None or not clips:
             return
         if self._video_frame_index <= current_clip["start_frame"]:
             QMessageBox.information(self, "Existing boundary", "That frame is already the start of a clip.")
             return
-        if self._regenerate_clips_from_frame(current_clip["start_frame"], self._video_frame_index):
-            self._set_current_clip_label_ui()
-            self.statusBar().showMessage(
-                f"Created new clip at frame {self._video_frame_index} and regenerated downstream clips"
+        split_frame = int(self._video_frame_index)
+        new_clips = []
+        for clip in clips:
+            if clip["clip_index"] != current_clip["clip_index"]:
+                new_clips.append(self._copy_clip(clip))
+                continue
+            previous_clip = self._copy_clip(clip)
+            previous_clip["end_frame"] = split_frame - 1
+            new_clips.append(previous_clip)
+            new_clips.append(
+                {
+                    "clip_index": 0,
+                    "start_frame": split_frame,
+                    "end_frame": clip["end_frame"],
+                    "organ_label": None,
+                    "updated_at": "",
+                }
             )
+        self._video_clips_map[self._video_path] = self._reindex_clips(new_clips)
+        self._save_clip_manifest(show_errors=False)
+        self._set_current_clip_label_ui()
+        self.statusBar().showMessage(f"Created new clip at frame {split_frame}")
 
     def _transport_icon(self, name):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
@@ -1755,7 +1625,7 @@ class MainWindow(QMainWindow):
         self.video_combo.blockSignals(True)
         self.video_combo.setCurrentIndex(video_index)
         self.video_combo.blockSignals(False)
-        self._ensure_video_clips_loaded()
+        self._create_default_video_clips()
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
         target_frame = int(start_frame)
         if target_frame < 0:
