@@ -272,7 +272,7 @@ class ClipTimeline(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self._base_title = "UltAI Viewer"
+        self._base_title = "UltrAi Viewer"
         self.setWindowTitle(self._base_title)
         self._sidebar_width = 260
         self._nerve_button_style = """
@@ -380,9 +380,8 @@ class MainWindow(QMainWindow):
         self.organ_labels_layout = FlowLayout(self.organ_labels_container, margin=0, h_spacing=6, v_spacing=3)
         self.organ_labels_container.setLayout(self.organ_labels_layout)
         label_row.addWidget(self.organ_labels_container, stretch=1)
-        self.add_organ_btn = QPushButton("+ Add label")
-        label_row.addWidget(self.add_organ_btn, stretch=0)
         organ_panel_layout.addLayout(label_row)
+        self.add_organ_btn = QPushButton("+ Add label")
         organ_sep = QFrame()
         organ_sep.setFrameShape(QFrame.Shape.HLine)
         organ_sep.setFrameShadow(QFrame.Shadow.Sunken)
@@ -564,7 +563,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.eraser_action)
 
     def _settings(self):
-        return QSettings("UltAI", "UltAI Viewer")
+        return QSettings("UltrAi", "UltrAi Viewer")
 
     def _runtime_base_dir(self):
         if getattr(sys, "frozen", False):

@@ -1,5 +1,5 @@
-#define MyAppName "UltAI Viewer"
-#define MyAppPublisher "UltAI"
+#define MyAppName "UltrAi Viewer"
+#define MyAppPublisher "UltrAi"
 #define MyAppExeName GetEnv("APP_NAME") + ".exe"
 #define MyAppVersion GetEnv("ULTAI_VERSION")
 #define MyAppDistDir AddBackslash(SourcePath) + "dist\\" + GetEnv("APP_NAME")

@@ -4,9 +4,9 @@ set -euo pipefail
 VERSION=$(cat VERSION)
 export OS="linux"
 export ARCH="x86_64"
-export APP_NAME="UltrAiViewer-v${VERSION}-${OS}-${ARCH}"
+export APP_NAME="UltrAi Viewer-v${VERSION}-${OS}-${ARCH}"
 
-python -m PyInstaller --noconfirm --clean UltrAiViewer.spec
+python -m PyInstaller --noconfirm --clean "UltrAi Viewer.spec"
 
 cp "User Guide - UltrAi Viewer.pdf" "dist/${APP_NAME}/User Guide - UltrAi Viewer.pdf"
 

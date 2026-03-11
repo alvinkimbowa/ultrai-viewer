@@ -1,6 +1,6 @@
-# UltAI Viewer User Guide
+# UltrAi Viewer User Guide
 
-This guide covers UltAI Viewer for knee ultrasound cartilage segmentation.
+This guide covers UltrAi Viewer for knee ultrasound cartilage segmentation.
 
 ## App Version
 
@@ -29,7 +29,7 @@ The current app size is ~800 MB. Future versions will be smaller and more optimi
 
 ## Quick Start
 
-1) Launch the app (UltAIViewer.exe on Windows, UltAIViewer on Linux).
+1) Launch the app (`UltrAi Viewer.exe` on Windows, `UltrAi Viewer` on Linux).
 2) Load an image: File > Load Image.
 3) Select a model (left panel, Model dropdown).
 4) Click Segment to run inference.

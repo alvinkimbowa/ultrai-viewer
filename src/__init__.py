@@ -1,1 +1,1 @@
-# UltAI Viewer package
+# UltrAi Viewer package

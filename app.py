@@ -11,7 +11,7 @@ from src.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("UltAI Viewer")
+    app.setApplicationName("UltrAi Viewer")
     icon_path = Path(__file__).resolve().parent / "assets" / "icons" / "app_logo.ico"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
