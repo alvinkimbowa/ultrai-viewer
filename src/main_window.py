@@ -303,7 +303,7 @@ class ClipTimeline(QWidget):
         delta = event.angleDelta().y()
         if delta == 0:
             return super().wheelEvent(event)
-        step = 1 if delta > 0 else -1
+        step = -1 if delta > 0 else 1
         self.valueChanged.emit(min(max(self._value + step, self._minimum), self._maximum))
         event.accept()
 
