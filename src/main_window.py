@@ -1759,7 +1759,7 @@ class MainWindow(QMainWindow):
         if not output_dir:
             return None
         video_path = Path(video_path)
-        return Path(output_dir) / video_path.stem
+        return Path(output_dir) / "masks" / video_path.stem
 
     def _video_mask_path(self, video_path, frame_index):
         root = self._video_output_root_for_path(video_path)
@@ -2448,7 +2448,7 @@ class MainWindow(QMainWindow):
             self._video_output_dir = output_dir
             self._last_video_output_dir = output_dir
             self._save_persisted_paths()
-        video_output_root = Path(output_dir) / Path(self._video_path).stem
+        video_output_root = Path(output_dir) / "masks" / Path(self._video_path).stem
         annotated_count = 0
         if video_output_root.exists() and video_output_root.is_dir():
             for mask_path in sorted(video_output_root.glob("frame_*.png")):
@@ -2463,21 +2463,22 @@ class MainWindow(QMainWindow):
             f"for {Path(self._video_path).name}"
         )
 
-    def _next_export_path(self, export_root, organ_label, next_indices):
-        organ_dir = Path(export_root) / organ_label
+    def _next_export_path(self, export_root, organ_label, video_stem, next_indices):
+        organ_dir = Path(export_root) / "clips" / organ_label
         organ_dir.mkdir(parents=True, exist_ok=True)
-        next_index = next_indices.get(organ_label)
+        key = (organ_label, video_stem)
+        next_index = next_indices.get(key)
         if next_index is None:
             existing = []
-            for path in organ_dir.glob(f"{organ_label}_clip*.mp4"):
+            for path in organ_dir.glob(f"{organ_label}_{video_stem}_clip*.mp4"):
                 match = re.search(r"_clip(\d+)\.mp4$", path.name, re.IGNORECASE)
                 if match:
                     existing.append(int(match.group(1)))
             next_index = (max(existing) + 1) if existing else 1
         while True:
-            candidate = organ_dir / f"{organ_label}_clip{next_index:03d}.mp4"
+            candidate = organ_dir / f"{organ_label}_{video_stem}_clip{next_index:03d}.mp4"
             if not candidate.exists():
-                next_indices[organ_label] = next_index + 1
+                next_indices[key] = next_index + 1
                 return candidate
             next_index += 1
 
@@ -2521,12 +2522,9 @@ class MainWindow(QMainWindow):
         self._stash_video_mask_for_current_frame()
         if not self._save_clip_manifest(show_errors=True):
             return
-        export_root = QFileDialog.getExistingDirectory(
-            self,
-            "Select clip export folder",
-            self._video_output_dir or self._last_video_output_dir or self._last_video_input_dir,
-        )
+        export_root = (self._video_output_dir or "").strip()
         if not export_root:
+            QMessageBox.information(self, "Missing output folder", "Select an output folder when loading videos.")
             return
         clips_to_export = []
         for video_path in self._video_paths:
@@ -2546,7 +2544,8 @@ class MainWindow(QMainWindow):
                 if progress.wasCanceled():
                     break
                 organ_label = str(clip.get("organ_label") or "unlabeled").strip().lower() or "unlabeled"
-                export_path = self._next_export_path(export_root, organ_label, next_indices)
+                video_stem = Path(video_path).stem
+                export_path = self._next_export_path(export_root, organ_label, video_stem, next_indices)
                 progress.setLabelText(
                     f"Exporting {Path(video_path).name} clip {clip['clip_index']} to {organ_label}"
                 )
