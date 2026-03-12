@@ -2470,13 +2470,15 @@ class MainWindow(QMainWindow):
         next_index = next_indices.get(key)
         if next_index is None:
             existing = []
-            for path in organ_dir.glob(f"{organ_label}_{video_stem}_clip*.mp4"):
-                match = re.search(r"_clip(\d+)\.mp4$", path.name, re.IGNORECASE)
+            suffix = f"_{organ_label}" if organ_label != "unlabeled" else ""
+            for path in organ_dir.glob(f"{video_stem}_clip*{suffix}.mp4"):
+                match = re.search(r"_clip(\d+)", path.name, re.IGNORECASE)
                 if match:
                     existing.append(int(match.group(1)))
             next_index = (max(existing) + 1) if existing else 1
         while True:
-            candidate = organ_dir / f"{organ_label}_{video_stem}_clip{next_index:03d}.mp4"
+            suffix = f"_{organ_label}" if organ_label != "unlabeled" else ""
+            candidate = organ_dir / f"{video_stem}_clip{next_index:03d}{suffix}.mp4"
             if not candidate.exists():
                 next_indices[key] = next_index + 1
                 return candidate
