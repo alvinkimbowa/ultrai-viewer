@@ -121,19 +121,24 @@ class MainWindow(QMainWindow):
         self._nerve_button_style = """
             QPushButton {
                 padding: 4px 10px;
-                border: 1px solid #9a9a9a;
+                border: 1px solid #8d99a6;
                 border-radius: 10px;
-                background: #f2f2f2;
+                background: #f4f7fb;
+                color: #16202a;
             }
             QPushButton:checked {
-                background: #5f8fbd;
-                border-color: #4f789e;
-                color: white;
+                background: #2d6da3;
+                border-color: #21567f;
+                color: #ffffff;
+            }
+            QPushButton:hover:!checked {
+                background: #e7eef7;
+                border-color: #73879b;
             }
             QPushButton:disabled {
-                color: #777777;
-                background: #e5e5e5;
-                border-color: #c8c8c8;
+                color: #5a6570;
+                background: #dce3ea;
+                border-color: #b2bcc6;
             }
         """
 
@@ -166,12 +171,28 @@ class MainWindow(QMainWindow):
         nerve_panel_layout = QVBoxLayout(nerve_panel)
         nerve_panel_layout.setContentsMargins(0, 0, 0, 0)
         nerve_panel_layout.setSpacing(4)
-        nerve_panel_layout.addWidget(QLabel("Nerve:"))
+        location_row = QWidget()
+        location_row_layout = QHBoxLayout(location_row)
+        location_row_layout.setContentsMargins(0, 0, 0, 0)
+        location_row_layout.setSpacing(6)
+        location_row_layout.addWidget(QLabel("Location:"), stretch=0, alignment=Qt.AlignmentFlag.AlignTop)
+        self.location_labels_container = QWidget()
+        self.location_labels_layout = FlowLayout(self.location_labels_container, margin=0, h_spacing=6, v_spacing=3)
+        self.location_labels_container.setLayout(self.location_labels_layout)
+        location_row_layout.addWidget(self.location_labels_container, stretch=1)
+        nerve_panel_layout.addWidget(location_row)
+        nerve_row = QWidget()
+        nerve_row_layout = QHBoxLayout(nerve_row)
+        nerve_row_layout.setContentsMargins(0, 0, 0, 0)
+        nerve_row_layout.setSpacing(6)
+        nerve_row_layout.addWidget(QLabel("Nerve:"), stretch=0, alignment=Qt.AlignmentFlag.AlignTop)
         self.nerve_labels_container = QWidget()
         self.nerve_labels_layout = FlowLayout(self.nerve_labels_container, margin=0, h_spacing=6, v_spacing=3)
         self.nerve_labels_container.setLayout(self.nerve_labels_layout)
-        nerve_panel_layout.addWidget(self.nerve_labels_container)
+        nerve_row_layout.addWidget(self.nerve_labels_container, stretch=1)
+        nerve_panel_layout.addWidget(nerve_row)
         self.add_nerve_btn = QPushButton("+ Add nerve")
+        self.add_location_btn = QPushButton("+ Add location")
         nerve_sep = QFrame()
         nerve_sep.setFrameShape(QFrame.Shape.HLine)
         nerve_sep.setFrameShadow(QFrame.Shadow.Sunken)
@@ -305,11 +326,21 @@ class MainWindow(QMainWindow):
             "sciatic",
             "unknown",
         ]
+        self._default_locations = [
+            "wrist",
+            "mid-arm",
+            "elbow",
+        ]
+        self._location_labels = list(self._default_locations)
+        self._video_location_map = {}
+        self._video_location_updated_at = {}
         self._nerve_labels = list(self._default_nerves)
         self._video_nerve_map = {}
         self._video_nerve_updated_at = {}
         self._video_manifest_name = "nerve_manifest.json"
         self._classification_ui_updating = False
+        self._location_button_group = None
+        self._location_buttons = {}
         self._nerve_button_group = None
         self._nerve_buttons = {}
         self._nerve_manifest_warning_shown = False
@@ -318,6 +349,7 @@ class MainWindow(QMainWindow):
         self._last_video_input_dir = ""
         self._last_video_output_dir = ""
         self._load_persisted_paths()
+        self._build_location_label_controls()
         self._build_nerve_label_controls()
         self._update_nerve_summary_label()
         self._play_timer = QTimer(self)
@@ -396,24 +428,52 @@ class MainWindow(QMainWindow):
         }
         return special.get(clean, clean.title())
 
+    def _display_location_label(self, label):
+        clean = str(label).strip()
+        return clean.title()
+
     def _manifest_path(self):
         output_dir = (self._video_output_dir or "").strip()
         if not output_dir:
             return None
         return Path(output_dir) / self._video_manifest_name
 
+    def _clear_flow_layout(self, layout, preserved_widget=None):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget is not preserved_widget:
+                widget.deleteLater()
+
+    def _build_location_label_controls(self):
+        if not hasattr(self, "location_labels_layout"):
+            return
+        self._clear_flow_layout(self.location_labels_layout, preserved_widget=getattr(self, "add_location_btn", None))
+        self._location_buttons = {}
+        self._location_button_group = QButtonGroup(self)
+        self._location_button_group.setExclusive(True)
+        for label in self._location_labels:
+            button = QPushButton(self._display_location_label(label))
+            button.setCheckable(True)
+            button.setStyleSheet(self._nerve_button_style)
+            button.toggled.connect(lambda checked, lbl=label: self._on_location_label_selected(lbl, checked))
+            self._location_button_group.addButton(button)
+            self._location_buttons[label] = button
+            self.location_labels_layout.addWidget(button)
+        if hasattr(self, "add_location_btn"):
+            self.location_labels_layout.addWidget(self.add_location_btn)
+        has_video = self._mode == "video" and bool(self._video_path)
+        self.location_labels_container.setEnabled(has_video)
+        self.add_location_btn.setEnabled(self._mode == "video")
+
     def _build_nerve_label_controls(self):
         if not hasattr(self, "nerve_labels_layout"):
             return
-        while self.nerve_labels_layout.count():
-            item = self.nerve_labels_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None and widget is not getattr(self, "add_nerve_btn", None):
-                widget.deleteLater()
+        self._clear_flow_layout(self.nerve_labels_layout, preserved_widget=getattr(self, "add_nerve_btn", None))
         self._nerve_buttons = {}
         self._nerve_button_group = QButtonGroup(self)
         self._nerve_button_group.setExclusive(True)
-        for index, label in enumerate(self._nerve_labels):
+        for label in self._nerve_labels:
             button = QPushButton(self._display_nerve_label(label))
             button.setCheckable(True)
             button.setStyleSheet(self._nerve_button_style)
@@ -443,10 +503,17 @@ class MainWindow(QMainWindow):
         self.nerve_summary_label.setText(f"Label: {label_text} ({labeled}/{total} labeled)")
 
     def _set_current_video_label_ui(self, video_path):
-        if not hasattr(self, "nerve_labels_container"):
+        if not hasattr(self, "nerve_labels_container") or not hasattr(self, "location_labels_container"):
             return
         self._classification_ui_updating = True
         try:
+            selected_location = self._video_location_map.get(video_path)
+            if self._location_button_group is not None:
+                self._location_button_group.setExclusive(False)
+            for label, button in self._location_buttons.items():
+                button.setChecked(bool(selected_location and label == selected_location))
+            if self._location_button_group is not None:
+                self._location_button_group.setExclusive(True)
             selected = self._video_nerve_map.get(video_path)
             if self._nerve_button_group is not None:
                 self._nerve_button_group.setExclusive(False)
@@ -468,6 +535,30 @@ class MainWindow(QMainWindow):
                 return label
         return None
 
+    def _infer_location_label_from_video_path(self, video_path):
+        folder_name = Path(video_path).parent.name.strip().lower()
+        if not folder_name:
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", " ", folder_name)
+        for label in sorted(self._location_labels, key=len, reverse=True):
+            label_tokens = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+            if label_tokens and re.search(rf"\b{re.escape(label_tokens)}\b", normalized):
+                return label
+        return None
+
+    def _ensure_current_video_location_label(self):
+        if self._mode != "video" or not self._video_path:
+            return None
+        current = self._video_location_map.get(self._video_path)
+        if current:
+            return current
+        inferred_label = self._infer_location_label_from_video_path(self._video_path)
+        if not inferred_label:
+            return None
+        self._video_location_map[self._video_path] = inferred_label
+        self._video_location_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
+        return inferred_label
+
     def _ensure_current_video_nerve_label(self):
         if self._mode != "video" or not self._video_path:
             return None
@@ -481,6 +572,16 @@ class MainWindow(QMainWindow):
         self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
         return inferred_label
 
+    def _persist_current_video_location_label(self):
+        if self._mode != "video" or not self._video_path:
+            return
+        label = self._video_location_map.get(self._video_path)
+        if not label:
+            return
+        if self._video_path not in self._video_location_updated_at:
+            self._video_location_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
+        self._save_nerve_manifest(show_errors=False)
+
     def _persist_current_video_nerve_label(self):
         if self._mode != "video" or not self._video_path:
             return
@@ -492,6 +593,9 @@ class MainWindow(QMainWindow):
         self._save_nerve_manifest(show_errors=False)
 
     def _load_nerve_manifest(self):
+        self._location_labels = list(self._default_locations)
+        self._video_location_map = {}
+        self._video_location_updated_at = {}
         self._nerve_labels = list(self._default_nerves)
         self._video_nerve_map = {}
         self._video_nerve_updated_at = {}
@@ -501,6 +605,19 @@ class MainWindow(QMainWindow):
             return
         try:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            locations = data.get("location_set", [])
+            if isinstance(locations, list):
+                merged = list(self._default_locations)
+                seen = set(merged)
+                for label in locations:
+                    if not isinstance(label, str):
+                        continue
+                    clean = label.strip().lower()
+                    if not clean or clean in seen:
+                        continue
+                    seen.add(clean)
+                    merged.append(clean)
+                self._location_labels = merged
             labels = data.get("label_set", [])
             if isinstance(labels, list):
                 merged = list(self._default_nerves)
@@ -520,14 +637,25 @@ class MainWindow(QMainWindow):
                     if not isinstance(item, dict):
                         continue
                     video_path = str(item.get("video_path", "")).strip()
+                    location = str(item.get("location_label", "")).strip().lower()
                     label = str(item.get("nerve_label", "")).strip().lower()
-                    if not video_path or not label:
+                    if not video_path:
+                        continue
+                    if location:
+                        self._video_location_map[video_path] = location
+                        location_updated = str(item.get("location_updated_at", "")).strip()
+                        if location_updated:
+                            self._video_location_updated_at[video_path] = location_updated
+                    if not label:
                         continue
                     self._video_nerve_map[video_path] = label
                     updated = str(item.get("updated_at", "")).strip()
                     if updated:
                         self._video_nerve_updated_at[video_path] = updated
         except Exception as exc:
+            self._video_location_map = {}
+            self._video_location_updated_at = {}
+            self._location_labels = list(self._default_locations)
             self._video_nerve_map = {}
             self._video_nerve_updated_at = {}
             self._nerve_labels = list(self._default_nerves)
@@ -542,10 +670,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Missing output folder", "Select video output folder first.")
             return False
         existing_videos = {}
+        existing_locations = []
         existing_labels = []
         if manifest_path.exists():
             try:
                 existing_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+                raw_locations = existing_data.get("location_set", [])
+                if isinstance(raw_locations, list):
+                    existing_locations = [str(label).strip().lower() for label in raw_locations if str(label).strip()]
                 raw_labels = existing_data.get("label_set", [])
                 if isinstance(raw_labels, list):
                     existing_labels = [str(label).strip().lower() for label in raw_labels if str(label).strip()]
@@ -560,23 +692,40 @@ class MainWindow(QMainWindow):
                         existing_videos[video_path] = {
                             "video_path": video_path,
                             "video_name": str(item.get("video_name", Path(video_path).name)),
+                            "location_label": str(item.get("location_label", "")).strip().lower(),
+                            "location_updated_at": str(item.get("location_updated_at", "")).strip(),
                             "nerve_label": str(item.get("nerve_label", "")).strip().lower(),
                             "updated_at": str(item.get("updated_at", "")).strip(),
                         }
             except Exception:
                 # Fall back to rewriting a clean manifest from current in-memory state.
                 existing_videos = {}
+                existing_locations = []
                 existing_labels = []
         for video_path in self._video_paths:
+            location = self._video_location_map.get(video_path)
             label = self._video_nerve_map.get(video_path)
-            if not label:
+            if not location and not label:
                 continue
+            existing_entry = existing_videos.get(str(video_path), {})
             existing_videos[str(video_path)] = {
                 "video_path": str(video_path),
                 "video_name": Path(video_path).name,
-                "nerve_label": str(label),
-                "updated_at": self._video_nerve_updated_at.get(video_path, ""),
+                "location_label": str(location or existing_entry.get("location_label", "")),
+                "location_updated_at": self._video_location_updated_at.get(
+                    video_path, existing_entry.get("location_updated_at", "")
+                ),
+                "nerve_label": str(label or existing_entry.get("nerve_label", "")),
+                "updated_at": self._video_nerve_updated_at.get(video_path, existing_entry.get("updated_at", "")),
             }
+        merged_locations = list(self._default_locations)
+        seen_locations = set(merged_locations)
+        for label in list(existing_locations) + list(self._location_labels):
+            clean = str(label).strip().lower()
+            if not clean or clean in seen_locations:
+                continue
+            seen_locations.add(clean)
+            merged_locations.append(clean)
         merged_labels = list(self._default_nerves)
         seen_labels = set(merged_labels)
         for label in list(existing_labels) + list(self._nerve_labels):
@@ -589,12 +738,13 @@ class MainWindow(QMainWindow):
             (
                 item
                 for item in existing_videos.values()
-                if item.get("video_path") and item.get("nerve_label")
+                if item.get("video_path") and (item.get("location_label") or item.get("nerve_label"))
             ),
             key=lambda item: str(item["video_path"]).lower(),
         )
         payload = {
-            "version": 1,
+            "version": 2,
+            "location_set": merged_locations,
             "label_set": merged_labels,
             "video_count": len(videos),
             "videos": videos,
@@ -607,6 +757,20 @@ class MainWindow(QMainWindow):
             if show_errors:
                 QMessageBox.warning(self, "Manifest save error", str(exc))
             return False
+
+    def _on_location_label_selected(self, label, checked):
+        if not checked or self._classification_ui_updating:
+            return
+        if self._mode != "video" or not self._video_path:
+            return
+        clean = str(label).strip().lower()
+        if not clean:
+            return
+        self._video_location_map[self._video_path] = clean
+        self._video_location_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
+        self._update_nerve_summary_label()
+        if self._save_nerve_manifest(show_errors=True):
+            self.statusBar().showMessage(f"Saved location '{clean}' for {Path(self._video_path).name}")
 
     def _on_nerve_label_selected(self, label, checked):
         if not checked or self._classification_ui_updating:
@@ -621,6 +785,24 @@ class MainWindow(QMainWindow):
         self._update_nerve_summary_label()
         if self._save_nerve_manifest(show_errors=True):
             self.statusBar().showMessage(f"Saved label '{clean}' for {Path(self._video_path).name}")
+
+    def _add_custom_location_label(self):
+        text, ok = QInputDialog.getText(self, "Add location", "Location name:")
+        if not ok:
+            return
+        label = str(text).strip().lower()
+        if not label:
+            QMessageBox.information(self, "Invalid label", "Location name cannot be empty.")
+            return
+        existing = {lbl.lower() for lbl in self._location_labels}
+        if label in existing:
+            QMessageBox.information(self, "Duplicate label", "That location label already exists.")
+            return
+        self._location_labels.append(label)
+        self._build_location_label_controls()
+        if self._mode == "video" and self._video_path:
+            self._set_current_video_label_ui(self._video_path)
+        self._save_nerve_manifest(show_errors=True)
 
     def _add_custom_nerve_label(self):
         text, ok = QInputDialog.getText(self, "Add nerve", "Nerve name:")
@@ -935,6 +1117,7 @@ class MainWindow(QMainWindow):
         self._prev_video_shortcut.activated.connect(self._show_previous_sequence)
         self._next_video_shortcut.activated.connect(self._show_next_sequence)
         self._play_pause_shortcut.activated.connect(self._toggle_playback)
+        self.add_location_btn.clicked.connect(self._add_custom_location_label)
         self.add_nerve_btn.clicked.connect(self._add_custom_nerve_label)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
@@ -1263,6 +1446,12 @@ class MainWindow(QMainWindow):
         self._mode = "video"
         self._load_nerve_manifest()
         allowed_paths = set(self._video_paths)
+        self._video_location_map = {
+            path: label for path, label in self._video_location_map.items() if path in allowed_paths
+        }
+        self._video_location_updated_at = {
+            path: ts for path, ts in self._video_location_updated_at.items() if path in allowed_paths
+        }
         self._video_nerve_map = {
             path: label for path, label in self._video_nerve_map.items() if path in allowed_paths
         }
@@ -1272,6 +1461,7 @@ class MainWindow(QMainWindow):
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
+        self._build_location_label_controls()
         self._build_nerve_label_controls()
         self._update_nerve_summary_label()
         resume_video_index, resume_frame_index = self._find_resume_video_position()
@@ -1303,9 +1493,13 @@ class MainWindow(QMainWindow):
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
         self._video_use_random_seek = False
+        self._video_location_map = {}
+        self._video_location_updated_at = {}
+        self._location_labels = list(self._default_locations)
         self._video_nerve_map = {}
         self._video_nerve_updated_at = {}
         self._nerve_labels = list(self._default_nerves)
+        self._build_location_label_controls()
         self._build_nerve_label_controls()
         self._update_nerve_summary_label()
 
@@ -1474,6 +1668,7 @@ class MainWindow(QMainWindow):
         self.video_combo.blockSignals(True)
         self.video_combo.setCurrentIndex(video_index)
         self.video_combo.blockSignals(False)
+        self._ensure_current_video_location_label()
         self._ensure_current_video_nerve_label()
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
         target_frame = int(start_frame)
@@ -1518,6 +1713,7 @@ class MainWindow(QMainWindow):
             return
         if index == self._video_list_index:
             return
+        self._persist_current_video_location_label()
         self._persist_current_video_nerve_label()
         self._stash_video_mask_for_current_frame()
         self._open_video_at_index(index, start_frame=0)
@@ -1526,6 +1722,7 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             if self._video_list_index <= 0:
                 return
+            self._persist_current_video_location_label()
             self._persist_current_video_nerve_label()
             self._stash_video_mask_for_current_frame()
             self._open_video_at_index(self._video_list_index - 1, start_frame=0)
@@ -1541,6 +1738,7 @@ class MainWindow(QMainWindow):
         if self._mode == "video":
             if self._video_list_index >= len(self._video_paths) - 1:
                 return
+            self._persist_current_video_location_label()
             self._persist_current_video_nerve_label()
             self._stash_video_mask_for_current_frame()
             self._open_video_at_index(self._video_list_index + 1, start_frame=0)
@@ -1761,6 +1959,8 @@ class MainWindow(QMainWindow):
             self.frame_prev_btn.setEnabled(can_prev_frame)
             self.frame_next_btn.setEnabled(can_next_frame)
             self.frame_last_btn.setEnabled(can_next_frame)
+            self.location_labels_container.setEnabled(True)
+            self.add_location_btn.setEnabled(True)
             self.nerve_labels_container.setEnabled(True)
             self.add_nerve_btn.setEnabled(True)
             self._update_nerve_summary_label()
@@ -1775,6 +1975,8 @@ class MainWindow(QMainWindow):
             self.frame_prev_btn.setEnabled(False)
             self.frame_next_btn.setEnabled(False)
             self.frame_last_btn.setEnabled(False)
+            self.location_labels_container.setEnabled(False)
+            self.add_location_btn.setEnabled(False)
             self.nerve_labels_container.setEnabled(False)
             self.add_nerve_btn.setEnabled(False)
             self._update_nerve_summary_label()
@@ -1788,6 +1990,8 @@ class MainWindow(QMainWindow):
         self.frame_prev_btn.setEnabled(False)
         self.frame_next_btn.setEnabled(False)
         self.frame_last_btn.setEnabled(False)
+        self.location_labels_container.setEnabled(False)
+        self.add_location_btn.setEnabled(False)
         self.nerve_labels_container.setEnabled(False)
         self.add_nerve_btn.setEnabled(False)
         self._update_nerve_summary_label()
