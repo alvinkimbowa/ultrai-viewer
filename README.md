@@ -153,6 +153,28 @@ ship.bat
 - The packaged build includes icons and `VERSION`; models must still be present in `assets/` at build time.
 - Inference logs are written to `inference.log`.
 
+## Citation
+
+If you use this software in research, cite the repository and the specific version or GitHub release you used.
+
+Suggested citation:
+
+```text
+UltAI Viewer (knee_cat_seg), version 0.2.1. GitHub repository:
+https://github.com/alvinkimbowa/ultrai-viewer
+```
+
+Example BibTeX:
+
+```bibtex
+@software{knee_cat_seg_2026,
+  title = {UltAI Viewer},
+  version = {0.2.1},
+  url = {https://github.com/alvinkimbowa/ultrai-viewer},
+  note = {GitHub repository for knee ultrasound cartilage segmentation and annotation software}
+}
+```
+
 ## Related Files
 
 - [`userguid.md`](/home/ultrai/UltrAi/knee_cat_seg/userguid.md): lightweight user-facing guide
