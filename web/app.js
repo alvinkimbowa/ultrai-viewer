@@ -18,6 +18,7 @@ const state = {
   scale: 1, offsetX: 0, offsetY: 0, fit: true, drawing: false, moving: false,
   points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, lastPointer: null,
 };
+let autoSavePromise=Promise.resolve();
 
 function status(text) { $("status").textContent = text; }
 function cleanClass(value) { return String(value || "").trim().toLowerCase(); }
@@ -58,12 +59,12 @@ function resetHistory() { const key=annotationKey(); if(key){state.undoByKey.set
 function undo() {
   const key=annotationKey(), stack=state.undoByKey.get(key)||[]; if(stack.length<=1)return;
   const current=stack.pop(); const redo=state.redoByKey.get(key)||[]; redo.push(current); state.redoByKey.set(key,redo);
-  state.instancesByKey.set(key,cloneInstances(stack[stack.length-1])); render();
+  state.instancesByKey.set(key,cloneInstances(stack[stack.length-1])); render();queueAutoSave();
 }
 function redo() {
   const key=annotationKey(), redoStack=state.redoByKey.get(key)||[]; if(!redoStack.length)return;
   const restored=redoStack.pop(); state.redoByKey.set(key,redoStack); state.instancesByKey.set(key,cloneInstances(restored));
-  (state.undoByKey.get(key)||[]).push(cloneInstances(restored)); render();
+  (state.undoByKey.get(key)||[]).push(cloneInstances(restored)); render();queueAutoSave();
 }
 
 function rebuildChips(containerId, labels, kind) {
@@ -74,7 +75,7 @@ function rebuildChips(containerId, labels, kind) {
     button.addEventListener("click",()=>{
       if(kind==="location") { state.location=label; if(mediaItem())mediaItem().location=label; }
       else { state.activeClass=label; }
-      updateChipSelection();
+      updateChipSelection();if(kind==="location")queueAutoSave();
     }); holder.appendChild(button);
   }
 }
@@ -87,7 +88,7 @@ function addLabel(kind){
   const value=cleanClass(prompt(`New ${kind} name:`)); if(!value)return;
   const target=kind==="location"?state.locations:(kind==="nerve"?state.nerves:state.anatomy);
   if([...state.locations,...state.nerves,...state.anatomy].includes(value)){alert("That label already exists.");return;}
-  target.push(value); rebuildAllChips();
+  target.push(value); rebuildAllChips();queueAutoSave();
 }
 
 function openHandleDatabase(){
@@ -122,7 +123,7 @@ function rebuildMediaList(){
   select.disabled=!state.media.length; updateNavigation();
 }
 async function openMedia(index){
-  if(index<0||index>=state.media.length)return; pauseVideo(); state.mediaIndex=index; $("mediaList").value=String(index);
+  if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo(); state.mediaIndex=index; $("mediaList").value=String(index);
   state.activeClass=null; state.location=null; updateChipSelection();
   const item=mediaItem();
   if(item.type==="image"){
@@ -141,13 +142,13 @@ async function openMedia(index){
 }
 function once(target,event){return new Promise((resolve,reject)=>{const done=()=>{cleanup();resolve();};const fail=()=>{cleanup();reject(new Error(`Failed waiting for ${event}`));};const cleanup=()=>{target.removeEventListener(event,done);target.removeEventListener("error",fail);};target.addEventListener(event,done,{once:true});target.addEventListener("error",fail,{once:true});setTimeout(done,5000);});}
 async function setFrame(index){
-  const item=mediaItem();if(!item||item.type!=="video")return; index=Math.max(0,Math.min(state.frameCount-1,index));
+  const item=mediaItem();if(!item||item.type!=="video")return; index=Math.max(0,Math.min(state.frameCount-1,index));await flushAutoSave();
   const previousIndex=state.frameIndex,sourceGray=index===previousIndex+1?videoGrayFrame():null,sourceInstances=sourceGray?cloneInstances(instances()):[];
   state.frameIndex=index;video.currentTime=Math.min(video.duration||0,index/state.fps);await once(video,"seeked").catch(()=>{});
   const loaded=await loadSavedMasksForCurrent();
   if(!loaded&&sourceGray&&sourceInstances.length&&(!state.instancesByKey.has(annotationKey())||instances().length===0)){
     const targetGray=videoGrayFrame(),propagated=sourceInstances.map(instance=>({...instance,mask:propagateMask(instance.mask,sourceGray,targetGray)}));
-    state.instancesByKey.set(annotationKey(),propagated);restoreNextIds(propagated);status(`Propagated ${propagated.length} mask(s) to frame ${index+1}`);
+    state.instancesByKey.set(annotationKey(),propagated);restoreNextIds(propagated);status(`Propagated ${propagated.length} mask(s) to frame ${index+1}`);queueAutoSave();
   }
   if(!state.undoByKey.has(annotationKey()))resetHistory();updateNavigation();render();
 }
@@ -159,7 +160,7 @@ function updateNavigation(){
   $("frameLabel").textContent=isVideo?`${state.frameIndex+1} / ${state.frameCount}`:"1 / 1";
 }
 function pauseVideo(){video.pause();$("play").textContent="▶";}
-function togglePlayback(){if(video.paused){video.play();$("play").textContent="❚❚";requestAnimationFrame(playLoop);}else pauseVideo();}
+async function togglePlayback(){if(video.paused){await flushAutoSave();video.play();$("play").textContent="❚❚";requestAnimationFrame(playLoop);}else pauseVideo();}
 function playLoop(){if(video.paused)return;state.frameIndex=Math.min(state.frameCount-1,Math.floor(video.currentTime*state.fps));updateNavigation();render();requestAnimationFrame(playLoop);}
 
 function resizeCanvas(){const rect=$("stage").getBoundingClientRect();canvas.width=Math.max(1,Math.round(rect.width));canvas.height=Math.max(1,Math.round(rect.height));if(state.fit)fitView();render();}
@@ -193,7 +194,7 @@ function maskFromPolygon(points){
 function completePolygon(){
   if(state.points.length<3)return cancelDrawing();if(!state.activeClass){alert("Select a nerve or other anatomy before drawing.");return cancelDrawing();}
   const key=annotationKey(), idMap=state.nextIdsByKey.get(key)||new Map(),id=idMap.get(state.activeClass)||1;idMap.set(state.activeClass,id+1);state.nextIdsByKey.set(key,idMap);
-  instances().push({className:state.activeClass,id,mask:maskFromPolygon(state.points)});state.points=[];state.drawing=false;pushHistory();render();status(`Created ${state.activeClass} ${id}`);
+  instances().push({className:state.activeClass,id,mask:maskFromPolygon(state.points)});state.points=[];state.drawing=false;pushHistory();render();status(`Created ${state.activeClass} ${id}`);queueAutoSave();
 }
 function cancelDrawing(){state.points=[];state.drawing=false;render();}
 function hitInstance(point){for(let i=instances().length-1;i>=0;i--){if(instances()[i].mask[point.y*state.sourceWidth+point.x])return i;}return-1;}
@@ -214,7 +215,9 @@ function eraseLine(a,b){
 }
 canvas.addEventListener("pointerdown",(event)=>{
   const p=toImagePoint(event);if(!p)return;canvas.setPointerCapture(event.pointerId);const tool=$("tool").value;
-  if(tool==="select"){const index=hitInstance(p);if(index>=0){state.moving=true;state.moveIndex=index;state.moveAnchor=p;state.moveOriginal=new Uint8Array(instances()[index].mask);}}
+  const index=tool!=="eraser"&&!(tool==="polygon"&&state.drawing)?hitInstance(p):-1;
+  if(index>=0){state.moving=true;state.moveIndex=index;state.moveAnchor=p;state.moveOriginal=new Uint8Array(instances()[index].mask);}
+  else if(tool==="select")return;
   else if(tool==="freehand"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.drawing=true;state.points=[p];}
   else if(tool==="polygon"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.points.push(p);state.drawing=true;render();}
   else if(tool==="eraser"){state.drawing=true;state.lastPointer=p;eraseLine(p,p);render();}
@@ -225,31 +228,42 @@ canvas.addEventListener("pointermove",(event)=>{
   else if(state.drawing&&tool==="freehand"){state.points.push(p);render();}
   else if(state.drawing&&tool==="eraser"){eraseLine(state.lastPointer,p);state.lastPointer=p;render();}
 });
-canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;pushHistory();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.instancesByKey.set(annotationKey(),instances().filter(x=>x.mask.some(Boolean)));pushHistory();render();}});
+canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;pushHistory();queueAutoSave();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.instancesByKey.set(annotationKey(),instances().filter(x=>x.mask.some(Boolean)));pushHistory();render();queueAutoSave();}});
 canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;}else if(event.shiftKey)state.offsetX-=event.deltaY;else state.offsetY-=event.deltaY;render();},{passive:false});
 
-async function activateOutputDirectory(handle){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);}
+async function activateOutputDirectory(handle){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);queueAutoSave();}
 async function chooseOutput(){try{const previous=await recalledHandle("output"),options={id:"ultrai-output",mode:"readwrite"};if(previous)options.startIn=previous;const handle=await window.showDirectoryPicker(options);await rememberHandle("output",handle);await activateOutputDirectory(handle);}catch(error){if(error.name!=="AbortError")alert(error.message);}}
 async function restoreOutputDirectory(){const handle=await recalledHandle("output");if(!handle)return;try{if(await handle.queryPermission({mode:"readwrite"})==="granted")await activateOutputDirectory(handle);}catch{}}
 async function maskBlob(instance){const out=document.createElement("canvas");out.width=state.sourceWidth;out.height=state.sourceHeight;const oc=out.getContext("2d"),image=oc.createImageData(out.width,out.height);for(let i=0;i<instance.mask.length;i++){const v=instance.mask[i]?255:0,p=i*4;image.data[p]=v;image.data[p+1]=v;image.data[p+2]=v;image.data[p+3]=255;}oc.putImageData(image,0,0);return new Promise(resolve=>out.toBlob(resolve,"image/png"));}
 async function writeFile(dir,name,data){const handle=await dir.getFileHandle(name,{create:true});const stream=await handle.createWritable();await stream.write(data);await stream.close();}
+async function saveMaskSet(output,list,frameName=""){
+  const expected=new Set();for(const instance of list){const name=`${frameName}${safeClass(instance.className)}_${String(instance.id).padStart(3,"0")}.png`;expected.add(name);await writeFile(output,name,await maskBlob(instance));}
+  for await(const [name,handle] of output.entries())if(handle.kind==="file"&&name.startsWith(frameName)&&name.endsWith(".png")&&!expected.has(name))await output.removeEntry(name);return list.length;
+}
+async function saveCurrentMaskSet(){
+  if(!state.outputDir||!mediaItem())return 0;const item=mediaItem(),folderName=item.name.replace(/\.[^.]+$/,"")||(item.type==="video"?"video":"image"),output=await state.outputDir.getDirectoryHandle(folderName,{create:true}),frameName=item.type==="video"?`frame_${String(state.frameIndex).padStart(6,"0")}_`:"";return saveMaskSet(output,instances(),frameName);
+}
+function queueAutoSave(){
+  if(!state.outputDir||!mediaItem())return;startAutoSave();
+}
+function startAutoSave(){
+  autoSavePromise=autoSavePromise.then(async()=>{try{const saved=await saveCurrentMaskSet();await saveManifest();status(`Autosaved ${saved} mask(s)`);}catch(error){status(`Autosave failed: ${error.message}`);}});
+}
+async function flushAutoSave(){
+  await autoSavePromise;
+}
 async function saveMasks(){
-  if(!state.outputDir)return alert("Choose an output folder first.");const item=mediaItem();if(!item)return;
+  if(!state.outputDir)return alert("Choose an output folder first.");const item=mediaItem();if(!item)return;await flushAutoSave();
   const output=await state.outputDir.getDirectoryHandle(item.name.replace(/\.[^.]+$/,"")||(item.type==="video"?"video":"image"),{create:true});
   let saved=0;
   if(item.type==="video"){
     const keyStart=`${item.id}:frame:`;
     for(const [key,list] of state.instancesByKey){
-      if(!key.startsWith(keyStart))continue;const frame=Number(key.slice(keyStart.length));const frameName=`frame_${String(frame).padStart(6,"0")}_`,expected=new Set();
-      for(const instance of list){const name=`${frameName}${safeClass(instance.className)}_${String(instance.id).padStart(3,"0")}.png`;expected.add(name);await writeFile(output,name,await maskBlob(instance));saved++;}
-      for await(const [name,handle] of output.entries())if(handle.kind==="file"&&name.startsWith(frameName)&&name.endsWith(".png")&&!expected.has(name))await output.removeEntry(name);
+      if(!key.startsWith(keyStart))continue;const frame=Number(key.slice(keyStart.length));saved+=await saveMaskSet(output,list,`frame_${String(frame).padStart(6,"0")}_`);
     }
-  }else{
-    const expected=new Set();for(const instance of instances()){const name=`${safeClass(instance.className)}_${String(instance.id).padStart(3,"0")}.png`;expected.add(name);await writeFile(output,name,await maskBlob(instance));saved++;}
-    for await(const [name,handle] of output.entries())if(handle.kind==="file"&&name.endsWith(".png")&&!expected.has(name))await output.removeEntry(name);
-  }
+  }else saved=await saveMaskSet(output,instances());
   await saveManifest();status(`Saved ${saved} mask(s)`);
 }
 async function saveManifest(){
@@ -276,10 +290,10 @@ async function loadSavedMasksForCurrent(){
 }
 
 $("loadImages").onclick=loadImages;$("loadVideos").onclick=loadVideos;$("chooseOutput").onclick=chooseOutput;$("saveMasks").onclick=saveMasks;
-$("clearData").onclick=()=>{pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.instancesByKey.clear();rebuildMediaList();render();status("Cleared");};
+$("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.instancesByKey.clear();rebuildMediaList();render();status("Cleared");};
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
 $("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>setFrame(state.frameIndex-1);$("nextFrame").onclick=()=>setFrame(state.frameIndex+1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>setFrame(Number($("frameSlider").value));$("play").onclick=togglePlayback;
-$("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.instancesByKey.set(annotationKey(),[]);pushHistory();render();};
+$("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
 for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="ArrowLeft")setFrame(state.frameIndex-1);else if(event.key==="ArrowRight")setFrame(state.frameIndex+1);else if(event.key==="Escape")cancelDrawing();});
 async function runSelfTest(){
