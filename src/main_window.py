@@ -542,10 +542,11 @@ class MainWindow(QMainWindow):
             return
         self._classification_ui_updating = True
         try:
+            selected_location = self._video_location_map.get(video_path)
             if self._location_button_group is not None:
                 self._location_button_group.setExclusive(False)
-            for button in self._location_buttons.values():
-                button.setChecked(False)
+            for label, button in self._location_buttons.items():
+                button.setChecked(bool(selected_location and label == selected_location))
             if self._location_button_group is not None:
                 self._location_button_group.setExclusive(True)
             if self._nerve_button_group is not None:
@@ -562,7 +563,7 @@ class MainWindow(QMainWindow):
                 self._anatomy_button_group.setExclusive(True)
         finally:
             self._classification_ui_updating = False
-        self._current_location = None
+        self._current_location = selected_location
         self.canvas.set_active_class(None)
         self._update_nerve_summary_label()
 
