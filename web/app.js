@@ -18,7 +18,8 @@ const state = {
   instancesByKey: new Map(), undoByKey: new Map(), redoByKey: new Map(), nextIdsByKey: new Map(),
   sourceWidth: 0, sourceHeight: 0, frameIndex: 0, frameCount: 1, fps: 30,
   scale: 1, offsetX: 0, offsetY: 0, fit: true, drawing: false, moving: false,
-  points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, lastPointer: null, outputPromptReady: false,
+  points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, moveChanged: false, lastPointer: null,
+  selectedInstance: null, outputPromptReady: false,
 };
 let autoSavePromise=Promise.resolve();
 
@@ -70,12 +71,12 @@ function resetHistory() { const key=annotationKey(); if(key){state.undoByKey.set
 function undo() {
   const key=annotationKey(), stack=state.undoByKey.get(key)||[]; if(stack.length<=1)return;
   const current=stack.pop(); const redo=state.redoByKey.get(key)||[]; redo.push(current); state.redoByKey.set(key,redo);
-  state.instancesByKey.set(key,cloneInstances(stack[stack.length-1])); render();queueAutoSave();
+  state.instancesByKey.set(key,cloneInstances(stack[stack.length-1]));state.selectedInstance=null;render();queueAutoSave();
 }
 function redo() {
   const key=annotationKey(), redoStack=state.redoByKey.get(key)||[]; if(!redoStack.length)return;
   const restored=redoStack.pop(); state.redoByKey.set(key,redoStack); state.instancesByKey.set(key,cloneInstances(restored));
-  (state.undoByKey.get(key)||[]).push(cloneInstances(restored)); render();queueAutoSave();
+  (state.undoByKey.get(key)||[]).push(cloneInstances(restored));state.selectedInstance=null;render();queueAutoSave();
 }
 
 function rebuildChips(containerId, labels, kind) {
@@ -136,7 +137,7 @@ function rebuildMediaList(){
 }
 async function openMedia(index){
   if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo(); state.mediaIndex=index; $("mediaList").value=String(index);
-  state.activeClass=null; state.location=null;state.outputPromptReady=false;updateChipSelection();
+  state.activeClass=null;state.location=null;state.selectedInstance=null;state.outputPromptReady=false;updateChipSelection();
   const item=mediaItem();
   if(item.type==="image"){
     video.removeAttribute("src");
@@ -156,7 +157,7 @@ function once(target,event){return new Promise((resolve,reject)=>{const done=()=
 async function setFrame(index){
   const item=mediaItem();if(!item||item.type!=="video")return; index=Math.max(0,Math.min(state.frameCount-1,index));await flushAutoSave();
   const previousIndex=state.frameIndex,sourceGray=index===previousIndex+1?videoGrayFrame():null,sourceInstances=sourceGray?cloneInstances(instances()):[];
-  state.frameIndex=index;video.currentTime=Math.min(video.duration||0,index/state.fps);await once(video,"seeked").catch(()=>{});
+  state.frameIndex=index;state.selectedInstance=null;video.currentTime=Math.min(video.duration||0,index/state.fps);await once(video,"seeked").catch(()=>{});
   const loaded=await loadSavedMasksForCurrent();
   if(!loaded&&sourceGray&&sourceInstances.length&&(!state.instancesByKey.has(annotationKey())||instances().length===0)){
     const targetGray=videoGrayFrame(),propagated=sourceInstances.map(instance=>({...instance,mask:propagateMask(instance.mask,sourceGray,targetGray)}));
@@ -183,6 +184,9 @@ function render(){
   const source=item.type==="video"?video:item.element; if(source)ctx.drawImage(source,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);
   if($("showMasks").checked)renderInstances();renderWorkingLine();
 }
+function isContourPixel(mask,i){
+  if(!mask[i])return false;const x=i%state.sourceWidth,y=Math.floor(i/state.sourceWidth);return x<2||y<2||x>=state.sourceWidth-2||y>=state.sourceHeight-2||!mask[i-1]||!mask[i+1]||!mask[i-state.sourceWidth]||!mask[i+state.sourceWidth]||!mask[i-2]||!mask[i+2]||!mask[i-state.sourceWidth*2]||!mask[i+state.sourceWidth*2];
+}
 function renderInstances(){
   if(!state.sourceWidth)return;const overlay=document.createElement("canvas");overlay.width=state.sourceWidth;overlay.height=state.sourceHeight;const ox=overlay.getContext("2d");
   const image=ox.createImageData(state.sourceWidth,state.sourceHeight),data=image.data,filled=$("fillMasks").checked,alpha=Math.round(Number($("opacity").value)*2.55);
@@ -191,10 +195,11 @@ function renderInstances(){
     for(let i=0;i<instance.mask.length;i++){
       if(!instance.mask[i])continue;
       let visible=filled;
-      if(!filled){const x=i%state.sourceWidth,y=Math.floor(i/state.sourceWidth);visible=x===0||y===0||x===state.sourceWidth-1||y===state.sourceHeight-1||!instance.mask[i-1]||!instance.mask[i+1]||!instance.mask[i-state.sourceWidth]||!instance.mask[i+state.sourceWidth];}
+      if(!filled)visible=isContourPixel(instance.mask,i);
       if(visible){const p=i*4;data[p]=r;data[p+1]=g;data[p+2]=b;data[p+3]=alpha;}
     }
   }
+  const selectedIndex=selectedInstanceIndex();if(selectedIndex>=0){const mask=instances()[selectedIndex].mask;for(let i=0;i<mask.length;i++)if(isContourPixel(mask,i)){const p=i*4;data[p]=255;data[p+1]=255;data[p+2]=255;data[p+3]=255;}}
   ox.putImageData(image,0,0);ctx.imageSmoothingEnabled=false;ctx.drawImage(overlay,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);ctx.imageSmoothingEnabled=true;
 }
 function renderWorkingLine(){if(state.points.length<1)return;ctx.strokeStyle=state.activeClass?classColor(state.activeClass):"#00ff00";ctx.lineWidth=2;ctx.beginPath();state.points.forEach((p,i)=>{const x=state.offsetX+p.x*state.scale,y=state.offsetY+p.y*state.scale;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}
@@ -210,6 +215,11 @@ function completePolygon(){
 }
 function cancelDrawing(){state.points=[];state.drawing=false;render();}
 function hitInstance(point){for(let i=instances().length-1;i>=0;i--){if(instances()[i].mask[point.y*state.sourceWidth+point.x])return i;}return-1;}
+function selectedInstanceIndex(){const selected=state.selectedInstance;if(!selected||selected.key!==annotationKey())return-1;return instances().findIndex(item=>item.className===selected.className&&item.id===selected.id);}
+function selectInstance(index){const item=instances()[index];if(!item)return;state.selectedInstance={key:annotationKey(),className:item.className,id:item.id};status(`Selected ${item.className} ${item.id}`);render();}
+function hideMaskContextMenu(){$("maskContextMenu").hidden=true;}
+function showMaskContextMenu(event){const menu=$("maskContextMenu");menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;menu.hidden=false;}
+function deleteSelectedInstance(){const index=selectedInstanceIndex();if(index<0)return false;const [removed]=instances().splice(index,1);state.selectedInstance=null;hideMaskContextMenu();pushHistory();render();status(`Deleted ${removed.className} ${removed.id}`);queueAutoSave();return true;}
 function translateMask(mask,dx,dy){const moved=new Uint8Array(mask.length);for(let y=0;y<state.sourceHeight;y++)for(let x=0;x<state.sourceWidth;x++){if(!mask[y*state.sourceWidth+x])continue;const nx=x+dx,ny=y+dy;if(nx>=0&&ny>=0&&nx<state.sourceWidth&&ny<state.sourceHeight)moved[ny*state.sourceWidth+nx]=1;}return moved;}
 function videoGrayFrame(){
   const frame=document.createElement("canvas");frame.width=state.sourceWidth;frame.height=state.sourceHeight;const fc=frame.getContext("2d",{willReadFrequently:true});fc.drawImage(video,0,0,frame.width,frame.height);const rgba=fc.getImageData(0,0,frame.width,frame.height).data,gray=new Uint8Array(frame.width*frame.height);for(let i=0;i<gray.length;i++)gray[i]=(rgba[i*4]*77+rgba[i*4+1]*150+rgba[i*4+2]*29)>>8;return gray;
@@ -226,23 +236,23 @@ function eraseLine(a,b){
   for(let step=0;step<=steps;step++){const cx=Math.round(a.x+(b.x-a.x)*step/steps),cy=Math.round(a.y+(b.y-a.y)*step/steps);for(let y=Math.max(0,cy-radius);y<=Math.min(state.sourceHeight-1,cy+radius);y++)for(let x=Math.max(0,cx-radius);x<=Math.min(state.sourceWidth-1,cx+radius);x++)if((x-cx)**2+(y-cy)**2<=radius**2)for(const item of instances())item.mask[y*state.sourceWidth+x]=0;}
 }
 canvas.addEventListener("pointerdown",(event)=>{
-  const p=toImagePoint(event);if(!p)return;canvas.setPointerCapture(event.pointerId);const tool=$("tool").value;
+  if(event.button!==0)return;hideMaskContextMenu();const p=toImagePoint(event);if(!p)return;canvas.setPointerCapture(event.pointerId);const tool=$("tool").value;
   const index=tool!=="eraser"&&!(tool==="polygon"&&state.drawing)?hitInstance(p):-1;
-  if(index>=0){state.moving=true;state.moveIndex=index;state.moveAnchor=p;state.moveOriginal=new Uint8Array(instances()[index].mask);}
-  else if(tool==="select")return;
+  if(index>=0){selectInstance(index);state.moving=true;state.moveChanged=false;state.moveIndex=index;state.moveAnchor=p;state.moveOriginal=new Uint8Array(instances()[index].mask);}
+  else if(tool==="select"){state.selectedInstance=null;render();return;}
   else if(tool==="freehand"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.drawing=true;state.points=[p];}
   else if(tool==="polygon"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.points.push(p);state.drawing=true;render();}
   else if(tool==="eraser"){state.drawing=true;state.lastPointer=p;eraseLine(p,p);render();}
 });
 canvas.addEventListener("pointermove",(event)=>{
   const p=toImagePoint(event);if(!p)return;const tool=$("tool").value;
-  if(state.moving){instances()[state.moveIndex].mask=translateMask(state.moveOriginal,p.x-state.moveAnchor.x,p.y-state.moveAnchor.y);render();}
+  if(state.moving){const dx=p.x-state.moveAnchor.x,dy=p.y-state.moveAnchor.y;state.moveChanged=state.moveChanged||dx!==0||dy!==0;instances()[state.moveIndex].mask=translateMask(state.moveOriginal,dx,dy);render();}
   else if(state.drawing&&tool==="freehand"){state.points.push(p);render();}
   else if(state.drawing&&tool==="eraser"){eraseLine(state.lastPointer,p);state.lastPointer=p;render();}
 });
-canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;pushHistory();queueAutoSave();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.instancesByKey.set(annotationKey(),instances().filter(x=>x.mask.some(Boolean)));pushHistory();render();queueAutoSave();}});
+canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;state.instancesByKey.set(annotationKey(),instances().filter(x=>x.mask.some(Boolean)));pushHistory();render();queueAutoSave();}});
 canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completePolygon();});
-canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();if($("tool").value==="polygon")completePolygon();});
+canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();const point=toImagePoint(event),index=point?hitInstance(point):-1;if(index>=0){selectInstance(index);showMaskContextMenu(event);}else{hideMaskContextMenu();if($("tool").value==="polygon")completePolygon();}});
 canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;}else if(event.shiftKey)state.offsetX-=event.deltaY;else state.offsetY-=event.deltaY;render();},{passive:false});
 
 async function activateOutputDirectory(handle,saveCurrent=true){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);if(saveCurrent)queueAutoSave();}
@@ -306,12 +316,13 @@ async function loadSavedMasksForCurrent(){
 }
 
 $("loadImages").onclick=loadImages;$("loadVideos").onclick=loadVideos;$("chooseOutput").onclick=chooseOutput;$("saveMasks").onclick=saveMasks;
-$("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.instancesByKey.clear();rebuildMediaList();render();status("Cleared");};
+$("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.selectedInstance=null;state.instancesByKey.clear();rebuildMediaList();render();status("Cleared");};
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
 $("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>setFrame(state.frameIndex-1);$("nextFrame").onclick=()=>setFrame(state.frameIndex+1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>setFrame(Number($("frameSlider").value));$("play").onclick=togglePlayback;
-$("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
+$("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.selectedInstance=null;state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
 for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=saveToolSettings;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
-document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="ArrowLeft")setFrame(state.frameIndex-1);else if(event.key==="ArrowRight")setFrame(state.frameIndex+1);else if(event.key==="Escape")cancelDrawing();});
+$("deleteMask").onclick=deleteSelectedInstance;document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
+document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")setFrame(state.frameIndex-1);else if(event.key==="ArrowRight")setFrame(state.frameIndex+1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
 async function runSelfTest(){
   try{
     const previousSettings=localStorage.getItem(TOOL_SETTINGS_KEY);$("showMasks").checked=false;$("fillMasks").checked=true;$("opacity").value="73";$("radius").value="19";saveToolSettings();$("tool").value="select";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";restoreToolSettings();if($("tool").value!=="freehand"||$("showMasks").checked||!$("fillMasks").checked||$("opacity").value!=="73"||$("radius").value!=="19")throw new Error("tool settings");if(previousSettings===null){localStorage.removeItem(TOOL_SETTINGS_KEY);$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";}else{localStorage.setItem(TOOL_SETTINGS_KEY,previousSettings);restoreToolSettings();}
@@ -320,6 +331,7 @@ async function runSelfTest(){
     state.activeClass="artery";state.points=[{x:16,y:16},{x:28,y:16},{x:28,y:28},{x:16,y:28}];completePolygon();
     if(instances().length!==2||instances()[0].id!==1||instances()[1].id!==1)throw new Error("instance creation");
     if(classColor("median")===classColor("artery"))throw new Error("class colors");undo();if(instances().length!==1)throw new Error("undo");redo();if(instances().length!==2)throw new Error("redo");
+    selectInstance(0);if(selectedInstanceIndex()!==0)throw new Error("mask selection");deleteSelectedInstance();if(instances().length!==1)throw new Error("mask deletion");undo();if(instances().length!==2)throw new Error("delete undo");
     const source=new Uint8Array(32*32),target=new Uint8Array(32*32),moving=new Uint8Array(32*32);for(let y=8;y<14;y++)for(let x=7;x<13;x++){source[y*32+x]=200;target[(y+2)*32+x+3]=200;moving[y*32+x]=1;}const shifted=propagateMask(moving,source,target);if(!shifted[(10+2)*32+10+3])throw new Error("frame propagation");
     if(typeof UTIF!=="object"||typeof UTIF.decode!=="function")throw new Error("TIFF support");
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
