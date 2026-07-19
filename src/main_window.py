@@ -1653,12 +1653,6 @@ class MainWindow(QMainWindow):
         video_path = Path(video_path)
         return Path(output_dir) / video_path.stem
 
-    def _video_mask_path(self, video_path, frame_index):
-        root = self._video_output_root_for_path(video_path)
-        if root is None:
-            return None
-        return root / f"frame_{int(frame_index):06d}"
-
     def _safe_class_name(self, class_name):
         clean = re.sub(r"[^a-z0-9]+", "_", str(class_name).strip().lower()).strip("_")
         return clean or "unlabeled"
@@ -1708,7 +1702,7 @@ class MainWindow(QMainWindow):
             if not stem.startswith("frame_"):
                 continue
             try:
-                frame_index = int(stem.split("_")[-1])
+                frame_index = int(stem.split("_")[1])
             except ValueError:
                 continue
             if frame_index > last_frame:
@@ -1730,11 +1724,26 @@ class MainWindow(QMainWindow):
         return last_video_index, last_frame_index
 
     def _load_saved_video_mask_for_frame(self, video_path, frame_index):
-        mask_path = self._video_mask_path(video_path, frame_index)
-        if mask_path is None or not mask_path.is_dir():
+        root = self._video_output_root_for_path(video_path)
+        if root is None or not root.is_dir():
             return None
-        if not self._load_instance_masks(mask_path):
+        frame_name = f"frame_{int(frame_index):06d}_"
+        instances = []
+        pattern = re.compile(rf"^{re.escape(frame_name)}(.+)_(\d+)\.png$", re.IGNORECASE)
+        for mask_path in sorted(root.glob(f"{frame_name}*.png")):
+            match = pattern.match(mask_path.name)
+            if not match:
+                continue
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is not None:
+                instances.append({
+                    "class": match.group(1).replace("_", " ").lower(),
+                    "id": int(match.group(2)),
+                    "mask": (mask >= 128).astype(np.float32),
+                })
+        if not instances:
             return None
+        self.canvas.load_instances(instances)
         return np.copy(self.canvas.mask)
 
     def _propagate_mask_with_optical_flow(self, src_frame, dst_frame, src_mask):
@@ -1789,8 +1798,9 @@ class MainWindow(QMainWindow):
             return None
         if dst_index != src_index + 1:
             return None
-        destination_dir = self._video_mask_path(self._video_path, dst_index)
-        if destination_dir is not None and destination_dir.is_dir() and any(destination_dir.glob("*.png")):
+        root = self._video_output_root_for_path(self._video_path)
+        frame_name = f"frame_{int(dst_index):06d}_"
+        if root is not None and any(root.glob(f"{frame_name}*.png")):
             return None
         self._commit_pending_outline()
         if not self._canvas_has_roi():
@@ -2100,20 +2110,32 @@ class MainWindow(QMainWindow):
         if self._video_frame_index < 0 or not self._video_path:
             return
         self._commit_pending_outline()
-        mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
-        if mask_path is None:
+        root = self._video_output_root_for_path(self._video_path)
+        if root is None:
             return
+        frame_name = f"frame_{int(self._video_frame_index):06d}_"
         if self._canvas_has_roi():
             try:
-                self._save_instance_masks(mask_path)
+                root.mkdir(parents=True, exist_ok=True)
+                expected = set()
+                for item in self.canvas.export_instances():
+                    filename = (
+                        f"{frame_name}{self._safe_class_name(item['class'])}_"
+                        f"{int(item['id']):03d}.png"
+                    )
+                    expected.add(filename)
+                    mask = (np.asarray(item["mask"]) >= 0.5).astype(np.uint8) * 255
+                    if not cv2.imwrite(str(root / filename), mask):
+                        raise OSError(f"Failed to save mask: {filename}")
+                for old_path in root.glob(f"{frame_name}*.png"):
+                    if old_path.name not in expected:
+                        old_path.unlink()
             except OSError as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
             return
-        if mask_path.is_dir():
+        for flat_path in root.glob(f"{frame_name}*.png"):
             try:
-                for child in mask_path.glob("*.png"):
-                    child.unlink()
-                mask_path.rmdir()
+                flat_path.unlink()
             except OSError as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
 
@@ -2350,12 +2372,15 @@ class MainWindow(QMainWindow):
             self._last_video_output_dir = output_dir
             self._save_persisted_paths()
         video_output_root = Path(output_dir) / Path(self._video_path).stem
-        annotated_count = 0
+        annotated_frames = set()
         if video_output_root.exists() and video_output_root.is_dir():
             for mask_path in sorted(video_output_root.glob("frame_*")):
-                suffix = mask_path.stem.split("_")[-1]
-                if suffix.isdigit() and mask_path.is_dir() and any(mask_path.glob("*.png")):
-                    annotated_count += 1
+                parts = mask_path.stem.split("_")
+                if len(parts) < 2 or not parts[1].isdigit():
+                    continue
+                if mask_path.is_file():
+                    annotated_frames.add(int(parts[1]))
+        annotated_count = len(annotated_frames)
         if annotated_count <= 0:
             QMessageBox.information(self, "No masks", "No annotated frames found.")
             return
