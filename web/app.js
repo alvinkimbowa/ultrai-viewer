@@ -4,6 +4,7 @@ const DEFAULT_LOCATIONS = ["wrist", "mid-arm", "elbow"];
 const DEFAULT_NERVES = ["ulnar", "median", "radial", "plex", "lfcn", "peroneal", "fibular", "tibial", "sural", "proximal", "accessory", "quad", "sciatic", "unknown"];
 const DEFAULT_ANATOMY = ["muscle", "artery", "vein", "skin", "subcutaneous tissue", "cartilage", "tendon", "bone"];
 const HANDLE_DATABASE = "ultrai-annotator";
+const TOOL_SETTINGS_KEY = "ultrai-tool-settings";
 const $ = (id) => document.getElementById(id);
 const canvas = $("canvas");
 const ctx = canvas.getContext("2d");
@@ -21,6 +22,12 @@ const state = {
 let autoSavePromise=Promise.resolve();
 
 function status(text) { $("status").textContent = text; }
+function saveToolSettings(){
+  const settings={tool:$("tool").value,showMasks:$("showMasks").checked,fillMasks:$("fillMasks").checked,opacity:$("opacity").value,radius:$("radius").value};localStorage.setItem(TOOL_SETTINGS_KEY,JSON.stringify(settings));
+}
+function restoreToolSettings(){
+  try{const settings=JSON.parse(localStorage.getItem(TOOL_SETTINGS_KEY)||"null");if(!settings)return;if(["select","freehand","polygon","eraser"].includes(settings.tool))$("tool").value=settings.tool;if(typeof settings.showMasks==="boolean")$("showMasks").checked=settings.showMasks;if(typeof settings.fillMasks==="boolean")$("fillMasks").checked=settings.fillMasks;const opacity=Number(settings.opacity),radius=Number(settings.radius);if(opacity>=0&&opacity<=100)$("opacity").value=String(opacity);if(radius>=1&&radius<=50)$("radius").value=String(radius);}catch{}
+}
 function cleanClass(value) { return String(value || "").trim().toLowerCase(); }
 function safeClass(value) { return cleanClass(value).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "unlabeled"; }
 function mediaItem() { return state.media[state.mediaIndex] || null; }
@@ -294,10 +301,11 @@ $("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUr
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
 $("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>setFrame(state.frameIndex-1);$("nextFrame").onclick=()=>setFrame(state.frameIndex+1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>setFrame(Number($("frameSlider").value));$("play").onclick=togglePlayback;
 $("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
-for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
+for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=saveToolSettings;$("tool").onchange=saveToolSettings;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="ArrowLeft")setFrame(state.frameIndex-1);else if(event.key==="ArrowRight")setFrame(state.frameIndex+1);else if(event.key==="Escape")cancelDrawing();});
 async function runSelfTest(){
   try{
+    const previousSettings=localStorage.getItem(TOOL_SETTINGS_KEY);$("tool").value="eraser";$("showMasks").checked=false;$("fillMasks").checked=true;$("opacity").value="73";$("radius").value="19";saveToolSettings();$("tool").value="select";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";restoreToolSettings();if($("tool").value!=="eraser"||$("showMasks").checked||!$("fillMasks").checked||$("opacity").value!=="73"||$("radius").value!=="19")throw new Error("tool settings");if(previousSettings===null){localStorage.removeItem(TOOL_SETTINGS_KEY);$("tool").value="freehand";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";}else{localStorage.setItem(TOOL_SETTINGS_KEY,previousSettings);restoreToolSettings();}
     state.media=[{id:"selftest",name:"selftest.png",type:"image",element:null}];state.mediaIndex=0;state.sourceWidth=32;state.sourceHeight=32;
     state.activeClass="median";state.points=[{x:2,y:2},{x:12,y:2},{x:12,y:12},{x:2,y:12}];completePolygon();
     state.activeClass="artery";state.points=[{x:16,y:16},{x:28,y:16},{x:28,y:28},{x:16,y:28}];completePolygon();
@@ -308,4 +316,4 @@ async function runSelfTest(){
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
   }catch(error){document.body.dataset.selftest=`fail:${error.message}`;}
 }
-window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");rebuildAllChips();resizeCanvas();restoreOutputDirectory();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
+window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");restoreToolSettings();rebuildAllChips();resizeCanvas();restoreOutputDirectory();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
