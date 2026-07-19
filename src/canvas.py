@@ -28,6 +28,7 @@ class Canvas(QWidget):
         self._mask_touched = False
         self.instances = []
         self.active_class = None
+        self._class_order = []
         self._next_instance_ids = {}
         self._moving_instance_index = None
 
@@ -202,6 +203,28 @@ class Canvas(QWidget):
 
     def set_active_class(self, class_name):
         self.active_class = str(class_name).strip().lower() if class_name else None
+
+    def set_class_order(self, class_names):
+        ordered = []
+        seen = set()
+        for class_name in class_names:
+            clean = str(class_name).strip().lower()
+            if clean and clean not in seen:
+                seen.add(clean)
+                ordered.append(clean)
+        self._class_order = ordered
+        if self.mask is not None:
+            self._refresh_mask_pixmap()
+        self.update()
+
+    def _class_color(self, class_name):
+        clean = str(class_name).strip().lower()
+        if clean not in self._class_order:
+            self._class_order.append(clean)
+        index = self._class_order.index(clean)
+        hue = (index * 137.507764) % 360.0
+        color = QColor.fromHsvF(hue / 360.0, 0.78, 1.0)
+        return int(color.red()), int(color.green()), int(color.blue())
 
     def add_instance(self, class_name, mask, instance_id=None, push_history=True):
         normalized = self._normalize_mask(mask)
@@ -403,27 +426,28 @@ class Canvas(QWidget):
             self.mask_pixmap = None
             return
         height, width = self.mask.shape
-        color = np.array([255, 255, 180], dtype=np.uint8)
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
         if self.show_contour_only:
-            binary = (self.mask > 0).astype(np.uint8)
-            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            rgba = np.zeros((height, width, 4), dtype=np.uint8)
             contour_alpha = int(255 * self.mask_opacity)
-            cv2.drawContours(
-                rgba,
-                contours,
-                -1,
-                (int(color[0]), int(color[1]), int(color[2]), int(contour_alpha)),
-                self._roi_outline_thickness_px(),
-            )
+            for item in self.instances:
+                binary = (item["mask"] > 0).astype(np.uint8)
+                contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                red, green, blue = self._class_color(item["class"])
+                cv2.drawContours(
+                    rgba,
+                    contours,
+                    -1,
+                    (red, green, blue, contour_alpha),
+                    self._roi_outline_thickness_px(),
+                )
         else:
-            alpha = (self.mask * 255.0 * self.mask_opacity).astype(np.uint8)
-            base = (self.mask * 255.0).astype(np.float32)
-            rgba = np.zeros((height, width, 4), dtype=np.uint8)
-            rgba[:, :, 0] = (base * float(color[0]) / 255.0).astype(np.uint8)
-            rgba[:, :, 1] = (base * float(color[1]) / 255.0).astype(np.uint8)
-            rgba[:, :, 2] = (base * float(color[2]) / 255.0).astype(np.uint8)
-            rgba[:, :, 3] = alpha
+            for item in self.instances:
+                pixels = item["mask"] > 0
+                red, green, blue = self._class_color(item["class"])
+                rgba[pixels, 0] = red
+                rgba[pixels, 1] = green
+                rgba[pixels, 2] = blue
+                rgba[pixels, 3] = int(255 * self.mask_opacity)
         bytes_per_line = rgba.strides[0]
         q_image = QImage(
             rgba.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888

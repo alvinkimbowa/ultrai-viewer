@@ -504,6 +504,7 @@ class MainWindow(QMainWindow):
             self.nerve_labels_layout.addWidget(self.add_nerve_btn)
         self.nerve_labels_container.setEnabled(True)
         self.add_nerve_btn.setEnabled(True)
+        self._sync_canvas_class_order()
 
     def _build_anatomy_label_controls(self):
         if not hasattr(self, "anatomy_labels_layout"):
@@ -521,6 +522,14 @@ class MainWindow(QMainWindow):
             self._anatomy_buttons[label] = button
             self.anatomy_labels_layout.addWidget(button)
         self.anatomy_labels_layout.addWidget(self.add_anatomy_btn)
+        self._sync_canvas_class_order()
+
+    def _sync_canvas_class_order(self):
+        if not hasattr(self, "canvas"):
+            return
+        nerves = list(getattr(self, "_nerve_labels", []))
+        anatomy = list(getattr(self, "_anatomy_labels", []))
+        self.canvas.set_class_order(nerves + anatomy)
 
     def _labeled_video_count(self):
         if not self._video_paths:
