@@ -1,0 +1,33 @@
+:root { color-scheme: light; font-family: system-ui, sans-serif; font-size: 14px; }
+* { box-sizing: border-box; }
+html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+body { background: #eef1f4; color: #16202a; }
+header { height: 42px; display: flex; align-items: center; gap: 20px; padding: 0 14px; background: #24384b; color: white; }
+header h1 { font-size: 16px; margin: 0; }
+#status { opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+main { display: grid; grid-template-columns: 280px 1fr; height: calc(100% - 42px); }
+aside { padding: 10px; overflow-y: auto; background: #f7f8fa; border-right: 1px solid #aab3bc; }
+aside section { display: grid; gap: 7px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid #b8c0c8; }
+h2 { font-size: 14px; margin: 0 0 3px; }
+button, select, input { font: inherit; }
+button, select { min-height: 30px; border: 1px solid #9aa7b4; border-radius: 4px; background: white; }
+button:hover:not(:disabled) { background: #e8f0f8; }
+button:disabled { color: #929aa2; }
+label { display: grid; gap: 4px; }
+label:has(input[type=checkbox]) { display: flex; align-items: center; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.workspace { min-width: 0; display: grid; grid-template-rows: auto 1fr auto; padding: 8px; gap: 7px; }
+#classPanel { display: grid; gap: 5px; }
+.class-row { display: flex; align-items: flex-start; gap: 7px; min-height: 30px; }
+.class-row strong { width: 105px; padding-top: 6px; flex: 0 0 auto; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
+.chip { border-radius: 14px; min-height: 28px; padding: 3px 11px; }
+.chip.selected { color: white; border-color: #244f74; background: #2d6da3; }
+#stage { position: relative; overflow: hidden; min-height: 200px; background: #252525; border: 1px solid #7d8790; }
+#canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+#video { display: none; }
+#transport { display: flex; align-items: center; gap: 5px; }
+#transport button { width: 34px; }
+#frameSlider { flex: 1; }
+#frameLabel { min-width: 90px; text-align: right; }
+@media (max-width: 850px) { main { grid-template-columns: 220px 1fr; } .class-row strong { width: 85px; } }

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UltrAi Annotator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>UltrAi Annotator</h1>
+    <span id="status">Ready</span>
+  </header>
+  <main>
+    <aside>
+      <section>
+        <h2>Data</h2>
+        <button id="loadImages">Load image(s)</button>
+        <button id="loadVideos">Load video(s)</button>
+        <button id="clearData">Clear</button>
+        <select id="mediaList" disabled></select>
+        <div class="row"><button id="prevMedia" disabled>Prev</button><button id="nextMedia" disabled>Next</button></div>
+        <button id="chooseOutput">Choose output folder</button>
+        <button id="saveMasks">Save masks</button>
+      </section>
+      <section>
+        <h2>Edit</h2>
+        <label>Tool
+          <select id="tool">
+            <option value="select">Select</option>
+            <option value="freehand" selected>Freehand Line</option>
+            <option value="polygon">Segmented Line</option>
+            <option value="eraser">Eraser</option>
+          </select>
+        </label>
+        <label><input id="showMasks" type="checkbox" checked> Show masks</label>
+        <label><input id="fillMasks" type="checkbox"> Fill masks</label>
+        <label>Opacity <input id="opacity" type="range" min="0" max="100" value="50"></label>
+        <label>Eraser radius <input id="radius" type="range" min="1" max="50" value="4"></label>
+        <button id="fit">Fit to window</button>
+        <div class="row"><button id="undo">Undo</button><button id="redo">Redo</button></div>
+        <button id="clearMasks">Clear masks</button>
+      </section>
+    </aside>
+    <section class="workspace">
+      <div id="classPanel">
+        <div class="class-row"><strong>Location:</strong><div id="locations" class="chips"></div><button id="addLocation">+ Add location</button></div>
+        <div class="class-row"><strong>Nerve:</strong><div id="nerves" class="chips"></div><button id="addNerve">+ Add nerve</button></div>
+        <div class="class-row"><strong>Other anatomy:</strong><div id="anatomy" class="chips"></div><button id="addAnatomy">+ Add anatomy</button></div>
+      </div>
+      <div id="stage"><canvas id="canvas"></canvas><video id="video" preload="metadata" muted></video></div>
+      <div id="transport">
+        <button id="firstFrame" disabled>|&lt;</button>
+        <button id="prevFrame" disabled>&lt;</button>
+        <button id="play" disabled>▶</button>
+        <button id="nextFrame" disabled>&gt;</button>
+        <button id="lastFrame" disabled>&gt;|</button>
+        <input id="frameSlider" type="range" min="0" max="0" value="0" disabled>
+        <span id="frameLabel">0 / 0</span>
+      </div>
+    </section>
+  </main>
+  <script src="vendor/pako.min.js"></script>
+  <script src="vendor/UTIF.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
