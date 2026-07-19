@@ -23,6 +23,8 @@ label:has(input[type=checkbox]) { display: flex; align-items: center; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; flex: 1; }
 .chip { border-radius: 14px; min-height: 28px; padding: 3px 11px; }
 .chip.selected { color: white; border-color: #244f74; background: #2d6da3; }
+[data-add-label] { color: #174f7c; font-weight: 600; border: 1px dashed #2d6da3; background: #e2f1ff; padding: 3px 12px; }
+[data-add-label]:hover:not(:disabled) { color: #103a5c; border-color: #174f7c; background: #cfe7fb; }
 #stage { position: relative; overflow: hidden; min-height: 200px; background: #252525; border: 1px solid #7d8790; }
 #canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
 #video { display: none; }

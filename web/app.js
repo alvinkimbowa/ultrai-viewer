@@ -75,7 +75,7 @@ function redo() {
 }
 
 function rebuildChips(containerId, labels, kind) {
-  const holder=$(containerId); holder.replaceChildren();
+  const holder=$(containerId),addButton=holder.querySelector("[data-add-label]"); holder.replaceChildren();
   for(const label of labels){
     const button=document.createElement("button"); button.className="chip"; button.textContent=label==="lfcn"?"LFCN":label.replace(/\b\w/g,c=>c.toUpperCase());
     button.dataset.value=label;
@@ -85,6 +85,7 @@ function rebuildChips(containerId, labels, kind) {
       updateChipSelection();if(kind==="location")queueAutoSave();
     }); holder.appendChild(button);
   }
+  if(addButton)holder.appendChild(addButton);
 }
 function updateChipSelection(){
   document.querySelectorAll("#locations .chip").forEach(b=>b.classList.toggle("selected",b.dataset.value===state.location));
