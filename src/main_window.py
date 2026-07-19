@@ -192,6 +192,17 @@ class MainWindow(QMainWindow):
         nerve_row_layout.addWidget(self.nerve_labels_container, stretch=1)
         nerve_panel_layout.addWidget(nerve_row)
         self.add_nerve_btn = QPushButton("+ Add nerve")
+        anatomy_row = QWidget()
+        anatomy_row_layout = QHBoxLayout(anatomy_row)
+        anatomy_row_layout.setContentsMargins(0, 0, 0, 0)
+        anatomy_row_layout.setSpacing(6)
+        anatomy_row_layout.addWidget(QLabel("Other anatomy:"), stretch=0, alignment=Qt.AlignmentFlag.AlignTop)
+        self.anatomy_labels_container = QWidget()
+        self.anatomy_labels_layout = FlowLayout(self.anatomy_labels_container, margin=0, h_spacing=6, v_spacing=3)
+        self.anatomy_labels_container.setLayout(self.anatomy_labels_layout)
+        anatomy_row_layout.addWidget(self.anatomy_labels_container, stretch=1)
+        nerve_panel_layout.addWidget(anatomy_row)
+        self.add_anatomy_btn = QPushButton("+ Add anatomy")
         self.add_location_btn = QPushButton("+ Add location")
         nerve_sep = QFrame()
         nerve_sep.setFrameShape(QFrame.Shape.HLine)
@@ -331,7 +342,12 @@ class MainWindow(QMainWindow):
             "mid-arm",
             "elbow",
         ]
+        self._default_anatomy = [
+            "muscle", "artery", "vein", "skin", "subcutaneous tissue",
+            "cartilage", "tendon", "bone",
+        ]
         self._location_labels = list(self._default_locations)
+        self._current_location = None
         self._video_location_map = {}
         self._video_location_updated_at = {}
         self._nerve_labels = list(self._default_nerves)
@@ -343,6 +359,9 @@ class MainWindow(QMainWindow):
         self._location_buttons = {}
         self._nerve_button_group = None
         self._nerve_buttons = {}
+        self._anatomy_labels = list(self._default_anatomy)
+        self._anatomy_button_group = None
+        self._anatomy_buttons = {}
         self._nerve_manifest_warning_shown = False
         self._last_image_input_dir = ""
         self._last_image_output_dir = ""
@@ -351,6 +370,7 @@ class MainWindow(QMainWindow):
         self._load_persisted_paths()
         self._build_location_label_controls()
         self._build_nerve_label_controls()
+        self._build_anatomy_label_controls()
         self._update_nerve_summary_label()
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
@@ -409,7 +429,7 @@ class MainWindow(QMainWindow):
         self.polyline_action = QAction("Segmented Line", self)
         tools_menu.addAction(self.polyline_action)
         self.paint_action = QAction("Paint Brush", self)
-        tools_menu.addAction(self.paint_action)
+        # Paint Brush is intentionally retained in code but hidden from the UI.
         self.eraser_action = QAction("Eraser", self)
         tools_menu.addAction(self.eraser_action)
 
@@ -462,9 +482,8 @@ class MainWindow(QMainWindow):
             self.location_labels_layout.addWidget(button)
         if hasattr(self, "add_location_btn"):
             self.location_labels_layout.addWidget(self.add_location_btn)
-        has_video = self._mode == "video" and bool(self._video_path)
-        self.location_labels_container.setEnabled(has_video)
-        self.add_location_btn.setEnabled(self._mode == "video")
+        self.location_labels_container.setEnabled(True)
+        self.add_location_btn.setEnabled(True)
 
     def _build_nerve_label_controls(self):
         if not hasattr(self, "nerve_labels_layout"):
@@ -483,9 +502,25 @@ class MainWindow(QMainWindow):
             self.nerve_labels_layout.addWidget(button)
         if hasattr(self, "add_nerve_btn"):
             self.nerve_labels_layout.addWidget(self.add_nerve_btn)
-        has_video = self._mode == "video" and bool(self._video_path)
-        self.nerve_labels_container.setEnabled(has_video)
-        self.add_nerve_btn.setEnabled(self._mode == "video")
+        self.nerve_labels_container.setEnabled(True)
+        self.add_nerve_btn.setEnabled(True)
+
+    def _build_anatomy_label_controls(self):
+        if not hasattr(self, "anatomy_labels_layout"):
+            return
+        self._clear_flow_layout(self.anatomy_labels_layout, preserved_widget=getattr(self, "add_anatomy_btn", None))
+        self._anatomy_buttons = {}
+        self._anatomy_button_group = QButtonGroup(self)
+        self._anatomy_button_group.setExclusive(True)
+        for label in self._anatomy_labels:
+            button = QPushButton(self._display_location_label(label))
+            button.setCheckable(True)
+            button.setStyleSheet(self._nerve_button_style)
+            button.toggled.connect(lambda checked, lbl=label: self._on_anatomy_label_selected(lbl, checked))
+            self._anatomy_button_group.addButton(button)
+            self._anatomy_buttons[label] = button
+            self.anatomy_labels_layout.addWidget(button)
+        self.anatomy_labels_layout.addWidget(self.add_anatomy_btn)
 
     def _labeled_video_count(self):
         if not self._video_paths:
@@ -507,22 +542,28 @@ class MainWindow(QMainWindow):
             return
         self._classification_ui_updating = True
         try:
-            selected_location = self._video_location_map.get(video_path)
             if self._location_button_group is not None:
                 self._location_button_group.setExclusive(False)
-            for label, button in self._location_buttons.items():
-                button.setChecked(bool(selected_location and label == selected_location))
+            for button in self._location_buttons.values():
+                button.setChecked(False)
             if self._location_button_group is not None:
                 self._location_button_group.setExclusive(True)
-            selected = self._video_nerve_map.get(video_path)
             if self._nerve_button_group is not None:
                 self._nerve_button_group.setExclusive(False)
-            for label, button in self._nerve_buttons.items():
-                button.setChecked(bool(selected and label == selected))
+            for button in self._nerve_buttons.values():
+                button.setChecked(False)
             if self._nerve_button_group is not None:
                 self._nerve_button_group.setExclusive(True)
+            if self._anatomy_button_group is not None:
+                self._anatomy_button_group.setExclusive(False)
+            for button in self._anatomy_buttons.values():
+                button.setChecked(False)
+            if self._anatomy_button_group is not None:
+                self._anatomy_button_group.setExclusive(True)
         finally:
             self._classification_ui_updating = False
+        self._current_location = None
+        self.canvas.set_active_class(None)
         self._update_nerve_summary_label()
 
     def _infer_nerve_label_from_video_path(self, video_path):
@@ -597,6 +638,7 @@ class MainWindow(QMainWindow):
         self._video_location_map = {}
         self._video_location_updated_at = {}
         self._nerve_labels = list(self._default_nerves)
+        self._anatomy_labels = list(self._default_anatomy)
         self._video_nerve_map = {}
         self._video_nerve_updated_at = {}
         self._nerve_manifest_warning_shown = False
@@ -631,6 +673,16 @@ class MainWindow(QMainWindow):
                     seen.add(clean)
                     merged.append(clean)
                 self._nerve_labels = merged
+            anatomy_labels = data.get("anatomy_set", [])
+            if isinstance(anatomy_labels, list):
+                merged = list(self._default_anatomy)
+                seen = set(merged)
+                for label in anatomy_labels:
+                    clean = str(label).strip().lower()
+                    if clean and clean not in seen:
+                        seen.add(clean)
+                        merged.append(clean)
+                self._anatomy_labels = merged
             videos = data.get("videos", [])
             if isinstance(videos, list):
                 for item in videos:
@@ -672,6 +724,7 @@ class MainWindow(QMainWindow):
         existing_videos = {}
         existing_locations = []
         existing_labels = []
+        existing_anatomy = []
         if manifest_path.exists():
             try:
                 existing_data = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -681,6 +734,9 @@ class MainWindow(QMainWindow):
                 raw_labels = existing_data.get("label_set", [])
                 if isinstance(raw_labels, list):
                     existing_labels = [str(label).strip().lower() for label in raw_labels if str(label).strip()]
+                raw_anatomy = existing_data.get("anatomy_set", [])
+                if isinstance(raw_anatomy, list):
+                    existing_anatomy = [str(label).strip().lower() for label in raw_anatomy if str(label).strip()]
                 raw_videos = existing_data.get("videos", [])
                 if isinstance(raw_videos, list):
                     for item in raw_videos:
@@ -702,6 +758,7 @@ class MainWindow(QMainWindow):
                 existing_videos = {}
                 existing_locations = []
                 existing_labels = []
+                existing_anatomy = []
         for video_path in self._video_paths:
             location = self._video_location_map.get(video_path)
             label = self._video_nerve_map.get(video_path)
@@ -734,6 +791,13 @@ class MainWindow(QMainWindow):
                 continue
             seen_labels.add(clean)
             merged_labels.append(clean)
+        merged_anatomy = list(self._default_anatomy)
+        seen_anatomy = set(merged_anatomy)
+        for label in list(existing_anatomy) + list(self._anatomy_labels):
+            clean = str(label).strip().lower()
+            if clean and clean not in seen_anatomy:
+                seen_anatomy.add(clean)
+                merged_anatomy.append(clean)
         videos = sorted(
             (
                 item
@@ -746,6 +810,7 @@ class MainWindow(QMainWindow):
             "version": 2,
             "location_set": merged_locations,
             "label_set": merged_labels,
+            "anatomy_set": merged_anatomy,
             "video_count": len(videos),
             "videos": videos,
         }
@@ -761,10 +826,12 @@ class MainWindow(QMainWindow):
     def _on_location_label_selected(self, label, checked):
         if not checked or self._classification_ui_updating:
             return
-        if self._mode != "video" or not self._video_path:
-            return
         clean = str(label).strip().lower()
         if not clean:
+            return
+        self._current_location = clean
+        if self._mode != "video" or not self._video_path:
+            self.statusBar().showMessage(f"Location selected: {clean}")
             return
         self._video_location_map[self._video_path] = clean
         self._video_location_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
@@ -775,16 +842,60 @@ class MainWindow(QMainWindow):
     def _on_nerve_label_selected(self, label, checked):
         if not checked or self._classification_ui_updating:
             return
-        if self._mode != "video" or not self._video_path:
-            return
         clean = str(label).strip().lower()
         if not clean:
+            return
+        self._uncheck_anatomy_buttons()
+        self.canvas.set_active_class(clean)
+        if self._mode != "video" or not self._video_path:
+            self.statusBar().showMessage(f"Active anatomy: {clean}")
             return
         self._video_nerve_map[self._video_path] = clean
         self._video_nerve_updated_at[self._video_path] = datetime.now(timezone.utc).isoformat()
         self._update_nerve_summary_label()
         if self._save_nerve_manifest(show_errors=True):
             self.statusBar().showMessage(f"Saved label '{clean}' for {Path(self._video_path).name}")
+
+    def _uncheck_anatomy_buttons(self):
+        if self._anatomy_button_group is not None:
+            self._anatomy_button_group.setExclusive(False)
+        for button in self._anatomy_buttons.values():
+            button.setChecked(False)
+        if self._anatomy_button_group is not None:
+            self._anatomy_button_group.setExclusive(True)
+
+    def _uncheck_nerve_buttons(self):
+        if self._nerve_button_group is not None:
+            self._nerve_button_group.setExclusive(False)
+        for button in self._nerve_buttons.values():
+            button.setChecked(False)
+        if self._nerve_button_group is not None:
+            self._nerve_button_group.setExclusive(True)
+
+    def _on_anatomy_label_selected(self, label, checked):
+        if not checked or self._classification_ui_updating:
+            return
+        clean = str(label).strip().lower()
+        self._uncheck_nerve_buttons()
+        self.canvas.set_active_class(clean)
+        self.statusBar().showMessage(f"Active anatomy: {clean}")
+
+    def _add_custom_anatomy_label(self):
+        text, ok = QInputDialog.getText(self, "Add anatomy", "Anatomy name:")
+        if not ok:
+            return
+        label = str(text).strip().lower()
+        if not label:
+            QMessageBox.information(self, "Invalid label", "Anatomy name cannot be empty.")
+            return
+        all_labels = {item.lower() for item in self._anatomy_labels + self._nerve_labels}
+        if label in all_labels:
+            QMessageBox.information(self, "Duplicate label", "That anatomy label already exists.")
+            return
+        self._anatomy_labels.append(label)
+        self._build_anatomy_label_controls()
+        if self._mode == "video":
+            self._save_nerve_manifest(show_errors=True)
 
     def _add_custom_location_label(self):
         text, ok = QInputDialog.getText(self, "Add location", "Location name:")
@@ -976,7 +1087,7 @@ class MainWindow(QMainWindow):
         tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
         self.tool_picker.addItems(
-            ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser"]
+            ["Select", "Freehand Line", "Segmented Line", "Eraser"]
         )
         self.tool_picker.setCurrentIndex(1)
         tools_row.addWidget(self.tool_picker)
@@ -1119,6 +1230,7 @@ class MainWindow(QMainWindow):
         self._play_pause_shortcut.activated.connect(self._toggle_playback)
         self.add_location_btn.clicked.connect(self._add_custom_location_label)
         self.add_nerve_btn.clicked.connect(self._add_custom_nerve_label)
+        self.add_anatomy_btn.clicked.connect(self._add_custom_anatomy_label)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.clear_sequence_btn.clicked.connect(self._clear_sequence)
@@ -1278,8 +1390,7 @@ class MainWindow(QMainWindow):
             0: "select",
             1: "freehand",
             2: "polyline",
-            3: "brush",
-            4: "eraser",
+            3: "eraser",
         }
         tool = tool_map.get(index, "select")
         self.canvas.set_tool(tool)
@@ -1315,6 +1426,9 @@ class MainWindow(QMainWindow):
                 "No ONNX model found in assets/.",
             )
             return
+        if not self.canvas.active_class:
+            QMessageBox.information(self, "Select anatomy", "Select a nerve or other anatomy before batch segmentation.")
+            return
         if self._batch_thread and self._batch_thread.isRunning():
             self.statusBar().showMessage("Batch segmentation already running...")
             return
@@ -1328,6 +1442,7 @@ class MainWindow(QMainWindow):
             self._model,
             list(self._sequence_paths),
             self._sequence_output_dir,
+            self.canvas.active_class,
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1463,6 +1578,7 @@ class MainWindow(QMainWindow):
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
         self._build_location_label_controls()
         self._build_nerve_label_controls()
+        self._build_anatomy_label_controls()
         self._update_nerve_summary_label()
         resume_video_index, resume_frame_index = self._find_resume_video_position()
         self._open_video_at_index(resume_video_index, start_frame=resume_frame_index)
@@ -1499,8 +1615,10 @@ class MainWindow(QMainWindow):
         self._video_nerve_map = {}
         self._video_nerve_updated_at = {}
         self._nerve_labels = list(self._default_nerves)
+        self._anatomy_labels = list(self._default_anatomy)
         self._build_location_label_controls()
         self._build_nerve_label_controls()
+        self._build_anatomy_label_controls()
         self._update_nerve_summary_label()
 
     def _clear_video_sequence(self):
@@ -1529,14 +1647,53 @@ class MainWindow(QMainWindow):
         root = self._video_output_root_for_path(video_path)
         if root is None:
             return None
-        return root / f"frame_{int(frame_index):06d}.png"
+        return root / f"frame_{int(frame_index):06d}"
+
+    def _safe_class_name(self, class_name):
+        clean = re.sub(r"[^a-z0-9]+", "_", str(class_name).strip().lower()).strip("_")
+        return clean or "unlabeled"
+
+    def _save_instance_masks(self, directory):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        expected = set()
+        for item in self.canvas.export_instances():
+            filename = f"{self._safe_class_name(item['class'])}_{int(item['id']):03d}.png"
+            expected.add(filename)
+            mask_uint8 = (np.asarray(item["mask"]) >= 0.5).astype(np.uint8) * 255
+            if not cv2.imwrite(str(directory / filename), mask_uint8):
+                raise OSError(f"Failed to save mask: {filename}")
+        for old_path in directory.glob("*.png"):
+            if old_path.name not in expected:
+                old_path.unlink()
+
+    def _load_instance_masks(self, directory):
+        directory = Path(directory)
+        if not directory.is_dir():
+            return False
+        instances = []
+        pattern = re.compile(r"^(.+)_(\d+)\.png$", re.IGNORECASE)
+        for mask_path in sorted(directory.glob("*.png")):
+            match = pattern.match(mask_path.name)
+            if not match:
+                continue
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+            if mask is None:
+                continue
+            instances.append({
+                "class": match.group(1).replace("_", " ").lower(),
+                "id": int(match.group(2)),
+                "mask": (mask >= 128).astype(np.float32),
+            })
+        self.canvas.load_instances(instances)
+        return bool(instances)
 
     def _last_annotated_frame_for_video(self, video_path):
         video_output_root = self._video_output_root_for_path(video_path)
         if video_output_root is None or not video_output_root.exists():
             return -1
         last_frame = -1
-        for mask_path in sorted(video_output_root.glob("frame_*.png")):
+        for mask_path in sorted(video_output_root.glob("frame_*")):
             stem = mask_path.stem
             if not stem.startswith("frame_"):
                 continue
@@ -1564,12 +1721,11 @@ class MainWindow(QMainWindow):
 
     def _load_saved_video_mask_for_frame(self, video_path, frame_index):
         mask_path = self._video_mask_path(video_path, frame_index)
-        if mask_path is None or not mask_path.exists():
+        if mask_path is None or not mask_path.is_dir():
             return None
-        mask_gray = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-        if mask_gray is None:
+        if not self._load_instance_masks(mask_path):
             return None
-        return (mask_gray >= 128).astype(np.float32)
+        return np.copy(self.canvas.mask)
 
     def _propagate_mask_with_optical_flow(self, src_frame, dst_frame, src_mask):
         if src_frame is None or dst_frame is None or src_mask is None:
@@ -1623,16 +1779,23 @@ class MainWindow(QMainWindow):
             return None
         if dst_index != src_index + 1:
             return None
-        if self._load_saved_video_mask_for_frame(self._video_path, dst_index) is not None:
+        destination_dir = self._video_mask_path(self._video_path, dst_index)
+        if destination_dir is not None and destination_dir.is_dir() and any(destination_dir.glob("*.png")):
             return None
         self._commit_pending_outline()
         if not self._canvas_has_roi():
             return None
+        propagated_instances = []
         try:
-            propagated = self._propagate_mask_with_optical_flow(src_frame, dst_frame, self.canvas.mask)
+            for item in self.canvas.export_instances():
+                propagated = self._propagate_mask_with_optical_flow(src_frame, dst_frame, item["mask"])
+                if propagated is not None:
+                    propagated_instances.append({
+                        "class": item["class"], "id": item["id"], "mask": propagated,
+                    })
         except Exception:
             return None
-        return propagated
+        return propagated_instances or None
 
     def _open_video_at_index(self, video_index, start_frame=0):
         if video_index < 0 or video_index >= len(self._video_paths):
@@ -1668,8 +1831,6 @@ class MainWindow(QMainWindow):
         self.video_combo.blockSignals(True)
         self.video_combo.setCurrentIndex(video_index)
         self.video_combo.blockSignals(False)
-        self._ensure_current_video_location_label()
-        self._ensure_current_video_nerve_label()
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
         target_frame = int(start_frame)
         if target_frame < 0:
@@ -1794,7 +1955,10 @@ class MainWindow(QMainWindow):
         self.canvas.load_image(path)
         mask_path = self._find_sequence_mask_path(path)
         if mask_path:
-            self.canvas.load_mask(mask_path)
+            if Path(mask_path).is_dir():
+                self._load_instance_masks(mask_path)
+            else:
+                self.canvas.load_mask(mask_path)
         else:
             self.canvas.clear_mask()
         self._update_navigation_buttons()
@@ -1888,9 +2052,9 @@ class MainWindow(QMainWindow):
             self._stop_playback()
             QMessageBox.warning(self, "Frame error", f"Could not decode frame {frame_index}.")
             return
-        propagated_mask = None
+        propagated_instances = None
         if source_frame is not None:
-            propagated_mask = self._maybe_propagate_mask_to_next_frame(
+            propagated_instances = self._maybe_propagate_mask_to_next_frame(
                 previous_index,
                 frame_index,
                 source_frame,
@@ -1900,9 +2064,9 @@ class MainWindow(QMainWindow):
         self.canvas.load_image_array(frame, self._video_path or "")
         cached_mask = self._load_saved_video_mask_for_frame(self._video_path, frame_index)
         if cached_mask is not None:
-            self.canvas.set_mask(np.copy(cached_mask))
-        elif propagated_mask is not None:
-            self.canvas.set_mask(propagated_mask)
+            pass
+        elif propagated_instances is not None:
+            self.canvas.load_instances(propagated_instances)
             self.statusBar().showMessage(f"Propagated mask to frame {frame_index + 1}")
         else:
             self.canvas.clear_mask()
@@ -1930,15 +2094,16 @@ class MainWindow(QMainWindow):
         if mask_path is None:
             return
         if self._canvas_has_roi():
-            mask_path.parent.mkdir(parents=True, exist_ok=True)
-            mask = np.asarray(self.canvas.mask, dtype=np.float32)
-            mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-            if not cv2.imwrite(str(mask_path), mask_uint8):
-                QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_path.name}")
-            return
-        if mask_path.exists():
             try:
-                mask_path.unlink()
+                self._save_instance_masks(mask_path)
+            except OSError as exc:
+                QMessageBox.warning(self, "Save error", str(exc))
+            return
+        if mask_path.is_dir():
+            try:
+                for child in mask_path.glob("*.png"):
+                    child.unlink()
+                mask_path.rmdir()
             except OSError as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
 
@@ -2088,10 +2253,10 @@ class MainWindow(QMainWindow):
         if not self._canvas_has_roi():
             return
         image_path = Path(self._sequence_paths[self._sequence_index])
-        output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
+        output_path = Path(self._sequence_output_dir) / image_path.stem
         try:
-            self.canvas.save_mask(str(output_path))
-            self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+            self._save_instance_masks(output_path)
+            self.statusBar().showMessage(f"Saved masks: {output_path.name}")
         except Exception as exc:
             QMessageBox.warning(self, "Save error", str(exc))
 
@@ -2105,14 +2270,26 @@ class MainWindow(QMainWindow):
             return
         if self._sequence_output_dir and self._sequence_index >= 0:
             image_path = Path(self._sequence_paths[self._sequence_index])
-            output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
+            output_path = Path(self._sequence_output_dir) / image_path.stem
             try:
-                self.canvas.save_mask(str(output_path))
-                self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+                self._save_instance_masks(output_path)
+                self.statusBar().showMessage(f"Saved masks: {output_path.name}")
             except Exception as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
             return
-        self.canvas.save_mask_dialog()
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select mask output folder", self._last_image_output_dir or self._last_image_input_dir
+        )
+        if not output_dir:
+            return
+        source_stem = Path(self.canvas.image_path).stem if self.canvas.image_path else "image"
+        try:
+            self._save_instance_masks(Path(output_dir) / source_stem)
+            self._last_image_output_dir = output_dir
+            self._save_persisted_paths()
+            self.statusBar().showMessage(f"Saved masks: {source_stem}")
+        except OSError as exc:
+            QMessageBox.warning(self, "Save error", str(exc))
 
     def _save_video_frame_mask_dialog(self):
         if self._mode != "video":
@@ -2165,9 +2342,9 @@ class MainWindow(QMainWindow):
         video_output_root = Path(output_dir) / Path(self._video_path).stem
         annotated_count = 0
         if video_output_root.exists() and video_output_root.is_dir():
-            for mask_path in sorted(video_output_root.glob("frame_*.png")):
+            for mask_path in sorted(video_output_root.glob("frame_*")):
                 suffix = mask_path.stem.split("_")[-1]
-                if suffix.isdigit():
+                if suffix.isdigit() and mask_path.is_dir() and any(mask_path.glob("*.png")):
                     annotated_count += 1
         if annotated_count <= 0:
             QMessageBox.information(self, "No masks", "No annotated frames found.")
@@ -2182,6 +2359,9 @@ class MainWindow(QMainWindow):
             return None
         stem = Path(image_path).stem
         output_dir = Path(self._sequence_output_dir)
+        instance_dir = output_dir / stem
+        if instance_dir.is_dir():
+            return str(instance_dir)
         for ext in (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
             candidate = output_dir / f"{stem}{ext}"
             if candidate.exists():
@@ -2488,6 +2668,9 @@ class MainWindow(QMainWindow):
         if self.canvas.image is None:
             QMessageBox.warning(self, "No image", "Load an image before running segmentation.")
             return
+        if not self.canvas.active_class:
+            QMessageBox.information(self, "Select anatomy", "Select a nerve or other anatomy before segmenting.")
+            return
         if not self._model.has_model():
             QMessageBox.warning(
                 self,
@@ -2552,7 +2735,7 @@ class MainWindow(QMainWindow):
     def _on_inference_finished(self, prediction):
         self._last_prediction = prediction
         if self._last_prediction is not None:
-            self.canvas.set_mask(self._last_prediction)
+            self.canvas.add_instance(self.canvas.active_class, self._last_prediction)
         self.statusBar().showMessage("Segmentation complete")
         self._close_inference_dialog()
 
@@ -2619,11 +2802,12 @@ class BatchInferenceWorker(QObject):
     progress = pyqtSignal(int, int)
     image_started = pyqtSignal(str, int, int)
 
-    def __init__(self, model, image_paths, output_dir):
+    def __init__(self, model, image_paths, output_dir, class_name):
         super().__init__()
         self._model = model
         self._image_paths = list(image_paths)
         self._output_dir = output_dir
+        self._class_name = str(class_name).strip().lower()
         self._cancel_event = Event()
 
     def cancel(self):
@@ -2679,5 +2863,8 @@ class BatchInferenceWorker(QObject):
         if prediction is None:
             return
         mask_uint8 = (prediction >= 0.5).astype(np.uint8) * 255
-        output_path = Path(self._output_dir) / f"{Path(image_path).stem}.png"
+        class_name = re.sub(r"[^a-z0-9]+", "_", self._class_name).strip("_") or "unlabeled"
+        output_dir = Path(self._output_dir) / Path(image_path).stem
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{class_name}_001.png"
         cv2.imwrite(str(output_path), mask_uint8)

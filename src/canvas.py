@@ -26,6 +26,10 @@ class Canvas(QWidget):
         self._undo_stack = []
         self._redo_stack = []
         self._mask_touched = False
+        self.instances = []
+        self.active_class = None
+        self._next_instance_ids = {}
+        self._moving_instance_index = None
 
         self.tool = "freehand"
         self.brush_radius = 4
@@ -125,6 +129,8 @@ class Canvas(QWidget):
         self.image_path = source_name or None
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
+        self.instances = []
+        self._next_instance_ids = {}
         self._refresh_mask_pixmap()
         self._last_outline = []
         self._mask_touched = False
@@ -154,12 +160,16 @@ class Canvas(QWidget):
         if self.image is None:
             self.mask = None
             self.mask_pixmap = None
+            self.instances = []
+            self._next_instance_ids = {}
             self._last_outline = []
             self._mask_touched = False
             self._reset_history()
             self.update()
             return
         height, width = self.image.shape[:2]
+        self.instances = []
+        self._next_instance_ids = {}
         self.mask = np.zeros((height, width), dtype=np.float32)
         self._refresh_mask_pixmap()
         self._last_outline = []
@@ -182,11 +192,66 @@ class Canvas(QWidget):
     def set_mask(self, mask):
         if self.image is None:
             return
-        self.mask = self._normalize_mask(mask)
+        self.instances = []
+        self._next_instance_ids = {}
+        self.add_instance(self.active_class or "unlabeled", mask, push_history=False)
         self._refresh_mask_pixmap()
         self._mask_touched = True
         self._reset_history()
         self.update()
+
+    def set_active_class(self, class_name):
+        self.active_class = str(class_name).strip().lower() if class_name else None
+
+    def add_instance(self, class_name, mask, instance_id=None, push_history=True):
+        normalized = self._normalize_mask(mask)
+        if not np.any(normalized >= 0.5):
+            return None
+        class_name = str(class_name or "unlabeled").strip().lower()
+        next_id = self._next_instance_ids.get(class_name, 1)
+        instance_id = int(instance_id if instance_id is not None else next_id)
+        self._next_instance_ids[class_name] = max(next_id, instance_id + 1)
+        self.instances.append({"class": class_name, "id": instance_id, "mask": normalized})
+        self._rebuild_combined_mask()
+        self._mask_touched = True
+        if push_history:
+            self._push_history()
+        return instance_id
+
+    def export_instances(self):
+        return [
+            {"class": item["class"], "id": item["id"], "mask": np.copy(item["mask"])}
+            for item in self.instances
+        ]
+
+    def load_instances(self, instances):
+        self.instances = []
+        self._next_instance_ids = {}
+        for item in instances:
+            self.add_instance(item["class"], item["mask"], item.get("id"), push_history=False)
+        self._rebuild_combined_mask()
+        self._mask_touched = bool(self.instances)
+        self._reset_history()
+        self.update()
+
+    def _rebuild_combined_mask(self):
+        if self.image is None:
+            self.mask = None
+        else:
+            height, width = self.image.shape[:2]
+            self.mask = np.zeros((height, width), dtype=np.float32)
+            for item in self.instances:
+                self.mask = np.maximum(self.mask, item["mask"])
+        self._refresh_mask_pixmap()
+
+    def _polygon_instance(self, points):
+        if not self.active_class or self.image is None or len(points) < 3:
+            return False
+        mask = np.zeros(self.image.shape[:2], dtype=np.float32)
+        contour = np.array([[p.x(), p.y()] for p in points], dtype=np.int32).reshape((-1, 1, 2))
+        cv2.fillPoly(mask, [contour], 1.0)
+        self.add_instance(self.active_class, mask)
+        return True
 
     def set_mask_opacity(self, opacity):
         self.mask_opacity = max(0.0, min(1.0, float(opacity)))
@@ -511,10 +576,20 @@ class Canvas(QWidget):
         return translated
 
     def _start_annotation_move(self, point):
+        self._moving_instance_index = None
+        for index in range(len(self.instances) - 1, -1, -1):
+            item = self.instances[index]
+            x = max(0, min(item["mask"].shape[1] - 1, point.x()))
+            y = max(0, min(item["mask"].shape[0] - 1, point.y()))
+            if item["mask"][y, x] >= 0.5:
+                self._moving_instance_index = index
+                break
+        if self._moving_instance_index is None:
+            return
         self._moving_annotation = True
         self._drawing = False
         self._move_anchor_point = QPoint(point)
-        self._move_source_mask = None if self.mask is None else np.copy(self.mask)
+        self._move_source_mask = np.copy(self.instances[self._moving_instance_index]["mask"])
         self._move_source_outline = [QPoint(p) for p in self._last_outline]
 
     def _update_annotation_move(self, point):
@@ -522,7 +597,8 @@ class Canvas(QWidget):
             return
         dx = int(point.x() - self._move_anchor_point.x())
         dy = int(point.y() - self._move_anchor_point.y())
-        self.mask = self._translate_mask(self._move_source_mask, dx, dy)
+        self.instances[self._moving_instance_index]["mask"] = self._translate_mask(self._move_source_mask, dx, dy)
+        self._rebuild_combined_mask()
         self._last_outline = self._translate_outline(self._move_source_outline, dx, dy)
         self._refresh_mask_pixmap()
         self.update()
@@ -534,39 +610,23 @@ class Canvas(QWidget):
         self._move_anchor_point = None
         self._move_source_mask = None
         self._move_source_outline = []
+        self._moving_instance_index = None
         self._mask_touched = True
         self._push_history()
         self.update()
 
     def _prepare_for_new_outline(self):
-        if self.image is not None:
-            self._ensure_mask()
-            if self.mask is not None:
-                self.mask.fill(0.0)
-                self._refresh_mask_pixmap()
         self._last_outline = []
         self._freehand_points = []
         self._poly_points = []
         self.update()
 
     def _finish_polyline(self):
-        if len(self._poly_points) < 2:
+        if len(self._poly_points) < 3:
             self._poly_points = []
             self.update()
             return
-        if self.fill_roi:
-            self._ensure_mask()
-            points = np.array(
-                [[p.x(), p.y()] for p in self._poly_points],
-                dtype=np.int32,
-            ).reshape((-1, 1, 2))
-            cv2.fillPoly(self.mask, [points], 1.0)
-            self._refresh_mask_pixmap()
-            self._push_history()
-            self._mask_touched = True
-        else:
-            self._last_outline = list(self._poly_points)
-            self._push_history()
+        self._polygon_instance(self._poly_points)
         self._poly_points = []
         self.update()
 
@@ -593,11 +653,11 @@ class Canvas(QWidget):
                 self._refresh_mask_pixmap()
                 self.update()
             elif self.tool == "eraser":
-                self._ensure_mask()
                 self._drawing = True
                 self._last_point = point
-                self._draw_point(point, 0.0)
-                self._refresh_mask_pixmap()
+                for item in self.instances:
+                    cv2.circle(item["mask"], (point.x(), point.y()), self.brush_radius, 0.0, -1)
+                self._rebuild_combined_mask()
                 self.update()
             elif self.tool == "polyline":
                 if not self._poly_points:
@@ -632,7 +692,10 @@ class Canvas(QWidget):
         if self.tool == "brush":
             self._draw_line(self._last_point, point, 1.0)
         elif self.tool == "eraser":
-            self._draw_line(self._last_point, point, 0.0)
+            for item in self.instances:
+                cv2.line(item["mask"], (self._last_point.x(), self._last_point.y()), (point.x(), point.y()), 0.0, self._brush_thickness())
+            self.instances = [item for item in self.instances if np.any(item["mask"] >= 0.5)]
+            self._rebuild_combined_mask()
         self._last_point = point
         self._refresh_mask_pixmap()
         self.update()
@@ -643,19 +706,7 @@ class Canvas(QWidget):
                 self._finish_annotation_move()
                 return
             if self.tool == "freehand":
-                if self.fill_roi and len(self._freehand_points) > 2:
-                    self._ensure_mask()
-                    points = np.array(
-                        [[p.x(), p.y()] for p in self._freehand_points],
-                        dtype=np.int32,
-                    ).reshape((-1, 1, 2))
-                    cv2.fillPoly(self.mask, [points], 1.0)
-                    self._refresh_mask_pixmap()
-                    self._push_history()
-                    self._mask_touched = True
-                elif len(self._freehand_points) > 1:
-                    self._last_outline = list(self._freehand_points)
-                    self._push_history()
+                self._polygon_instance(self._freehand_points)
                 self._freehand_points = []
             elif self.tool in ("brush", "eraser"):
                 if self._drawing:
@@ -758,6 +809,8 @@ class Canvas(QWidget):
             "mask": mask,
             "last_outline": outline,
             "mask_touched": bool(self._mask_touched),
+            "instances": self.export_instances(),
+            "next_instance_ids": dict(self._next_instance_ids),
         }
 
     def _clone_state(self, state):
@@ -766,12 +819,18 @@ class Canvas(QWidget):
             "mask": None if mask is None else np.copy(mask),
             "last_outline": [QPoint(point) for point in state["last_outline"]],
             "mask_touched": bool(state["mask_touched"]),
+            "instances": [{"class": i["class"], "id": i["id"], "mask": np.copy(i["mask"])} for i in state.get("instances", [])],
+            "next_instance_ids": dict(state.get("next_instance_ids", {})),
         }
 
     def _restore_state(self, state):
         self.mask = None if state["mask"] is None else np.copy(state["mask"])
         self._last_outline = [QPoint(point) for point in state["last_outline"]]
         self._mask_touched = bool(state["mask_touched"])
+        self.instances = [{"class": i["class"], "id": i["id"], "mask": np.copy(i["mask"])} for i in state.get("instances", [])]
+        self._next_instance_ids = dict(state.get("next_instance_ids", {}))
+        if self.instances:
+            self._rebuild_combined_mask()
         self._refresh_mask_pixmap()
 
     def has_mask_data(self):
