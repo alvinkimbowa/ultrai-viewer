@@ -22,6 +22,9 @@ const state = {
 let autoSavePromise=Promise.resolve();
 
 function status(text) { $("status").textContent = text; }
+function sizeLaunchWindow(){
+  if(!new URLSearchParams(location.search).has("windowed"))return;const width=Math.round(screen.availWidth*.85),height=Math.round(screen.availHeight*.85),left=Math.round((screen.availWidth-width)/2),top=Math.round((screen.availHeight-height)/2);setTimeout(()=>{window.resizeTo(width,height);window.moveTo(left,top);},100);
+}
 function saveToolSettings(){
   const settings={tool:$("tool").value,showMasks:$("showMasks").checked,fillMasks:$("fillMasks").checked,opacity:$("opacity").value,radius:$("radius").value};localStorage.setItem(TOOL_SETTINGS_KEY,JSON.stringify(settings));
 }
@@ -317,4 +320,4 @@ async function runSelfTest(){
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
   }catch(error){document.body.dataset.selftest=`fail:${error.message}`;}
 }
-window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");restoreToolSettings();rebuildAllChips();resizeCanvas();restoreOutputDirectory();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
+window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");sizeLaunchWindow();restoreToolSettings();rebuildAllChips();resizeCanvas();restoreOutputDirectory();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
