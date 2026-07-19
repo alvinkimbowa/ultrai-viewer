@@ -5,6 +5,7 @@ const DEFAULT_NERVES = ["ulnar", "median", "radial", "plex", "lfcn", "peroneal",
 const DEFAULT_ANATOMY = ["muscle", "artery", "vein", "skin", "subcutaneous tissue", "cartilage", "tendon", "bone"];
 const HANDLE_DATABASE = "ultrai-annotator";
 const TOOL_SETTINGS_KEY = "ultrai-tool-settings";
+const REMEMBER_OUTPUT_KEY = "ultrai-remember-output";
 const $ = (id) => document.getElementById(id);
 const canvas = $("canvas");
 const ctx = canvas.getContext("2d");
@@ -17,7 +18,7 @@ const state = {
   instancesByKey: new Map(), undoByKey: new Map(), redoByKey: new Map(), nextIdsByKey: new Map(),
   sourceWidth: 0, sourceHeight: 0, frameIndex: 0, frameCount: 1, fps: 30,
   scale: 1, offsetX: 0, offsetY: 0, fit: true, drawing: false, moving: false,
-  points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, lastPointer: null,
+  points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, lastPointer: null, outputPromptReady: false,
 };
 let autoSavePromise=Promise.resolve();
 
@@ -26,10 +27,10 @@ function sizeLaunchWindow(){
   if(!new URLSearchParams(location.search).has("windowed"))return;const width=Math.round(screen.availWidth*.85),height=Math.round(screen.availHeight*.85),left=Math.round((screen.availWidth-width)/2),top=Math.round((screen.availHeight-height)/2);setTimeout(()=>{window.resizeTo(width,height);window.moveTo(left,top);},100);
 }
 function saveToolSettings(){
-  const settings={tool:$("tool").value,showMasks:$("showMasks").checked,fillMasks:$("fillMasks").checked,opacity:$("opacity").value,radius:$("radius").value};localStorage.setItem(TOOL_SETTINGS_KEY,JSON.stringify(settings));
+  const settings={showMasks:$("showMasks").checked,fillMasks:$("fillMasks").checked,opacity:$("opacity").value,radius:$("radius").value};localStorage.setItem(TOOL_SETTINGS_KEY,JSON.stringify(settings));
 }
 function restoreToolSettings(){
-  try{const settings=JSON.parse(localStorage.getItem(TOOL_SETTINGS_KEY)||"null");if(!settings)return;if(["select","freehand","polygon","eraser"].includes(settings.tool))$("tool").value=settings.tool;if(typeof settings.showMasks==="boolean")$("showMasks").checked=settings.showMasks;if(typeof settings.fillMasks==="boolean")$("fillMasks").checked=settings.fillMasks;const opacity=Number(settings.opacity),radius=Number(settings.radius);if(opacity>=0&&opacity<=100)$("opacity").value=String(opacity);if(radius>=1&&radius<=50)$("radius").value=String(radius);}catch{}
+  $("tool").value="freehand";try{const settings=JSON.parse(localStorage.getItem(TOOL_SETTINGS_KEY)||"null");if(!settings)return;if(typeof settings.showMasks==="boolean")$("showMasks").checked=settings.showMasks;if(typeof settings.fillMasks==="boolean")$("fillMasks").checked=settings.fillMasks;const opacity=Number(settings.opacity),radius=Number(settings.radius);if(opacity>=0&&opacity<=100)$("opacity").value=String(opacity);if(radius>=1&&radius<=50)$("radius").value=String(radius);}catch{}
 }
 function cleanClass(value) { return String(value || "").trim().toLowerCase(); }
 function safeClass(value) { return cleanClass(value).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "unlabeled"; }
@@ -83,7 +84,7 @@ function rebuildChips(containerId, labels, kind) {
     const button=document.createElement("button"); button.className="chip"; button.textContent=label==="lfcn"?"LFCN":label.replace(/\b\w/g,c=>c.toUpperCase());
     button.dataset.value=label;
     button.addEventListener("click",()=>{
-      if(kind==="location") { state.location=label; if(mediaItem())mediaItem().location=label; }
+      if(kind==="location") { state.location=label;state.outputPromptReady=true;if(mediaItem())mediaItem().location=label; }
       else { state.activeClass=label; }
       updateChipSelection();if(kind==="location")queueAutoSave();
     }); holder.appendChild(button);
@@ -135,7 +136,7 @@ function rebuildMediaList(){
 }
 async function openMedia(index){
   if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo(); state.mediaIndex=index; $("mediaList").value=String(index);
-  state.activeClass=null; state.location=null; updateChipSelection();
+  state.activeClass=null; state.location=null;state.outputPromptReady=false;updateChipSelection();
   const item=mediaItem();
   if(item.type==="image"){
     video.removeAttribute("src");
@@ -205,7 +206,7 @@ function maskFromPolygon(points){
 function completePolygon(){
   if(state.points.length<3)return cancelDrawing();if(!state.activeClass){alert("Select a nerve or other anatomy before drawing.");return cancelDrawing();}
   const key=annotationKey(), idMap=state.nextIdsByKey.get(key)||new Map(),id=idMap.get(state.activeClass)||1;idMap.set(state.activeClass,id+1);state.nextIdsByKey.set(key,idMap);
-  instances().push({className:state.activeClass,id,mask:maskFromPolygon(state.points)});state.points=[];state.drawing=false;pushHistory();render();status(`Created ${state.activeClass} ${id}`);queueAutoSave();
+  instances().push({className:state.activeClass,id,mask:maskFromPolygon(state.points)});state.points=[];state.drawing=false;state.outputPromptReady=true;pushHistory();render();status(`Created ${state.activeClass} ${id}`);queueAutoSave();
 }
 function cancelDrawing(){state.points=[];state.drawing=false;render();}
 function hitInstance(point){for(let i=instances().length-1;i>=0;i--){if(instances()[i].mask[point.y*state.sourceWidth+point.x])return i;}return-1;}
@@ -244,9 +245,13 @@ canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completeP
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;}else if(event.shiftKey)state.offsetX-=event.deltaY;else state.offsetY-=event.deltaY;render();},{passive:false});
 
-async function activateOutputDirectory(handle){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);queueAutoSave();}
+async function activateOutputDirectory(handle,saveCurrent=true){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);if(saveCurrent)queueAutoSave();}
 async function chooseOutput(){try{const previous=await recalledHandle("output"),options={id:"ultrai-output",mode:"readwrite"};if(previous)options.startIn=previous;const handle=await window.showDirectoryPicker(options);await rememberHandle("output",handle);await activateOutputDirectory(handle);}catch(error){if(error.name!=="AbortError")alert(error.message);}}
-async function restoreOutputDirectory(){const handle=await recalledHandle("output");if(!handle)return;try{if(await handle.queryPermission({mode:"readwrite"})==="granted")await activateOutputDirectory(handle);}catch{}}
+async function restoreOutputDirectory(){if(localStorage.getItem(REMEMBER_OUTPUT_KEY)!=="true")return;const handle=await recalledHandle("output");if(!handle)return;try{if(await handle.queryPermission({mode:"readwrite"})==="granted")await activateOutputDirectory(handle,false);}catch{}}
+async function confirmPreviousOutputDirectory(){
+  if(state.outputDir)return true;const handle=await recalledHandle("output");if(!handle){status("Choose an output folder to enable autosave");return false;}const remembered=localStorage.getItem(REMEMBER_OUTPUT_KEY)==="true";if(!remembered&&!confirm(`No output folder is selected. Save to the previous folder "${handle.name}"?`)){status("Autosave waiting for an output folder");return false;}
+  try{let permission=await handle.queryPermission({mode:"readwrite"});if(permission!=="granted")permission=await handle.requestPermission({mode:"readwrite"});if(permission!=="granted"){status("Output folder permission was not granted");return false;}await activateOutputDirectory(handle,false);if(!remembered)localStorage.setItem(REMEMBER_OUTPUT_KEY,String(confirm(`Remember "${handle.name}" as the automatic output folder for future launches?`)));return true;}catch(error){status(`Could not use previous output folder: ${error.message}`);return false;}
+}
 async function maskBlob(instance){const out=document.createElement("canvas");out.width=state.sourceWidth;out.height=state.sourceHeight;const oc=out.getContext("2d"),image=oc.createImageData(out.width,out.height);for(let i=0;i<instance.mask.length;i++){const v=instance.mask[i]?255:0,p=i*4;image.data[p]=v;image.data[p+1]=v;image.data[p+2]=v;image.data[p+3]=255;}oc.putImageData(image,0,0);return new Promise(resolve=>out.toBlob(resolve,"image/png"));}
 async function writeFile(dir,name,data){const handle=await dir.getFileHandle(name,{create:true});const stream=await handle.createWritable();await stream.write(data);await stream.close();}
 async function saveMaskSet(output,list,frameName=""){
@@ -257,16 +262,16 @@ async function saveCurrentMaskSet(){
   if(!state.outputDir||!mediaItem())return 0;const item=mediaItem(),folderName=item.name.replace(/\.[^.]+$/,"")||(item.type==="video"?"video":"image"),output=await state.outputDir.getDirectoryHandle(folderName,{create:true}),frameName=item.type==="video"?`frame_${String(state.frameIndex).padStart(6,"0")}_`:"";return saveMaskSet(output,instances(),frameName);
 }
 function queueAutoSave(){
-  if(!state.outputDir||!mediaItem())return;startAutoSave();
+  if(!mediaItem()||(!state.outputDir&&!state.outputPromptReady))return;startAutoSave();
 }
 function startAutoSave(){
-  autoSavePromise=autoSavePromise.then(async()=>{try{const saved=await saveCurrentMaskSet();await saveManifest();status(`Autosaved ${saved} mask(s)`);}catch(error){status(`Autosave failed: ${error.message}`);}});
+  autoSavePromise=autoSavePromise.then(async()=>{try{if(!await confirmPreviousOutputDirectory())return;const saved=await saveCurrentMaskSet();await saveManifest();status(`Autosaved ${saved} mask(s)`);}catch(error){status(`Autosave failed: ${error.message}`);}});
 }
 async function flushAutoSave(){
   await autoSavePromise;
 }
 async function saveMasks(){
-  if(!state.outputDir)return alert("Choose an output folder first.");const item=mediaItem();if(!item)return;await flushAutoSave();
+  const item=mediaItem();if(!item)return;await flushAutoSave();if(!await confirmPreviousOutputDirectory())return alert("Choose an output folder first.");
   const output=await state.outputDir.getDirectoryHandle(item.name.replace(/\.[^.]+$/,"")||(item.type==="video"?"video":"image"),{create:true});
   let saved=0;
   if(item.type==="video"){
@@ -305,11 +310,11 @@ $("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUr
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
 $("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>setFrame(state.frameIndex-1);$("nextFrame").onclick=()=>setFrame(state.frameIndex+1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>setFrame(Number($("frameSlider").value));$("play").onclick=togglePlayback;
 $("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
-for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=saveToolSettings;$("tool").onchange=saveToolSettings;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
+for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=saveToolSettings;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="ArrowLeft")setFrame(state.frameIndex-1);else if(event.key==="ArrowRight")setFrame(state.frameIndex+1);else if(event.key==="Escape")cancelDrawing();});
 async function runSelfTest(){
   try{
-    const previousSettings=localStorage.getItem(TOOL_SETTINGS_KEY);$("tool").value="eraser";$("showMasks").checked=false;$("fillMasks").checked=true;$("opacity").value="73";$("radius").value="19";saveToolSettings();$("tool").value="select";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";restoreToolSettings();if($("tool").value!=="eraser"||$("showMasks").checked||!$("fillMasks").checked||$("opacity").value!=="73"||$("radius").value!=="19")throw new Error("tool settings");if(previousSettings===null){localStorage.removeItem(TOOL_SETTINGS_KEY);$("tool").value="freehand";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";}else{localStorage.setItem(TOOL_SETTINGS_KEY,previousSettings);restoreToolSettings();}
+    const previousSettings=localStorage.getItem(TOOL_SETTINGS_KEY);$("showMasks").checked=false;$("fillMasks").checked=true;$("opacity").value="73";$("radius").value="19";saveToolSettings();$("tool").value="select";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";restoreToolSettings();if($("tool").value!=="freehand"||$("showMasks").checked||!$("fillMasks").checked||$("opacity").value!=="73"||$("radius").value!=="19")throw new Error("tool settings");if(previousSettings===null){localStorage.removeItem(TOOL_SETTINGS_KEY);$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";}else{localStorage.setItem(TOOL_SETTINGS_KEY,previousSettings);restoreToolSettings();}
     state.media=[{id:"selftest",name:"selftest.png",type:"image",element:null}];state.mediaIndex=0;state.sourceWidth=32;state.sourceHeight=32;
     state.activeClass="median";state.points=[{x:2,y:2},{x:12,y:2},{x:12,y:12},{x:2,y:12}];completePolygon();
     state.activeClass="artery";state.points=[{x:16,y:16},{x:28,y:16},{x:28,y:28},{x:16,y:28}];completePolygon();
