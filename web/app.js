@@ -3,6 +3,7 @@
 const DEFAULT_LOCATIONS = ["wrist", "mid-arm", "elbow"];
 const DEFAULT_NERVES = ["ulnar", "median", "radial", "plex", "lfcn", "peroneal", "fibular", "tibial", "sural", "proximal", "accessory", "quad", "sciatic", "unknown"];
 const DEFAULT_ANATOMY = ["muscle", "artery", "vein", "skin", "subcutaneous tissue", "cartilage", "tendon", "bone"];
+const HANDLE_DATABASE = "ultrai-annotator";
 const $ = (id) => document.getElementById(id);
 const canvas = $("canvas");
 const ctx = canvas.getContext("2d");
@@ -89,16 +90,25 @@ function addLabel(kind){
   target.push(value); rebuildAllChips();
 }
 
-async function pickFiles(types, multiple=true){
-  try{return await window.showOpenFilePicker({multiple,types});}
+function openHandleDatabase(){
+  return new Promise((resolve,reject)=>{const request=indexedDB.open(HANDLE_DATABASE,1);request.onupgradeneeded=()=>request.result.createObjectStore("handles");request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
+}
+async function rememberHandle(name,handle){
+  try{const database=await openHandleDatabase();await new Promise((resolve,reject)=>{const transaction=database.transaction("handles","readwrite");transaction.objectStore("handles").put(handle,name);transaction.oncomplete=resolve;transaction.onerror=()=>reject(transaction.error);});database.close();}catch{}
+}
+async function recalledHandle(name){
+  try{const database=await openHandleDatabase(),handle=await new Promise((resolve,reject)=>{const request=database.transaction("handles").objectStore("handles").get(name);request.onsuccess=()=>resolve(request.result||null);request.onerror=()=>reject(request.error);});database.close();return handle;}catch{return null;}
+}
+async function pickFiles(types,kind,multiple=true){
+  try{const previous=await recalledHandle(kind),options={id:`ultrai-${kind}`,multiple,types};if(previous)options.startIn=previous;const handles=await window.showOpenFilePicker(options);if(handles.length)await rememberHandle(kind,handles[0]);return handles;}
   catch(error){if(error.name!=="AbortError")alert(error.message);return [];}
 }
 async function loadImages(){
-  const handles=await pickFiles([{description:"Images",accept:{"image/*":[".png",".jpg",".jpeg",".bmp",".webp",".tif",".tiff"]}}]);
+  const handles=await pickFiles([{description:"Images",accept:{"image/*":[".png",".jpg",".jpeg",".bmp",".webp",".tif",".tiff"]}}],"images");
   if(!handles.length)return; await addMedia(handles,"image");
 }
 async function loadVideos(){
-  const handles=await pickFiles([{description:"Videos",accept:{"video/*":[".mp4",".webm",".mov",".m4v"]}}]);
+  const handles=await pickFiles([{description:"Videos",accept:{"video/*":[".mp4",".webm",".mov",".m4v"]}}],"videos");
   if(!handles.length)return; await addMedia(handles,"video");
 }
 async function addMedia(handles,type){
@@ -220,7 +230,9 @@ canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completeP
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;}else if(event.shiftKey)state.offsetX-=event.deltaY;else state.offsetY-=event.deltaY;render();},{passive:false});
 
-async function chooseOutput(){try{state.outputDir=await window.showDirectoryPicker({mode:"readwrite"});await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${state.outputDir.name}`);}catch(error){if(error.name!=="AbortError")alert(error.message);}}
+async function activateOutputDirectory(handle){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);}
+async function chooseOutput(){try{const previous=await recalledHandle("output"),options={id:"ultrai-output",mode:"readwrite"};if(previous)options.startIn=previous;const handle=await window.showDirectoryPicker(options);await rememberHandle("output",handle);await activateOutputDirectory(handle);}catch(error){if(error.name!=="AbortError")alert(error.message);}}
+async function restoreOutputDirectory(){const handle=await recalledHandle("output");if(!handle)return;try{if(await handle.queryPermission({mode:"readwrite"})==="granted")await activateOutputDirectory(handle);}catch{}}
 async function maskBlob(instance){const out=document.createElement("canvas");out.width=state.sourceWidth;out.height=state.sourceHeight;const oc=out.getContext("2d"),image=oc.createImageData(out.width,out.height);for(let i=0;i<instance.mask.length;i++){const v=instance.mask[i]?255:0,p=i*4;image.data[p]=v;image.data[p+1]=v;image.data[p+2]=v;image.data[p+3]=255;}oc.putImageData(image,0,0);return new Promise(resolve=>out.toBlob(resolve,"image/png"));}
 async function writeFile(dir,name,data){const handle=await dir.getFileHandle(name,{create:true});const stream=await handle.createWritable();await stream.write(data);await stream.close();}
 async function saveMasks(){
@@ -282,4 +294,4 @@ async function runSelfTest(){
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
   }catch(error){document.body.dataset.selftest=`fail:${error.message}`;}
 }
-window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");rebuildAllChips();resizeCanvas();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
+window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");rebuildAllChips();resizeCanvas();restoreOutputDirectory();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
