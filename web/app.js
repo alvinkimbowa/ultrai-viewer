@@ -18,7 +18,7 @@ const state = {
   instancesByKey: new Map(), undoByKey: new Map(), redoByKey: new Map(), nextIdsByKey: new Map(),
   sourceWidth: 0, sourceHeight: 0, frameIndex: 0, frameCount: 1, fps: 30,
   scale: 1, offsetX: 0, offsetY: 0, fit: true, drawing: false, moving: false,
-  points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, moveChanged: false, lastPointer: null,
+  points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, moveChanged: false, lastPointer: null, eraserCursor: null,
   selectedInstance: null, outputPromptReady: false,
 };
 let autoSavePromise=Promise.resolve();
@@ -182,7 +182,7 @@ function toImagePoint(event){const rect=canvas.getBoundingClientRect();const x=(
 function render(){
   ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle="#252525";ctx.fillRect(0,0,canvas.width,canvas.height);const item=mediaItem();if(!item)return;
   const source=item.type==="video"?video:item.element; if(source)ctx.drawImage(source,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);
-  if($("showMasks").checked)renderInstances();renderWorkingLine();
+  if($("showMasks").checked)renderInstances();renderWorkingLine();renderEraserOutline();
 }
 function isContourPixel(mask,i){
   if(!mask[i])return false;const x=i%state.sourceWidth,y=Math.floor(i/state.sourceWidth);return x<2||y<2||x>=state.sourceWidth-2||y>=state.sourceHeight-2||!mask[i-1]||!mask[i+1]||!mask[i-state.sourceWidth]||!mask[i+state.sourceWidth]||!mask[i-2]||!mask[i+2]||!mask[i-state.sourceWidth*2]||!mask[i+state.sourceWidth*2];
@@ -203,6 +203,9 @@ function renderInstances(){
   ox.putImageData(image,0,0);ctx.imageSmoothingEnabled=false;ctx.drawImage(overlay,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);ctx.imageSmoothingEnabled=true;
 }
 function renderWorkingLine(){if(state.points.length<1)return;ctx.strokeStyle=state.activeClass?classColor(state.activeClass):"#00ff00";ctx.lineWidth=2;ctx.beginPath();state.points.forEach((p,i)=>{const x=state.offsetX+p.x*state.scale,y=state.offsetY+p.y*state.scale;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}
+function renderEraserOutline(){
+  if($("tool").value!=="eraser"||!state.eraserCursor)return;const x=state.offsetX+state.eraserCursor.x*state.scale,y=state.offsetY+state.eraserCursor.y*state.scale,r=Number($("radius").value)*state.scale;ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle="#000";ctx.lineWidth=3;ctx.stroke();ctx.strokeStyle="#fff";ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
+}
 
 function maskFromPolygon(points){
   const temp=document.createElement("canvas");temp.width=state.sourceWidth;temp.height=state.sourceHeight;const tc=temp.getContext("2d");tc.fillStyle="white";tc.beginPath();points.forEach((p,i)=>i?tc.lineTo(p.x,p.y):tc.moveTo(p.x,p.y));tc.closePath();tc.fill();
@@ -242,14 +245,16 @@ canvas.addEventListener("pointerdown",(event)=>{
   else if(tool==="select"){state.selectedInstance=null;render();return;}
   else if(tool==="freehand"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.drawing=true;state.points=[p];}
   else if(tool==="polygon"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.points.push(p);state.drawing=true;render();}
-  else if(tool==="eraser"){state.drawing=true;state.lastPointer=p;eraseLine(p,p);render();}
+  else if(tool==="eraser"){state.drawing=true;state.lastPointer=p;state.eraserCursor=p;eraseLine(p,p);render();}
 });
 canvas.addEventListener("pointermove",(event)=>{
-  const p=toImagePoint(event);if(!p)return;const tool=$("tool").value;
+  const tool=$("tool").value,p=toImagePoint(event);if(tool==="eraser")state.eraserCursor=p;if(!p){render();return;}
   if(state.moving){const dx=p.x-state.moveAnchor.x,dy=p.y-state.moveAnchor.y;state.moveChanged=state.moveChanged||dx!==0||dy!==0;instances()[state.moveIndex].mask=translateMask(state.moveOriginal,dx,dy);render();}
   else if(state.drawing&&tool==="freehand"){state.points.push(p);render();}
   else if(state.drawing&&tool==="eraser"){eraseLine(state.lastPointer,p);state.lastPointer=p;render();}
+  else if(tool==="eraser")render();
 });
+canvas.addEventListener("pointerleave",()=>{if(!state.drawing&&state.eraserCursor){state.eraserCursor=null;render();}});
 canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;state.instancesByKey.set(annotationKey(),instances().filter(x=>x.mask.some(Boolean)));pushHistory();render();queueAutoSave();}});
 canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();const point=toImagePoint(event),index=point?hitInstance(point):-1;if(index>=0){selectInstance(index);showMaskContextMenu(event);}else{hideMaskContextMenu();if($("tool").value==="polygon")completePolygon();}});
@@ -320,7 +325,7 @@ $("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUr
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
 $("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>setFrame(state.frameIndex-1);$("nextFrame").onclick=()=>setFrame(state.frameIndex+1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>setFrame(Number($("frameSlider").value));$("play").onclick=togglePlayback;
 $("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.selectedInstance=null;state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
-for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=saveToolSettings;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
+for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=()=>{saveToolSettings();render();};$("tool").onchange=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 $("deleteMask").onclick=deleteSelectedInstance;document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
 document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")setFrame(state.frameIndex-1);else if(event.key==="ArrowRight")setFrame(state.frameIndex+1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
 async function runSelfTest(){
