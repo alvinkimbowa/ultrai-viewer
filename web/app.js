@@ -22,6 +22,8 @@ const state = {
   selectedInstance: null, outputPromptReady: false,
 };
 let autoSavePromise=Promise.resolve();
+let wheelFrameSteps=0;
+let wheelFrameRunning=false;
 
 function status(text) { $("status").textContent = text; }
 function sizeLaunchWindow(){
@@ -136,7 +138,7 @@ function rebuildMediaList(){
   select.disabled=!state.media.length; updateNavigation();
 }
 async function openMedia(index){
-  if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo(); state.mediaIndex=index; $("mediaList").value=String(index);
+  if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo();wheelFrameSteps=0;state.mediaIndex=index; $("mediaList").value=String(index);
   state.activeClass=null;state.location=null;state.selectedInstance=null;state.outputPromptReady=false;updateChipSelection();
   const item=mediaItem();
   if(item.type==="image"){
@@ -165,6 +167,12 @@ async function setFrame(index){
   }
   if(!state.undoByKey.has(annotationKey()))resetHistory();updateNavigation();render();
 }
+function queueWheelFrame(direction){
+  wheelFrameSteps=Math.max(-12,Math.min(12,wheelFrameSteps+direction));if(!wheelFrameRunning)processWheelFrames();
+}
+async function processWheelFrames(){
+  wheelFrameRunning=true;pauseVideo();while(wheelFrameSteps!==0&&mediaItem()?.type==="video"){const direction=Math.sign(wheelFrameSteps),previous=state.frameIndex;wheelFrameSteps-=direction;await setFrame(previous+direction);if(state.frameIndex===previous)wheelFrameSteps=0;}wheelFrameRunning=false;
+}
 function updateNavigation(){
   const has=!!mediaItem(), isVideo=has&&mediaItem().type==="video";
   $("prevMedia").disabled=!has||state.mediaIndex<=0;$("nextMedia").disabled=!has||state.mediaIndex>=state.media.length-1;
@@ -176,8 +184,11 @@ function pauseVideo(){video.pause();$("play").textContent="▶";}
 async function togglePlayback(){if(video.paused){await flushAutoSave();video.play();$("play").textContent="❚❚";requestAnimationFrame(playLoop);}else pauseVideo();}
 function playLoop(){if(video.paused)return;state.frameIndex=Math.min(state.frameCount-1,Math.floor(video.currentTime*state.fps));updateNavigation();render();requestAnimationFrame(playLoop);}
 
-function resizeCanvas(){const rect=$("stage").getBoundingClientRect();canvas.width=Math.max(1,Math.round(rect.width));canvas.height=Math.max(1,Math.round(rect.height));if(state.fit)fitView();render();}
+function resizeCanvas(){const rect=$("stage").getBoundingClientRect();canvas.width=Math.max(1,Math.round(rect.width));canvas.height=Math.max(1,Math.round(rect.height));if(state.fit)fitView();else clampView();render();}
 function fitView(){if(!state.sourceWidth||!state.sourceHeight)return;state.scale=Math.min(canvas.width/state.sourceWidth,canvas.height/state.sourceHeight);state.offsetX=(canvas.width-state.sourceWidth*state.scale)/2;state.offsetY=(canvas.height-state.sourceHeight*state.scale)/2;state.fit=true;}
+function clampView(){
+  if(!state.sourceWidth||!state.sourceHeight)return;const width=state.sourceWidth*state.scale,height=state.sourceHeight*state.scale;state.offsetX=width<=canvas.width?(canvas.width-width)/2:Math.max(canvas.width-width,Math.min(0,state.offsetX));state.offsetY=height<=canvas.height?(canvas.height-height)/2:Math.max(canvas.height-height,Math.min(0,state.offsetY));
+}
 function toImagePoint(event){const rect=canvas.getBoundingClientRect();const x=(event.clientX-rect.left-state.offsetX)/state.scale,y=(event.clientY-rect.top-state.offsetY)/state.scale;if(x<0||y<0||x>=state.sourceWidth||y>=state.sourceHeight)return null;return{x:Math.floor(x),y:Math.floor(y)};}
 function render(){
   ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle="#252525";ctx.fillRect(0,0,canvas.width,canvas.height);const item=mediaItem();if(!item)return;
@@ -258,7 +269,7 @@ canvas.addEventListener("pointerleave",()=>{if(!state.drawing&&state.eraserCurso
 canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;state.instancesByKey.set(annotationKey(),instances().filter(x=>x.mask.some(Boolean)));pushHistory();render();queueAutoSave();}});
 canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();const point=toImagePoint(event),index=point?hitInstance(point):-1;if(index>=0){selectInstance(index);showMaskContextMenu(event);}else{hideMaskContextMenu();if($("tool").value==="polygon")completePolygon();}});
-canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;}else if(event.shiftKey)state.offsetX-=event.deltaY;else state.offsetY-=event.deltaY;render();},{passive:false});
+canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;clampView();render();}else if(mediaItem().type==="video"&&event.deltaY!==0)queueWheelFrame(Math.sign(event.deltaY));},{passive:false});
 
 async function activateOutputDirectory(handle,saveCurrent=true){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);if(saveCurrent)queueAutoSave();}
 async function chooseOutput(){try{const previous=await recalledHandle("output"),options={id:"ultrai-output",mode:"readwrite"};if(previous)options.startIn=previous;const handle=await window.showDirectoryPicker(options);await rememberHandle("output",handle);await activateOutputDirectory(handle);}catch(error){if(error.name!=="AbortError")alert(error.message);}}
