@@ -24,6 +24,8 @@ const state = {
 let autoSavePromise=Promise.resolve();
 let wheelFrameSteps=0;
 let wheelFrameRunning=false;
+let sliderPreviewFrame=null;
+let sliderPreviewRequest=0;
 
 function status(text) { $("status").textContent = text; }
 function sizeLaunchWindow(){
@@ -138,7 +140,7 @@ function rebuildMediaList(){
   select.disabled=!state.media.length; updateNavigation();
 }
 async function openMedia(index){
-  if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo();wheelFrameSteps=0;state.mediaIndex=index; $("mediaList").value=String(index);
+  if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo();wheelFrameSteps=0;sliderPreviewFrame=null;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;state.mediaIndex=index; $("mediaList").value=String(index);
   state.activeClass=null;state.location=null;state.selectedInstance=null;state.outputPromptReady=false;updateChipSelection();
   const item=mediaItem();
   if(item.type==="image"){
@@ -156,10 +158,10 @@ async function openMedia(index){
   state.fit=true; resizeCanvas(); await loadSavedMasksForCurrent(); if(!state.undoByKey.has(annotationKey()))resetHistory(); updateNavigation(); render(); status(`Loaded ${item.name}`);
 }
 function once(target,event){return new Promise((resolve,reject)=>{const done=()=>{cleanup();resolve();};const fail=()=>{cleanup();reject(new Error(`Failed waiting for ${event}`));};const cleanup=()=>{target.removeEventListener(event,done);target.removeEventListener("error",fail);};target.addEventListener(event,done,{once:true});target.addEventListener("error",fail,{once:true});setTimeout(done,5000);});}
-async function setFrame(index){
+async function setFrame(index,propagate=true,preparedSource=null,alreadyAtTarget=false){
   const item=mediaItem();if(!item||item.type!=="video")return; index=Math.max(0,Math.min(state.frameCount-1,index));await flushAutoSave();
-  const previousIndex=state.frameIndex,sourceGray=index===previousIndex+1?videoGrayFrame():null,sourceInstances=sourceGray?cloneInstances(instances()):[];
-  state.frameIndex=index;state.selectedInstance=null;video.currentTime=Math.min(video.duration||0,index/state.fps);await once(video,"seeked").catch(()=>{});
+  sliderPreviewFrame=null;const previousIndex=state.frameIndex,sourceGray=propagate&&index===previousIndex+1?(preparedSource?.gray||videoGrayFrame()):null,sourceInstances=sourceGray?(preparedSource?.instances||cloneInstances(instances())):[];
+  state.frameIndex=index;state.selectedInstance=null;if(!alreadyAtTarget){const targetTime=Math.min(video.duration||0,index/state.fps);if(Math.abs(video.currentTime-targetTime)>.001)video.currentTime=targetTime;if(video.seeking)await once(video,"seeked").catch(()=>{});}
   const loaded=await loadSavedMasksForCurrent();
   if(!loaded&&sourceGray&&sourceInstances.length&&(!state.instancesByKey.has(annotationKey())||instances().length===0)){
     const targetGray=videoGrayFrame(),propagated=sourceInstances.map(instance=>({...instance,mask:propagateMask(instance.mask,sourceGray,targetGray)}));
@@ -171,8 +173,18 @@ function queueWheelFrame(direction){
   wheelFrameSteps=Math.max(-12,Math.min(12,wheelFrameSteps+direction));if(!wheelFrameRunning)processWheelFrames();
 }
 async function processWheelFrames(){
-  wheelFrameRunning=true;pauseVideo();while(wheelFrameSteps!==0&&mediaItem()?.type==="video"){const direction=Math.sign(wheelFrameSteps),previous=state.frameIndex;wheelFrameSteps-=direction;await setFrame(previous+direction);if(state.frameIndex===previous)wheelFrameSteps=0;}wheelFrameRunning=false;
+  wheelFrameRunning=true;pauseVideo();while(wheelFrameSteps!==0&&mediaItem()?.type==="video"){const direction=Math.sign(wheelFrameSteps),previous=state.frameIndex;wheelFrameSteps-=direction;if(direction>0)await showNextFrame();else await setFrame(previous-1);if(state.frameIndex===previous)wheelFrameSteps=0;}wheelFrameRunning=false;
 }
+function playNextDecodedFrame(){
+  if(typeof video.requestVideoFrameCallback!=="function")return Promise.resolve(false);return new Promise(resolve=>{const start=video.currentTime;let settled=false,callbackId=0;const finish=success=>{if(settled)return;settled=true;clearTimeout(timeout);if(callbackId)video.cancelVideoFrameCallback(callbackId);pauseVideo();resolve(success);};const check=(_now,metadata)=>{if(settled)return;if(metadata.mediaTime>start+.0001)return finish(true);callbackId=video.requestVideoFrameCallback(check);};const timeout=setTimeout(()=>finish(false),500);callbackId=video.requestVideoFrameCallback(check);video.play().catch(()=>finish(false));});
+}
+async function showNextFrame(){
+  const item=mediaItem();if(!item||item.type!=="video"||state.frameIndex>=state.frameCount-1)return;await flushAutoSave();const source={gray:videoGrayFrame(),instances:cloneInstances(instances())},advanced=await playNextDecodedFrame();if(advanced)await setFrame(state.frameIndex+1,true,source,true);else await setFrame(state.frameIndex+1);
+}
+function previewSliderFrame(index){
+  const item=mediaItem();if(!item||item.type!=="video")return;pauseVideo();sliderPreviewFrame=Math.max(0,Math.min(state.frameCount-1,index));$("frameLabel").textContent=`${sliderPreviewFrame+1} / ${state.frameCount}`;if(sliderPreviewRequest)return;sliderPreviewRequest=requestAnimationFrame(()=>{sliderPreviewRequest=0;if(sliderPreviewFrame===null)return;const time=Math.min(video.duration||0,sliderPreviewFrame/state.fps);if(typeof video.fastSeek==="function")video.fastSeek(time);else video.currentTime=time;});
+}
+async function commitSliderFrame(){const index=sliderPreviewFrame;if(index===null)return;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;sliderPreviewFrame=null;await setFrame(index,false);}
 function updateNavigation(){
   const has=!!mediaItem(), isVideo=has&&mediaItem().type==="video";
   $("prevMedia").disabled=!has||state.mediaIndex<=0;$("nextMedia").disabled=!has||state.mediaIndex>=state.media.length-1;
@@ -193,7 +205,7 @@ function toImagePoint(event){const rect=canvas.getBoundingClientRect();const x=(
 function render(){
   ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle="#252525";ctx.fillRect(0,0,canvas.width,canvas.height);const item=mediaItem();if(!item)return;
   const source=item.type==="video"?video:item.element; if(source)ctx.drawImage(source,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);
-  if($("showMasks").checked)renderInstances();renderWorkingLine();renderEraserOutline();
+  if($("showMasks").checked&&sliderPreviewFrame===null)renderInstances();renderWorkingLine();renderEraserOutline();
 }
 function isContourPixel(mask,i){
   if(!mask[i])return false;const x=i%state.sourceWidth,y=Math.floor(i/state.sourceWidth);return x<2||y<2||x>=state.sourceWidth-2||y>=state.sourceHeight-2||!mask[i-1]||!mask[i+1]||!mask[i-state.sourceWidth]||!mask[i+state.sourceWidth]||!mask[i-2]||!mask[i+2]||!mask[i-state.sourceWidth*2]||!mask[i+state.sourceWidth*2];
@@ -334,11 +346,12 @@ async function loadSavedMasksForCurrent(){
 $("loadImages").onclick=loadImages;$("loadVideos").onclick=loadVideos;$("chooseOutput").onclick=chooseOutput;$("saveMasks").onclick=saveMasks;
 $("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.selectedInstance=null;state.instancesByKey.clear();rebuildMediaList();render();status("Cleared");};
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
-$("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>setFrame(state.frameIndex-1);$("nextFrame").onclick=()=>setFrame(state.frameIndex+1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>setFrame(Number($("frameSlider").value));$("play").onclick=togglePlayback;
+$("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>queueWheelFrame(-1);$("nextFrame").onclick=()=>queueWheelFrame(1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>previewSliderFrame(Number($("frameSlider").value));$("frameSlider").onchange=commitSliderFrame;$("play").onclick=togglePlayback;
 $("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.selectedInstance=null;state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
 for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=()=>{saveToolSettings();render();};$("tool").onchange=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 $("deleteMask").onclick=deleteSelectedInstance;document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
-document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")setFrame(state.frameIndex-1);else if(event.key==="ArrowRight")setFrame(state.frameIndex+1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
+video.addEventListener("seeked",()=>{if(sliderPreviewFrame!==null)render();});
+document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")queueWheelFrame(-1);else if(event.key==="ArrowRight")queueWheelFrame(1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
 async function runSelfTest(){
   try{
     const previousSettings=localStorage.getItem(TOOL_SETTINGS_KEY);$("showMasks").checked=false;$("fillMasks").checked=true;$("opacity").value="73";$("radius").value="19";saveToolSettings();$("tool").value="select";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";restoreToolSettings();if($("tool").value!=="freehand"||$("showMasks").checked||!$("fillMasks").checked||$("opacity").value!=="73"||$("radius").value!=="19")throw new Error("tool settings");if(previousSettings===null){localStorage.removeItem(TOOL_SETTINGS_KEY);$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";}else{localStorage.setItem(TOOL_SETTINGS_KEY,previousSettings);restoreToolSettings();}
