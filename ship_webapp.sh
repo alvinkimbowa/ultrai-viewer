@@ -3,10 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
-BUNDLE_NAME="ultrai-annotator-web-v$VERSION"
+BUNDLE_NAME="UltrAiViewer-web-v$VERSION"
 OUTPUT_DIR="$ROOT_DIR/dist"
-TAR_PATH="$OUTPUT_DIR/$BUNDLE_NAME.tar.gz"
-ZIP_PATH="$OUTPUT_DIR/$BUNDLE_NAME.zip"
+TAR_PATH="$OUTPUT_DIR/$BUNDLE_NAME-linux-macos.tar.gz"
+ZIP_PATH="$OUTPUT_DIR/$BUNDLE_NAME-windows.zip"
 
 for path in README.md VERSION web start_web.sh start_web.command start_web.bat; do
   if [[ ! -e "$ROOT_DIR/$path" ]]; then
