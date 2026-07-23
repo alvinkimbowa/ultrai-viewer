@@ -158,15 +158,11 @@ async function openMedia(index){
   state.fit=true; resizeCanvas(); await loadSavedMasksForCurrent(); if(!state.undoByKey.has(annotationKey()))resetHistory(); updateNavigation(); render(); status(`Loaded ${item.name}`);
 }
 function once(target,event){return new Promise((resolve,reject)=>{const done=()=>{cleanup();resolve();};const fail=()=>{cleanup();reject(new Error(`Failed waiting for ${event}`));};const cleanup=()=>{target.removeEventListener(event,done);target.removeEventListener("error",fail);};target.addEventListener(event,done,{once:true});target.addEventListener("error",fail,{once:true});setTimeout(done,5000);});}
-async function setFrame(index,propagate=true,preparedSource=null,alreadyAtTarget=false){
+async function setFrame(index,alreadyAtTarget=false){
   const item=mediaItem();if(!item||item.type!=="video")return; index=Math.max(0,Math.min(state.frameCount-1,index));await flushAutoSave();
-  sliderPreviewFrame=null;const previousIndex=state.frameIndex,sourceGray=propagate&&index===previousIndex+1?(preparedSource?.gray||videoGrayFrame()):null,sourceInstances=sourceGray?(preparedSource?.instances||cloneInstances(instances())):[];
+  sliderPreviewFrame=null;
   state.frameIndex=index;state.selectedInstance=null;if(!alreadyAtTarget){const targetTime=Math.min(video.duration||0,index/state.fps);if(Math.abs(video.currentTime-targetTime)>.001)video.currentTime=targetTime;if(video.seeking)await once(video,"seeked").catch(()=>{});}
-  const loaded=await loadSavedMasksForCurrent();
-  if(!loaded&&sourceGray&&sourceInstances.length&&(!state.instancesByKey.has(annotationKey())||instances().length===0)){
-    const targetGray=videoGrayFrame(),propagated=sourceInstances.map(instance=>({...instance,mask:propagateMask(instance.mask,sourceGray,targetGray)}));
-    state.instancesByKey.set(annotationKey(),propagated);restoreNextIds(propagated);status(`Propagated ${propagated.length} mask(s) to frame ${index+1}`);queueAutoSave();
-  }
+  await loadSavedMasksForCurrent();
   if(!state.undoByKey.has(annotationKey()))resetHistory();updateNavigation();render();
 }
 function queueWheelFrame(direction){
@@ -179,12 +175,12 @@ function playNextDecodedFrame(){
   if(typeof video.requestVideoFrameCallback!=="function")return Promise.resolve(false);return new Promise(resolve=>{const start=video.currentTime;let settled=false,callbackId=0;const finish=success=>{if(settled)return;settled=true;clearTimeout(timeout);if(callbackId)video.cancelVideoFrameCallback(callbackId);pauseVideo();resolve(success);};const check=(_now,metadata)=>{if(settled)return;if(metadata.mediaTime>start+.0001)return finish(true);callbackId=video.requestVideoFrameCallback(check);};const timeout=setTimeout(()=>finish(false),500);callbackId=video.requestVideoFrameCallback(check);video.play().catch(()=>finish(false));});
 }
 async function showNextFrame(){
-  const item=mediaItem();if(!item||item.type!=="video"||state.frameIndex>=state.frameCount-1)return;await flushAutoSave();const source={gray:videoGrayFrame(),instances:cloneInstances(instances())},advanced=await playNextDecodedFrame();if(advanced)await setFrame(state.frameIndex+1,true,source,true);else await setFrame(state.frameIndex+1);
+  const item=mediaItem();if(!item||item.type!=="video"||state.frameIndex>=state.frameCount-1)return;await flushAutoSave();const advanced=await playNextDecodedFrame();await setFrame(state.frameIndex+1,advanced);
 }
 function previewSliderFrame(index){
   const item=mediaItem();if(!item||item.type!=="video")return;pauseVideo();sliderPreviewFrame=Math.max(0,Math.min(state.frameCount-1,index));$("frameLabel").textContent=`${sliderPreviewFrame+1} / ${state.frameCount}`;if(sliderPreviewRequest)return;sliderPreviewRequest=requestAnimationFrame(()=>{sliderPreviewRequest=0;if(sliderPreviewFrame===null)return;const time=Math.min(video.duration||0,sliderPreviewFrame/state.fps);if(typeof video.fastSeek==="function")video.fastSeek(time);else video.currentTime=time;});
 }
-async function commitSliderFrame(){const index=sliderPreviewFrame;if(index===null)return;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;sliderPreviewFrame=null;await setFrame(index,false);}
+async function commitSliderFrame(){const index=sliderPreviewFrame;if(index===null)return;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;sliderPreviewFrame=null;await setFrame(index);}
 function updateNavigation(){
   const has=!!mediaItem(), isVideo=has&&mediaItem().type==="video";
   $("prevMedia").disabled=!has||state.mediaIndex<=0;$("nextMedia").disabled=!has||state.mediaIndex>=state.media.length-1;
@@ -247,16 +243,6 @@ function hideMaskContextMenu(){$("maskContextMenu").hidden=true;}
 function showMaskContextMenu(event){const menu=$("maskContextMenu");menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;menu.hidden=false;}
 function deleteSelectedInstance(){const index=selectedInstanceIndex();if(index<0)return false;const [removed]=instances().splice(index,1);state.selectedInstance=null;hideMaskContextMenu();pushHistory();render();status(`Deleted ${removed.className} ${removed.id}`);queueAutoSave();return true;}
 function translateMask(mask,dx,dy){const moved=new Uint8Array(mask.length);for(let y=0;y<state.sourceHeight;y++)for(let x=0;x<state.sourceWidth;x++){if(!mask[y*state.sourceWidth+x])continue;const nx=x+dx,ny=y+dy;if(nx>=0&&ny>=0&&nx<state.sourceWidth&&ny<state.sourceHeight)moved[ny*state.sourceWidth+nx]=1;}return moved;}
-function videoGrayFrame(){
-  const frame=document.createElement("canvas");frame.width=state.sourceWidth;frame.height=state.sourceHeight;const fc=frame.getContext("2d",{willReadFrequently:true});fc.drawImage(video,0,0,frame.width,frame.height);const rgba=fc.getImageData(0,0,frame.width,frame.height).data,gray=new Uint8Array(frame.width*frame.height);for(let i=0;i<gray.length;i++)gray[i]=(rgba[i*4]*77+rgba[i*4+1]*150+rgba[i*4+2]*29)>>8;return gray;
-}
-function propagateMask(mask,source,target){
-  let minX=state.sourceWidth,minY=state.sourceHeight,maxX=-1,maxY=-1;for(let i=0;i<mask.length;i++)if(mask[i]){const x=i%state.sourceWidth,y=Math.floor(i/state.sourceWidth);minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);}if(maxX<0)return new Uint8Array(mask);
-  const step=Math.max(1,Math.floor(Math.max(maxX-minX,maxY-minY)/40)),radius=12;let bestDx=0,bestDy=0,bestScore=Infinity;
-  for(let dy=-radius;dy<=radius;dy++)for(let dx=-radius;dx<=radius;dx++){let score=0,count=0;for(let y=minY;y<=maxY;y+=step)for(let x=minX;x<=maxX;x+=step){const i=y*state.sourceWidth+x;if(!mask[i])continue;const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=state.sourceWidth||ny>=state.sourceHeight)continue;score+=Math.abs(source[i]-target[ny*state.sourceWidth+nx]);count++;}if(count&&score/count<bestScore){bestScore=score/count;bestDx=dx;bestDy=dy;}}
-  return translateMask(mask,bestDx,bestDy);
-}
-function restoreNextIds(list){const ids=new Map();for(const instance of list)ids.set(instance.className,Math.max(ids.get(instance.className)||1,instance.id+1));state.nextIdsByKey.set(annotationKey(),ids);}
 function eraseLine(a,b){
   const radius=Number($("radius").value),steps=Math.max(1,Math.ceil(Math.hypot(b.x-a.x,b.y-a.y)));
   for(let step=0;step<=steps;step++){const cx=Math.round(a.x+(b.x-a.x)*step/steps),cy=Math.round(a.y+(b.y-a.y)*step/steps);for(let y=Math.max(0,cy-radius);y<=Math.min(state.sourceHeight-1,cy+radius);y++)for(let x=Math.max(0,cx-radius);x<=Math.min(state.sourceWidth-1,cx+radius);x++)if((x-cx)**2+(y-cy)**2<=radius**2)for(const item of instances())item.mask[y*state.sourceWidth+x]=0;}
@@ -361,7 +347,6 @@ async function runSelfTest(){
     if(instances().length!==2||instances()[0].id!==1||instances()[1].id!==1)throw new Error("instance creation");
     if(classColor("median")===classColor("artery"))throw new Error("class colors");undo();if(instances().length!==1)throw new Error("undo");redo();if(instances().length!==2)throw new Error("redo");
     selectInstance(0);if(selectedInstanceIndex()!==0)throw new Error("mask selection");deleteSelectedInstance();if(instances().length!==1)throw new Error("mask deletion");undo();if(instances().length!==2)throw new Error("delete undo");
-    const source=new Uint8Array(32*32),target=new Uint8Array(32*32),moving=new Uint8Array(32*32);for(let y=8;y<14;y++)for(let x=7;x<13;x++){source[y*32+x]=200;target[(y+2)*32+x+3]=200;moving[y*32+x]=1;}const shifted=propagateMask(moving,source,target);if(!shifted[(10+2)*32+10+3])throw new Error("frame propagation");
     if(typeof UTIF!=="object"||typeof UTIF.decode!=="function")throw new Error("TIFF support");
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
   }catch(error){document.body.dataset.selftest=`fail:${error.message}`;}
