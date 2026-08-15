@@ -494,8 +494,8 @@ class MainWindow(QMainWindow):
         return panel
 
     def _wire_actions(self):
-        self.open_image_btn.clicked.connect(self._load_single_image)
-        self.load_image_action.triggered.connect(self._load_single_image)
+        self.open_image_btn.clicked.connect(self._load_sequence)
+        self.load_image_action.triggered.connect(self._load_sequence)
         self.video_btn.clicked.connect(self._load_video)
         self.load_video_action.triggered.connect(self._load_video)
         self.open_mask_btn.clicked.connect(self.canvas.load_mask_dialog)
@@ -1512,18 +1512,22 @@ class MainWindow(QMainWindow):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         layout.addRow(buttons)
-        buttons.accepted.connect(dialog.accept)
+
+        def validate_and_accept():
+            if not selected_paths:
+                QMessageBox.information(dialog, "Missing fields", "Select input images or a folder.")
+                return
+            if not output_line.text().strip():
+                QMessageBox.information(dialog, "Missing fields", "Select an output folder.")
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(validate_and_accept)
         buttons.rejected.connect(dialog.reject)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        if not selected_paths:
-            QMessageBox.information(self, "Missing fields", "Select input images or a folder.")
-            return None
         output_dir = output_line.text().strip()
-        if not output_dir:
-            QMessageBox.information(self, "Missing fields", "Select an output folder.")
-            return None
         self._last_image_output_dir = output_dir
         if selected_paths:
             self._last_image_input_dir = str(Path(selected_paths[0]).parent)
@@ -1604,18 +1608,22 @@ class MainWindow(QMainWindow):
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         layout.addRow(buttons)
-        buttons.accepted.connect(dialog.accept)
+
+        def validate_and_accept():
+            if not selected_paths:
+                QMessageBox.information(dialog, "Missing fields", "Select input videos or a folder.")
+                return
+            if not output_line.text().strip():
+                QMessageBox.information(dialog, "Missing fields", "Select an output folder.")
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(validate_and_accept)
         buttons.rejected.connect(dialog.reject)
 
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        if not selected_paths:
-            QMessageBox.information(self, "Missing fields", "Select input videos or a folder.")
-            return None
         output_dir = output_line.text().strip()
-        if not output_dir:
-            QMessageBox.information(self, "Missing fields", "Select an output folder.")
-            return None
         self._last_video_output_dir = output_dir
         if selected_paths:
             self._last_video_input_dir = str(Path(selected_paths[0]).parent)
