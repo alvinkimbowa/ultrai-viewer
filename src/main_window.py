@@ -739,17 +739,37 @@ class MainWindow(QMainWindow):
         if self._mode != "video" or self._video_frame_index < 0:
             QMessageBox.information(self, "No video", "Load a video first.")
             return
-        existing_path = self._video_mask_path(self._video_path, self._video_frame_index)
-        if existing_path and existing_path.exists():
-            if not self._confirm_overwrite_existing(1, "frame segmentation"):
+        selected_index = self.video_combo.currentIndex()
+        if selected_index < 0 or selected_index >= len(self._video_paths):
+            QMessageBox.information(self, "No video", "Select a video first.")
+            return
+        selected_video_path = self._video_paths[selected_index]
+        existing_path = self._video_mask_path(
+            selected_video_path,
+            self._video_frame_index,
+        )
+        has_existing_segmentation = bool(
+            (existing_path and existing_path.exists()) or self._canvas_has_roi()
+        )
+        if has_existing_segmentation:
+            scope = (
+                f"{Path(selected_video_path).name}, "
+                f"frame {self._video_frame_index + 1}"
+            )
+            if not self._confirm_overwrite_existing(
+                1,
+                "frame segmentation",
+                scope,
+            ):
                 return
         self._run_inference()
 
-    def _confirm_overwrite_existing(self, count, description):
+    def _confirm_overwrite_existing(self, count, description, scope=""):
+        scope_text = f" for {scope}" if scope else ""
         choice = QMessageBox.question(
             self,
             "Existing segmentations",
-            f"Found {count} existing {description}(s).\n\n"
+            f"Found {count} existing {description}(s){scope_text}.\n\n"
             "Overwrite them?\n\n"
             "Yes: overwrite existing masks.\n"
             "No: keep existing masks and segment only missing items.",
@@ -831,10 +851,19 @@ class MainWindow(QMainWindow):
         self._batch_thread.start()
 
     def _run_current_video_inference(self):
-        if self._mode != "video" or not self._video_path:
+        if self._mode != "video":
             QMessageBox.information(self, "No video", "Load a video first.")
             return
-        self._start_video_batch_inference([self._video_path], "Segment video")
+        selected_index = self.video_combo.currentIndex()
+        if selected_index < 0 or selected_index >= len(self._video_paths):
+            QMessageBox.information(self, "No video", "Select a video first.")
+            return
+        selected_video_path = self._video_paths[selected_index]
+        self._start_video_batch_inference(
+            [selected_video_path],
+            "Segment video",
+            overwrite_scope=Path(selected_video_path).name,
+        )
 
     def _run_all_videos_inference(self):
         if self._mode != "video" or not self._video_paths:
@@ -842,7 +871,7 @@ class MainWindow(QMainWindow):
             return
         self._start_video_batch_inference(list(self._video_paths), "Segment all videos")
 
-    def _start_video_batch_inference(self, video_paths, title):
+    def _start_video_batch_inference(self, video_paths, title, overwrite_scope=""):
         if not self._video_output_dir:
             QMessageBox.information(self, "No output folder", "Select an output folder first.")
             return
@@ -866,6 +895,7 @@ class MainWindow(QMainWindow):
             overwrite_existing = self._confirm_overwrite_existing(
                 existing_count,
                 "frame segmentation",
+                overwrite_scope,
             )
             if overwrite_existing is None:
                 return
