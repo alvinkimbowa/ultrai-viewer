@@ -542,7 +542,17 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
             if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-                if event.modifiers() != Qt.KeyboardModifier.NoModifier or self._mode != "video":
+                if event.modifiers() != Qt.KeyboardModifier.NoModifier:
+                    return False
+                if not self.isActiveWindow():
+                    return False
+                if self._mode == "sequence":
+                    if event.key() == Qt.Key.Key_Left:
+                        self._show_previous_sequence()
+                    else:
+                        self._show_next_sequence()
+                    return True
+                if self._mode != "video":
                     return False
                 if event.isAutoRepeat():
                     return True
