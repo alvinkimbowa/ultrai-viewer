@@ -1,7 +1,7 @@
 "use strict";
 
 const DEFAULT_LOCATIONS = ["wrist", "mid-arm", "elbow"];
-const DEFAULT_NERVES = ["ulnar", "median", "radial", "plex", "lfcn", "peroneal", "fibular", "tibial", "sural", "proximal", "accessory", "quad", "sciatic", "unknown"];
+const DEFAULT_NERVES = ["median", "ulnar", "radial", "plex", "lfcn", "peroneal", "fibular", "tibial", "sural", "proximal", "accessory", "quad", "sciatic", "unknown"];
 const DEFAULT_ANATOMY = ["muscle", "artery", "vein", "skin", "subcutaneous tissue", "cartilage", "tendon", "bone"];
 const HANDLE_DATABASE = "ultrai-annotator";
 const TOOL_SETTINGS_KEY = "ultrai-tool-settings";
