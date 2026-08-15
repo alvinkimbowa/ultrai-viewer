@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QMessageBox,
     QProgressDialog,
+    QProgressBar,
     QFileDialog,
     QDialog,
     QLineEdit,
@@ -351,6 +352,15 @@ class MainWindow(QMainWindow):
         configure_button(self.save_btn)
         layout.addWidget(self.save_btn)
 
+        image_segment_row = QHBoxLayout()
+        self.run_btn = QPushButton("Segment")
+        configure_button(self.run_btn)
+        image_segment_row.addWidget(self.run_btn)
+        self.run_batch_btn = QPushButton("Batch segment")
+        configure_button(self.run_batch_btn)
+        image_segment_row.addWidget(self.run_batch_btn)
+        layout.addLayout(image_segment_row)
+
         layout.addSpacing(16)
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
@@ -383,6 +393,19 @@ class MainWindow(QMainWindow):
         configure_button(self.save_video_btn)
         layout.addWidget(self.save_video_btn)
 
+        video_segment_row = QHBoxLayout()
+        self.segment_frame_btn = QPushButton("Segment frame")
+        configure_button(self.segment_frame_btn)
+        video_segment_row.addWidget(self.segment_frame_btn)
+        self.segment_video_btn = QPushButton("Segment video")
+        configure_button(self.segment_video_btn)
+        video_segment_row.addWidget(self.segment_video_btn)
+        layout.addLayout(video_segment_row)
+
+        self.batch_video_segment_btn = QPushButton("Segment all videos")
+        configure_button(self.batch_video_segment_btn)
+        layout.addWidget(self.batch_video_segment_btn)
+
         layout.addSpacing(16)
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.Shape.HLine)
@@ -402,17 +425,6 @@ class MainWindow(QMainWindow):
         self.device_picker.setEnabled(False)
         model_device_row.addWidget(self.device_picker)
         layout.addLayout(model_device_row)
-
-        layout.addSpacing(3)
-
-        segment_row = QHBoxLayout()
-        self.run_btn = QPushButton("Segment")
-        configure_button(self.run_btn)
-        segment_row.addWidget(self.run_btn)
-        self.run_batch_btn = QPushButton("Batch segment")
-        configure_button(self.run_batch_btn)
-        segment_row.addWidget(self.run_batch_btn)
-        layout.addLayout(segment_row)
 
         layout.addSpacing(16)
         sep4 = QFrame()
@@ -502,10 +514,13 @@ class MainWindow(QMainWindow):
         self.open_mask_btn.clicked.connect(self.canvas.load_mask_dialog)
         self.load_mask_action.triggered.connect(self.canvas.load_mask_dialog)
         self.exit_action.triggered.connect(self.close)
-        self.run_btn.clicked.connect(self._run_inference)
-        self.segment_action.triggered.connect(self._run_inference)
+        self.run_btn.clicked.connect(self._run_current_image_inference)
+        self.segment_action.triggered.connect(self._run_current_image_inference)
         self.run_batch_btn.clicked.connect(self._run_batch_inference)
         self.segment_batch_action.triggered.connect(self._run_batch_inference)
+        self.segment_frame_btn.clicked.connect(self._run_current_video_frame_inference)
+        self.segment_video_btn.clicked.connect(self._run_current_video_inference)
+        self.batch_video_segment_btn.clicked.connect(self._run_all_videos_inference)
         self.save_btn.clicked.connect(self._save_current_mask)
         self.save_mask_action.triggered.connect(self._save_current_mask)
         self.save_video_btn.clicked.connect(self._save_video_masks)
@@ -708,6 +723,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, "brush_radius_label"):
             self.brush_radius_label.setText(f"{int(value)} px")
 
+    def _run_current_image_inference(self):
+        if self._mode != "sequence":
+            QMessageBox.information(self, "No image", "Load one or more images first.")
+            return
+        self._run_inference()
+
+    def _run_current_video_frame_inference(self):
+        if self._mode != "video" or self._video_frame_index < 0:
+            QMessageBox.information(self, "No video", "Load a video first.")
+            return
+        self._run_inference()
+
     def _run_batch_inference(self):
         if self._mode == "video":
             QMessageBox.information(
@@ -728,6 +755,9 @@ class MainWindow(QMainWindow):
                 "No model",
                 "No ONNX model found in assets/.",
             )
+            return
+        if self._inference_thread and self._inference_thread.isRunning():
+            self.statusBar().showMessage("Segmentation already running...")
             return
         if self._batch_thread and self._batch_thread.isRunning():
             self.statusBar().showMessage("Batch segmentation already running...")
@@ -760,7 +790,79 @@ class MainWindow(QMainWindow):
         self._batch_thread.finished.connect(self._batch_thread.deleteLater)
         self._batch_thread.start()
 
-    def _show_batch_dialog(self, total):
+    def _run_current_video_inference(self):
+        if self._mode != "video" or not self._video_path:
+            QMessageBox.information(self, "No video", "Load a video first.")
+            return
+        self._start_video_batch_inference([self._video_path], "Segment video")
+
+    def _run_all_videos_inference(self):
+        if self._mode != "video" or not self._video_paths:
+            QMessageBox.information(self, "No videos", "Load one or more videos first.")
+            return
+        self._start_video_batch_inference(list(self._video_paths), "Segment all videos")
+
+    def _start_video_batch_inference(self, video_paths, title):
+        if not self._video_output_dir:
+            QMessageBox.information(self, "No output folder", "Select an output folder first.")
+            return
+        if not self._model.has_model():
+            QMessageBox.warning(self, "No model", "No ONNX model found in assets/.")
+            return
+        if self._inference_thread and self._inference_thread.isRunning():
+            self.statusBar().showMessage("Segmentation already running...")
+            return
+        if self._batch_thread and self._batch_thread.isRunning():
+            self.statusBar().showMessage("Batch segmentation already running...")
+            return
+
+        total_frames = 0
+        for video_path in video_paths:
+            capture = cv2.VideoCapture(video_path)
+            if capture.isOpened():
+                total_frames += max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+            capture.release()
+        if total_frames <= 0:
+            QMessageBox.warning(self, "Video error", "The selected videos contain no readable frames.")
+            return
+
+        self._stash_video_mask_for_current_frame()
+        self.statusBar().showMessage(f"{title} running...")
+        self._show_video_batch_dialog(len(video_paths), title)
+
+        self._batch_thread = QThread(self)
+        self._batch_worker = VideoBatchInferenceWorker(
+            self._model,
+            video_paths,
+            self._video_output_dir,
+        )
+        self._batch_worker.moveToThread(self._batch_thread)
+        self._batch_thread.started.connect(self._batch_worker.run)
+        self._batch_worker.video_started.connect(self._on_video_started)
+        self._batch_worker.frame_started.connect(self._on_video_frame_started)
+        self._batch_worker.frame_progress.connect(self._on_video_frame_progress)
+        self._batch_worker.video_finished.connect(self._on_video_finished)
+        self._batch_worker.finished.connect(self._on_video_batch_finished)
+        self._batch_worker.canceled.connect(self._on_batch_canceled)
+        self._batch_worker.error.connect(self._on_batch_error)
+        self._batch_worker.finished.connect(self._batch_thread.quit)
+        self._batch_worker.canceled.connect(self._batch_thread.quit)
+        self._batch_worker.error.connect(self._batch_thread.quit)
+        self._batch_worker.finished.connect(self._batch_worker.deleteLater)
+        self._batch_worker.canceled.connect(self._batch_worker.deleteLater)
+        self._batch_worker.error.connect(self._batch_worker.deleteLater)
+        self._batch_thread.finished.connect(self._on_batch_thread_done)
+        self._batch_thread.finished.connect(self._batch_thread.deleteLater)
+        self._batch_thread.start()
+
+    def _show_video_batch_dialog(self, video_count, title):
+        if self._batch_dialog is not None:
+            self._batch_dialog.close()
+        self._batch_dialog = VideoBatchProgressDialog(video_count, title, self)
+        self._batch_dialog.canceled.connect(self._request_batch_cancel)
+        self._batch_dialog.show()
+
+    def _show_batch_dialog(self, total, title="Batch segment"):
         if self._batch_dialog is not None:
             self._batch_dialog.close()
         self._batch_dialog = QProgressDialog(
@@ -770,7 +872,7 @@ class MainWindow(QMainWindow):
             total,
             self,
         )
-        self._batch_dialog.setWindowTitle("Batch segment")
+        self._batch_dialog.setWindowTitle(title)
         self._batch_dialog.setMinimumDuration(0)
         self._batch_dialog.setAutoClose(False)
         self._batch_dialog.setAutoReset(False)
@@ -788,7 +890,10 @@ class MainWindow(QMainWindow):
             self._batch_worker.cancel()
         self.statusBar().showMessage("Canceling batch segmentation...")
         if self._batch_dialog:
-            self._batch_dialog.setLabelText("Canceling batch segmentation...")
+            if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+                self._batch_dialog.mark_canceling()
+            else:
+                self._batch_dialog.setLabelText("Canceling batch segmentation...")
 
     def _on_batch_progress(self, current, total):
         if self._batch_dialog:
@@ -806,13 +911,51 @@ class MainWindow(QMainWindow):
         if self._sequence_paths and self._sequence_index >= 0:
             self._load_sequence_image()
 
+    def _on_video_started(self, video_name, video_number, video_count, frame_count):
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.start_video(
+                video_name,
+                video_number,
+                video_count,
+                frame_count,
+            )
+
+    def _on_video_frame_started(self, video_name, frame_number, frame_count, current, total):
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.start_frame(frame_number, frame_count)
+
+    def _on_video_frame_progress(self, frame_number, frame_count):
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.set_frame_progress(frame_number, frame_count)
+
+    def _on_video_finished(self, video_number, video_count):
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.set_video_progress(video_number, video_count)
+
+    def _on_video_batch_finished(self, processed):
+        self.statusBar().showMessage(f"Video segmentation complete: {processed} frames.")
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.mark_complete()
+        self._close_batch_dialog()
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            saved_mask = self._load_saved_video_mask_for_frame(
+                self._video_path,
+                self._video_frame_index,
+            )
+            if saved_mask is not None:
+                self.canvas.set_mask(saved_mask)
+
     def _on_batch_canceled(self):
         self.statusBar().showMessage("Batch segmentation canceled")
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.mark_canceling()
         self._close_batch_dialog()
 
     def _on_batch_error(self, message):
         QMessageBox.warning(self, "Batch error", message)
         self.statusBar().showMessage("Batch segmentation failed")
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.mark_stopped()
         self._close_batch_dialog()
 
     def _on_batch_thread_done(self):
@@ -1801,6 +1944,9 @@ class MainWindow(QMainWindow):
         if self._inference_thread and self._inference_thread.isRunning():
             self.statusBar().showMessage("Segmentation already running...")
             return
+        if self._batch_thread and self._batch_thread.isRunning():
+            self.statusBar().showMessage("Batch segmentation already running...")
+            return
 
         self.statusBar().showMessage("Running segmentation...")
         self._show_inference_dialog()
@@ -1876,6 +2022,86 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._stash_video_mask_for_current_frame()
         self._clear_video_state()
+        super().closeEvent(event)
+
+
+class VideoBatchProgressDialog(QDialog):
+    canceled = pyqtSignal()
+
+    def __init__(self, video_count, title, parent=None):
+        super().__init__(parent)
+        self._video_count = max(1, int(video_count))
+        self._cancel_requested = False
+        self._finished = False
+        self.setWindowTitle(title)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        self.status_label = QLabel("Preparing videos...")
+        layout.addWidget(self.status_label)
+
+        self.video_label = QLabel(f"Videos: 0/{self._video_count}")
+        layout.addWidget(self.video_label)
+        self.video_progress = QProgressBar(self)
+        self.video_progress.setRange(0, self._video_count)
+        self.video_progress.setValue(0)
+        layout.addWidget(self.video_progress)
+
+        self.frame_label = QLabel("Frames: 0/0")
+        layout.addWidget(self.frame_label)
+        self.frame_progress = QProgressBar(self)
+        self.frame_progress.setRange(0, 1)
+        self.frame_progress.setValue(0)
+        layout.addWidget(self.frame_progress)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._request_cancel)
+        layout.addWidget(self.cancel_btn)
+
+    def start_video(self, video_name, video_number, video_count, frame_count):
+        self._video_count = max(1, int(video_count))
+        self.status_label.setText(f"Segmenting {video_name}")
+        self.video_label.setText(f"Videos: {video_number}/{video_count}")
+        self.video_progress.setRange(0, self._video_count)
+        self.video_progress.setValue(max(0, int(video_number) - 1))
+        self.frame_label.setText(f"Frames: 0/{frame_count}")
+        self.frame_progress.setRange(0, max(1, int(frame_count)))
+        self.frame_progress.setValue(0)
+
+    def start_frame(self, frame_number, frame_count):
+        self.frame_label.setText(f"Frames: {frame_number}/{frame_count}")
+
+    def set_frame_progress(self, frame_number, frame_count):
+        self.frame_progress.setRange(0, max(1, int(frame_count)))
+        self.frame_progress.setValue(int(frame_number))
+
+    def set_video_progress(self, video_number, video_count):
+        self.video_progress.setRange(0, max(1, int(video_count)))
+        self.video_progress.setValue(int(video_number))
+
+    def mark_canceling(self):
+        self._cancel_requested = True
+        self.status_label.setText("Canceling video segmentation...")
+        self.cancel_btn.setEnabled(False)
+
+    def mark_complete(self):
+        self._finished = True
+        self.video_progress.setValue(self.video_progress.maximum())
+        self.frame_progress.setValue(self.frame_progress.maximum())
+
+    def mark_stopped(self):
+        self._finished = True
+
+    def _request_cancel(self):
+        if self._cancel_requested:
+            return
+        self.mark_canceling()
+        self.canceled.emit()
+
+    def closeEvent(self, event):
+        if not self._finished and not self._cancel_requested:
+            self._request_cancel()
         super().closeEvent(event)
 
 
@@ -1983,4 +2209,107 @@ class BatchInferenceWorker(QObject):
             return
         mask_uint8 = (prediction >= 0.5).astype(np.uint8) * 255
         output_path = Path(self._output_dir) / f"{Path(image_path).stem}.png"
-        cv2.imwrite(str(output_path), mask_uint8)
+        if not cv2.imwrite(str(output_path), mask_uint8):
+            raise RuntimeError(f"Failed to save mask: {output_path}")
+
+
+class VideoBatchInferenceWorker(QObject):
+    finished = pyqtSignal(int)
+    canceled = pyqtSignal()
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, int)
+    video_started = pyqtSignal(str, int, int, int)
+    video_finished = pyqtSignal(int, int)
+    frame_started = pyqtSignal(str, int, int, int, int)
+    frame_progress = pyqtSignal(int, int)
+
+    def __init__(self, model, video_paths, output_dir):
+        super().__init__()
+        self._model = model
+        self._video_paths = list(video_paths)
+        self._output_dir = Path(output_dir)
+        self._cancel_event = Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            total_frames = 0
+            for video_path in self._video_paths:
+                capture = cv2.VideoCapture(video_path)
+                if not capture.isOpened():
+                    capture.release()
+                    raise RuntimeError(f"Could not open video: {Path(video_path).name}")
+                frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+                if frame_count <= 0:
+                    capture.release()
+                    raise RuntimeError(f"Video has no readable frames: {Path(video_path).name}")
+                total_frames += frame_count
+                capture.release()
+
+            processed = 0
+            video_count = len(self._video_paths)
+            for video_number, video_path in enumerate(self._video_paths, start=1):
+                video_name = Path(video_path).name
+                capture = cv2.VideoCapture(video_path)
+                if not capture.isOpened():
+                    capture.release()
+                    raise RuntimeError(f"Could not open video: {video_name}")
+                frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+                self.video_started.emit(video_name, video_number, video_count, frame_count)
+                video_output_dir = self._output_dir / Path(video_path).stem
+                video_output_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    for frame_index in range(frame_count):
+                        if self._cancel_event.is_set():
+                            self.canceled.emit()
+                            return
+                        self.frame_started.emit(
+                            video_name,
+                            frame_index + 1,
+                            frame_count,
+                            processed + 1,
+                            total_frames,
+                        )
+                        success, frame = capture.read()
+                        if not success or frame is None:
+                            raise RuntimeError(
+                                f"Could not decode {video_name} frame {frame_index}."
+                            )
+                        if frame.ndim == 3 and frame.shape[2] == 3:
+                            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        else:
+                            image = frame
+                        prediction = self._model.run_inference(
+                            image,
+                            cancel_event=self._cancel_event,
+                        )
+                        if self._cancel_event.is_set():
+                            self.canceled.emit()
+                            return
+                        mask = np.asarray(prediction)
+                        frame_height, frame_width = frame.shape[:2]
+                        if mask.shape[:2] != (frame_height, frame_width):
+                            mask = cv2.resize(
+                                mask.astype(np.float32),
+                                (frame_width, frame_height),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                        mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
+                        output_path = video_output_dir / f"frame_{frame_index:06d}.png"
+                        if not cv2.imwrite(str(output_path), mask_uint8):
+                            raise RuntimeError(f"Failed to save mask: {output_path}")
+                        processed += 1
+                        self.progress.emit(processed, total_frames)
+                        self.frame_progress.emit(frame_index + 1, frame_count)
+                finally:
+                    capture.release()
+                self.video_finished.emit(video_number, video_count)
+            self.finished.emit(processed)
+        except Exception as exc:
+            if self._cancel_event.is_set() or str(exc).lower().startswith("inference canceled"):
+                self.canceled.emit()
+            else:
+                self.error.emit(str(exc))

@@ -71,6 +71,17 @@ This build runs on CPU only.
 Results are saved automatically in the output folder as PNG files. You can preview
 results by navigating through the loaded images using the left/right arrow keys.
 
+## Video Segmentation
+
+1) Click **Load video(s)** and choose the videos and output folder.
+2) Use **Segment frame** to segment only the displayed frame for editing.
+3) Use **Segment video** to segment every frame of the selected video.
+4) Use **Segment all videos** to segment every frame of all loaded videos.
+
+Whole-video operations overwrite existing masks. Masks are saved as PNG files under
+`<output folder>/<video name>/frame_000000.png`. Canceling retains frames that have
+already been processed and saved.
+
 ## Editing Tools
 
 - Freehand Line: draw an outline ROI.
