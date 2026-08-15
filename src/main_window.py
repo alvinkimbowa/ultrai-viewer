@@ -54,6 +54,7 @@ class MainWindow(QMainWindow):
 
         self.canvas = Canvas()
         self.canvas.image_loaded.connect(self._update_title_with_image)
+        self.canvas.navigation_requested.connect(self._on_canvas_navigation_requested)
 
         sidebar = self._build_sidebar()
         sidebar_scroll = QScrollArea()
@@ -1034,6 +1035,9 @@ class MainWindow(QMainWindow):
         self._set_sequence_index(self._sequence_index + 1)
 
     def _show_previous_frame(self):
+        if self._mode == "sequence":
+            self._show_previous_sequence()
+            return
         if self._mode != "video":
             return
         if self._video_frame_index <= 0:
@@ -1041,6 +1045,9 @@ class MainWindow(QMainWindow):
         self._set_video_frame_index(self._video_frame_index - 1)
 
     def _show_next_frame(self):
+        if self._mode == "sequence":
+            self._show_next_sequence()
+            return
         if self._mode != "video":
             return
         if self._video_frame_index < 0:
@@ -1049,7 +1056,26 @@ class MainWindow(QMainWindow):
             return
         self._set_video_frame_index(self._video_frame_index + 1)
 
+    def _on_canvas_navigation_requested(self, direction):
+        if self._mode == "sequence":
+            if direction < 0:
+                self._show_previous_sequence()
+            else:
+                self._show_next_sequence()
+            return
+        if self._mode == "video":
+            if direction < 0:
+                self._show_previous_frame()
+            else:
+                self._show_next_frame()
+
     def _show_first_frame(self):
+        if self._mode == "sequence":
+            if self._sequence_index <= 0:
+                return
+            self._save_sequence_mask_if_needed()
+            self._set_sequence_index(0)
+            return
         if self._mode != "video":
             return
         if self._video_frame_index <= 0:
@@ -1057,6 +1083,15 @@ class MainWindow(QMainWindow):
         self._set_video_frame_index(0)
 
     def _show_last_frame(self):
+        if self._mode == "sequence":
+            if not self._sequence_paths:
+                return
+            last_index = len(self._sequence_paths) - 1
+            if self._sequence_index >= last_index:
+                return
+            self._save_sequence_mask_if_needed()
+            self._set_sequence_index(last_index)
+            return
         if self._mode != "video":
             return
         if self._video_frame_count <= 0:
@@ -1229,15 +1264,17 @@ class MainWindow(QMainWindow):
             self.frame_last_btn.setEnabled(can_next_frame)
             return
         if self._mode == "sequence":
-            self.image_prev_btn.setEnabled(self._sequence_index > 0)
-            self.image_next_btn.setEnabled(self._sequence_index < len(self._sequence_paths) - 1)
+            can_prev = self._sequence_index > 0
+            can_next = self._sequence_index < len(self._sequence_paths) - 1
+            self.image_prev_btn.setEnabled(can_prev)
+            self.image_next_btn.setEnabled(can_next)
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
             self.play_btn.setEnabled(False)
-            self.frame_first_btn.setEnabled(False)
-            self.frame_prev_btn.setEnabled(False)
-            self.frame_next_btn.setEnabled(False)
-            self.frame_last_btn.setEnabled(False)
+            self.frame_first_btn.setEnabled(can_prev)
+            self.frame_prev_btn.setEnabled(can_prev)
+            self.frame_next_btn.setEnabled(can_next)
+            self.frame_last_btn.setEnabled(can_next)
             return
         self.image_prev_btn.setEnabled(False)
         self.image_next_btn.setEnabled(False)

@@ -85,7 +85,7 @@ results by navigating through the loaded images using the left/right arrow keys.
 
 - Ctrl + scroll: zoom in/out.
 - Shift + scroll: horizontal scroll (when zoomed).
-- Scroll: vertical scroll (when zoomed).
+- Scroll up/down: move to the previous/next image or video frame.
 
 ## Saving
 

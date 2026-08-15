@@ -13,6 +13,8 @@ from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
 
 class Canvas(QWidget):
     image_loaded = pyqtSignal(str)
+    navigation_requested = pyqtSignal(int)
+
     def __init__(self):
         super().__init__()
         self.image = None
@@ -654,6 +656,11 @@ class Canvas(QWidget):
         if self.pixmap is None:
             return
         delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.pixelDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
         modifiers = event.modifiers()
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             factor = 1.2 if delta > 0 else 1 / 1.2
@@ -662,7 +669,7 @@ class Canvas(QWidget):
             if self.h_scrollbar.isVisible():
                 self._scroll_horizontal(-delta)
         else:
-            self._scroll_vertical(-delta)
+            self.navigation_requested.emit(-1 if delta > 0 else 1)
         event.accept()
 
     def _reset_view(self):
