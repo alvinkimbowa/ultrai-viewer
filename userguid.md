@@ -70,6 +70,8 @@ This build runs on CPU only.
 
 Results are saved automatically in the output folder as PNG files. You can preview
 results by navigating through the loaded images using the left/right arrow keys.
+If saved masks already exist, the app asks whether to overwrite them or preserve
+them and segment only missing images.
 
 ## Video Segmentation
 
@@ -78,9 +80,10 @@ results by navigating through the loaded images using the left/right arrow keys.
 3) Use **Segment video** to segment every frame of the selected video.
 4) Use **Segment all videos** to segment every frame of all loaded videos.
 
-Whole-video operations overwrite existing masks. Masks are saved as PNG files under
-`<output folder>/<video name>/frame_000000.png`. Canceling retains frames that have
-already been processed and saved.
+If saved masks already exist, the app asks whether to overwrite them or preserve
+them and segment only missing frames. Masks are saved as PNG files under
+`<output folder>/<video name>/frame_000000.png`. Canceling retains frames already
+processed and saved.
 
 ## Editing Tools
 

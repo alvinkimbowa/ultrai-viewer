@@ -727,13 +727,40 @@ class MainWindow(QMainWindow):
         if self._mode != "sequence":
             QMessageBox.information(self, "No image", "Load one or more images first.")
             return
+        if 0 <= self._sequence_index < len(self._sequence_paths):
+            existing_path = self._find_sequence_mask_path(
+                self._sequence_paths[self._sequence_index]
+            )
+            if existing_path and not self._confirm_overwrite_existing(1, "image segmentation"):
+                return
         self._run_inference()
 
     def _run_current_video_frame_inference(self):
         if self._mode != "video" or self._video_frame_index < 0:
             QMessageBox.information(self, "No video", "Load a video first.")
             return
+        existing_path = self._video_mask_path(self._video_path, self._video_frame_index)
+        if existing_path and existing_path.exists():
+            if not self._confirm_overwrite_existing(1, "frame segmentation"):
+                return
         self._run_inference()
+
+    def _confirm_overwrite_existing(self, count, description):
+        choice = QMessageBox.question(
+            self,
+            "Existing segmentations",
+            f"Found {count} existing {description}(s).\n\n"
+            "Overwrite them?\n\n"
+            "Yes: overwrite existing masks.\n"
+            "No: keep existing masks and segment only missing items.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,
+        )
+        if choice == QMessageBox.StandardButton.Cancel:
+            return None
+        return choice == QMessageBox.StandardButton.Yes
 
     def _run_batch_inference(self):
         if self._mode == "video":
@@ -763,6 +790,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Batch segmentation already running...")
             return
 
+        overwrite_existing = True
+        existing_count = sum(
+            1 for image_path in self._sequence_paths if self._find_sequence_mask_path(image_path)
+        )
+        if existing_count:
+            overwrite_existing = self._confirm_overwrite_existing(
+                existing_count,
+                "image segmentation",
+            )
+            if overwrite_existing is None:
+                return
+
         total = len(self._sequence_paths)
         self.statusBar().showMessage("Running batch segmentation...")
         self._show_batch_dialog(total)
@@ -772,6 +811,7 @@ class MainWindow(QMainWindow):
             self._model,
             list(self._sequence_paths),
             self._sequence_output_dir,
+            overwrite_existing=overwrite_existing,
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -816,6 +856,20 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Batch segmentation already running...")
             return
 
+        overwrite_existing = True
+        existing_count = sum(
+            1
+            for video_path in video_paths
+            for _ in (Path(self._video_output_dir) / Path(video_path).stem).glob("frame_*.png")
+        )
+        if existing_count:
+            overwrite_existing = self._confirm_overwrite_existing(
+                existing_count,
+                "frame segmentation",
+            )
+            if overwrite_existing is None:
+                return
+
         total_frames = 0
         for video_path in video_paths:
             capture = cv2.VideoCapture(video_path)
@@ -835,6 +889,7 @@ class MainWindow(QMainWindow):
             self._model,
             video_paths,
             self._video_output_dir,
+            overwrite_existing=overwrite_existing,
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -905,8 +960,11 @@ class MainWindow(QMainWindow):
             name = Path(image_path).name
             self._batch_dialog.setLabelText(f"Segmenting {name} ({index}/{total})")
 
-    def _on_batch_finished(self, processed):
-        self.statusBar().showMessage(f"Batch segmentation complete: {processed} images.")
+    def _on_batch_finished(self, processed, skipped):
+        message = f"Batch segmentation complete: {processed} image(s) segmented"
+        if skipped:
+            message += f", {skipped} existing image(s) kept"
+        self.statusBar().showMessage(f"{message}.")
         self._close_batch_dialog()
         if self._sequence_paths and self._sequence_index >= 0:
             self._load_sequence_image()
@@ -932,8 +990,11 @@ class MainWindow(QMainWindow):
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
             self._batch_dialog.set_video_progress(video_number, video_count)
 
-    def _on_video_batch_finished(self, processed):
-        self.statusBar().showMessage(f"Video segmentation complete: {processed} frames.")
+    def _on_video_batch_finished(self, processed, skipped):
+        message = f"Video segmentation complete: {processed} frame(s) segmented"
+        if skipped:
+            message += f", {skipped} existing frame(s) kept"
+        self.statusBar().showMessage(f"{message}.")
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
             self._batch_dialog.mark_complete()
         self._close_batch_dialog()
@@ -2142,17 +2203,18 @@ class InferenceWorker(QObject):
 
 
 class BatchInferenceWorker(QObject):
-    finished = pyqtSignal(int)
+    finished = pyqtSignal(int, int)
     canceled = pyqtSignal()
     error = pyqtSignal(str)
     progress = pyqtSignal(int, int)
     image_started = pyqtSignal(str, int, int)
 
-    def __init__(self, model, image_paths, output_dir):
+    def __init__(self, model, image_paths, output_dir, overwrite_existing=True):
         super().__init__()
         self._model = model
         self._image_paths = list(image_paths)
         self._output_dir = output_dir
+        self._overwrite_existing = bool(overwrite_existing)
         self._cancel_event = Event()
 
     def cancel(self):
@@ -2165,11 +2227,16 @@ class BatchInferenceWorker(QObject):
             self.error.emit("No images found for batch segmentation.")
             return
         processed = 0
+        skipped = 0
         for idx, image_path in enumerate(self._image_paths, start=1):
             if self._cancel_event.is_set():
                 self.canceled.emit()
                 return
             self.image_started.emit(image_path, idx, total)
+            if not self._overwrite_existing and self._existing_mask_path(image_path):
+                skipped += 1
+                self.progress.emit(idx, total)
+                continue
             try:
                 image = self._load_image(image_path)
                 prediction = self._model.run_inference(
@@ -2184,8 +2251,17 @@ class BatchInferenceWorker(QObject):
                 self.error.emit(str(exc))
                 return
             processed += 1
-            self.progress.emit(processed, total)
-        self.finished.emit(processed)
+            self.progress.emit(idx, total)
+        self.finished.emit(processed, skipped)
+
+    def _existing_mask_path(self, image_path):
+        stem = Path(image_path).stem
+        output_dir = Path(self._output_dir)
+        for extension in (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
+            candidate = output_dir / f"{stem}{extension}"
+            if candidate.exists():
+                return candidate
+        return None
 
     def _load_image(self, file_path):
         lower_path = file_path.lower()
@@ -2214,7 +2290,7 @@ class BatchInferenceWorker(QObject):
 
 
 class VideoBatchInferenceWorker(QObject):
-    finished = pyqtSignal(int)
+    finished = pyqtSignal(int, int)
     canceled = pyqtSignal()
     error = pyqtSignal(str)
     progress = pyqtSignal(int, int)
@@ -2223,11 +2299,12 @@ class VideoBatchInferenceWorker(QObject):
     frame_started = pyqtSignal(str, int, int, int, int)
     frame_progress = pyqtSignal(int, int)
 
-    def __init__(self, model, video_paths, output_dir):
+    def __init__(self, model, video_paths, output_dir, overwrite_existing=True):
         super().__init__()
         self._model = model
         self._video_paths = list(video_paths)
         self._output_dir = Path(output_dir)
+        self._overwrite_existing = bool(overwrite_existing)
         self._cancel_event = Event()
 
     def cancel(self):
@@ -2250,6 +2327,7 @@ class VideoBatchInferenceWorker(QObject):
                 capture.release()
 
             processed = 0
+            skipped = 0
             video_count = len(self._video_paths)
             for video_number, video_path in enumerate(self._video_paths, start=1):
                 video_name = Path(video_path).name
@@ -2273,11 +2351,17 @@ class VideoBatchInferenceWorker(QObject):
                             processed + 1,
                             total_frames,
                         )
+                        output_path = video_output_dir / f"frame_{frame_index:06d}.png"
                         success, frame = capture.read()
                         if not success or frame is None:
                             raise RuntimeError(
                                 f"Could not decode {video_name} frame {frame_index}."
                             )
+                        if not self._overwrite_existing and output_path.exists():
+                            skipped += 1
+                            self.progress.emit(processed + skipped, total_frames)
+                            self.frame_progress.emit(frame_index + 1, frame_count)
+                            continue
                         if frame.ndim == 3 and frame.shape[2] == 3:
                             image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         else:
@@ -2298,7 +2382,6 @@ class VideoBatchInferenceWorker(QObject):
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-                        output_path = video_output_dir / f"frame_{frame_index:06d}.png"
                         if not cv2.imwrite(str(output_path), mask_uint8):
                             raise RuntimeError(f"Failed to save mask: {output_path}")
                         processed += 1
@@ -2307,7 +2390,7 @@ class VideoBatchInferenceWorker(QObject):
                 finally:
                     capture.release()
                 self.video_finished.emit(video_number, video_count)
-            self.finished.emit(processed)
+            self.finished.emit(processed, skipped)
         except Exception as exc:
             if self._cancel_event.is_set() or str(exc).lower().startswith("inference canceled"):
                 self.canceled.emit()
