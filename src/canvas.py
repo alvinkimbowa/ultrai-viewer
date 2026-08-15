@@ -13,6 +13,8 @@ from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
 
 class Canvas(QWidget):
     image_loaded = pyqtSignal(str)
+    navigation_requested = pyqtSignal(int)
+
     def __init__(self):
         super().__init__()
         self.image = None
@@ -283,22 +285,30 @@ class Canvas(QWidget):
 
     def _to_pixmap(self, image):
         if image.ndim == 2:
-            display = self._normalize_gray(image)
+            display = np.ascontiguousarray(self._normalize_gray(image))
             height, width = display.shape
             bytes_per_line = display.strides[0]
             q_image = QImage(
-                display.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8
-            )
+                display.tobytes(),
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_Grayscale8,
+            ).copy()
             return QPixmap.fromImage(q_image)
         if image.ndim == 3 and image.shape[2] in (3, 4):
             if image.shape[2] == 4:
                 image = image[:, :, :3]
-            display = self._as_uint8(image)
+            display = np.ascontiguousarray(self._as_uint8(image))
             height, width, _ = display.shape
             bytes_per_line = display.strides[0]
             q_image = QImage(
-                display.data, width, height, bytes_per_line, QImage.Format.Format_RGB888
-            )
+                display.tobytes(),
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_RGB888,
+            ).copy()
             return QPixmap.fromImage(q_image)
         raise ValueError(f"Unsupported image layout: {image.shape}")
 
@@ -338,7 +348,7 @@ class Canvas(QWidget):
                 contours,
                 -1,
                 (int(color[0]), int(color[1]), int(color[2]), int(contour_alpha)),
-                1,
+                self._roi_outline_thickness_px(),
             )
         else:
             alpha = (self.mask * 255.0 * self.mask_opacity).astype(np.uint8)
@@ -348,10 +358,15 @@ class Canvas(QWidget):
             rgba[:, :, 1] = (base * float(color[1]) / 255.0).astype(np.uint8)
             rgba[:, :, 2] = (base * float(color[2]) / 255.0).astype(np.uint8)
             rgba[:, :, 3] = alpha
+        rgba = np.ascontiguousarray(rgba)
         bytes_per_line = rgba.strides[0]
         q_image = QImage(
-            rgba.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888
-        )
+            rgba.tobytes(),
+            width,
+            height,
+            bytes_per_line,
+            QImage.Format.Format_RGBA8888,
+        ).copy()
         self.mask_pixmap = QPixmap.fromImage(q_image)
 
     def _as_uint8(self, image):
@@ -420,6 +435,19 @@ class Canvas(QWidget):
 
     def _brush_thickness(self):
         return max(1, int(self.brush_radius))
+
+    def _roi_outline_thickness_px(self):
+        if self.image is None:
+            return 1
+        height, width = self.image.shape[:2]
+        base = min(height, width)
+        thickness = (base + 511) // 512
+        return max(1, min(6, thickness))
+
+    def _roi_outline_pen_width(self):
+        thickness_px = self._roi_outline_thickness_px()
+        width = int(round(thickness_px * max(0.6, self.scale)))
+        return max(1, min(8, width))
 
     def _draw_point(self, point, value):
         if self.mask is None:
@@ -567,7 +595,7 @@ class Canvas(QWidget):
             painter.drawPixmap(target, self.mask_pixmap)
 
         if self.tool == "polyline" and self._poly_points:
-            painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine))
+            painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for point in self._poly_points:
                 screen_point = self._image_to_screen(point)
                 painter.drawEllipse(screen_point, 4, 4)
@@ -576,13 +604,13 @@ class Canvas(QWidget):
                 end = self._image_to_screen(self._poly_points[idx + 1])
                 painter.drawLine(start, end)
         if self.tool == "freehand" and self._freehand_points:
-            painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine))
+            painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._freehand_points) - 1):
                 start = self._image_to_screen(self._freehand_points[idx])
                 end = self._image_to_screen(self._freehand_points[idx + 1])
                 painter.drawLine(start, end)
         if self._last_outline:
-            painter.setPen(QPen(QColor(0, 255, 0), 2, Qt.PenStyle.SolidLine))
+            painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._last_outline) - 1):
                 start = self._image_to_screen(self._last_outline[idx])
                 end = self._image_to_screen(self._last_outline[idx + 1])
@@ -641,6 +669,11 @@ class Canvas(QWidget):
         if self.pixmap is None:
             return
         delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.pixelDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
         modifiers = event.modifiers()
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             factor = 1.2 if delta > 0 else 1 / 1.2
@@ -649,7 +682,7 @@ class Canvas(QWidget):
             if self.h_scrollbar.isVisible():
                 self._scroll_horizontal(-delta)
         else:
-            self._scroll_vertical(-delta)
+            self.navigation_requested.emit(-1 if delta > 0 else 1)
         event.accept()
 
     def _reset_view(self):

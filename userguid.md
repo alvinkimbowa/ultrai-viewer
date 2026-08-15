@@ -70,6 +70,20 @@ This build runs on CPU only.
 
 Results are saved automatically in the output folder as PNG files. You can preview
 results by navigating through the loaded images using the left/right arrow keys.
+If saved masks already exist, the app asks whether to overwrite them or preserve
+them and segment only missing images.
+
+## Video Segmentation
+
+1) Click **Load video(s)** and choose the videos and output folder.
+2) Use **Segment frame** to segment only the displayed frame for editing.
+3) Use **Segment video** to segment every frame of the selected video.
+4) Use **Segment all videos** to segment every frame of all loaded videos.
+
+If saved masks already exist, the app asks whether to overwrite them or preserve
+them and segment only missing frames. Masks are saved as PNG files under
+`<output folder>/<video name>/frame_000000.png`. Canceling retains frames already
+processed and saved.
 
 ## Editing Tools
 
@@ -85,7 +99,7 @@ results by navigating through the loaded images using the left/right arrow keys.
 
 - Ctrl + scroll: zoom in/out.
 - Shift + scroll: horizontal scroll (when zoomed).
-- Scroll: vertical scroll (when zoomed).
+- Scroll up/down: move to the previous/next image or video frame.
 
 ## Saving
 
