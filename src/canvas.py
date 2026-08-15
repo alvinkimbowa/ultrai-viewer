@@ -441,7 +441,7 @@ class Canvas(QWidget):
             return 1
         height, width = self.image.shape[:2]
         base = min(height, width)
-        thickness = int(round(base / 512.0))
+        thickness = (base + 511) // 512
         return max(1, min(6, thickness))
 
     def _roi_outline_pen_width(self):
