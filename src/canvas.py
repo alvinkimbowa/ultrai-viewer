@@ -285,22 +285,30 @@ class Canvas(QWidget):
 
     def _to_pixmap(self, image):
         if image.ndim == 2:
-            display = self._normalize_gray(image)
+            display = np.ascontiguousarray(self._normalize_gray(image))
             height, width = display.shape
             bytes_per_line = display.strides[0]
             q_image = QImage(
-                display.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8
-            )
+                display.tobytes(),
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_Grayscale8,
+            ).copy()
             return QPixmap.fromImage(q_image)
         if image.ndim == 3 and image.shape[2] in (3, 4):
             if image.shape[2] == 4:
                 image = image[:, :, :3]
-            display = self._as_uint8(image)
+            display = np.ascontiguousarray(self._as_uint8(image))
             height, width, _ = display.shape
             bytes_per_line = display.strides[0]
             q_image = QImage(
-                display.data, width, height, bytes_per_line, QImage.Format.Format_RGB888
-            )
+                display.tobytes(),
+                width,
+                height,
+                bytes_per_line,
+                QImage.Format.Format_RGB888,
+            ).copy()
             return QPixmap.fromImage(q_image)
         raise ValueError(f"Unsupported image layout: {image.shape}")
 
@@ -350,10 +358,15 @@ class Canvas(QWidget):
             rgba[:, :, 1] = (base * float(color[1]) / 255.0).astype(np.uint8)
             rgba[:, :, 2] = (base * float(color[2]) / 255.0).astype(np.uint8)
             rgba[:, :, 3] = alpha
+        rgba = np.ascontiguousarray(rgba)
         bytes_per_line = rgba.strides[0]
         q_image = QImage(
-            rgba.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888
-        )
+            rgba.tobytes(),
+            width,
+            height,
+            bytes_per_line,
+            QImage.Format.Format_RGBA8888,
+        ).copy()
         self.mask_pixmap = QPixmap.fromImage(q_image)
 
     def _as_uint8(self, image):
