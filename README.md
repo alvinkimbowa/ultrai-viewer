@@ -1,4 +1,4 @@
-# UltAI Viewer
+# UltrAI Viewer
 
 Desktop PyQt6 application for reviewing knee ultrasound data, running ONNX cartilage segmentation, editing masks manually, and organizing video annotations.
 
