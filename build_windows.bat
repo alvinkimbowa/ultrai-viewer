@@ -4,7 +4,7 @@ setlocal
 set /p VERSION=<VERSION
 set "ULTAI_VERSION=%VERSION%"
 set "ULTAI_OS=windows"
-set "ULTAI_ARCH=x86"
+set "ULTAI_ARCH=x64"
 set "APP_NAME=UltrAiViewer-v%VERSION%-%ULTAI_OS%-%ULTAI_ARCH%"
 
 py -m PyInstaller --noconfirm --clean UltrAiViewer.spec

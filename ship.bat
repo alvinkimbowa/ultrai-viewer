@@ -3,7 +3,7 @@ setlocal
 
 set /p VERSION=<VERSION
 set "OS=windows"
-set "ARCH=x86"
+set "ARCH=x64"
 set "APP_NAME=UltrAiViewer-v%VERSION%-%OS%-%ARCH%"
 set "ARCHIVE_NAME=dist\\%APP_NAME%.zip"
 
