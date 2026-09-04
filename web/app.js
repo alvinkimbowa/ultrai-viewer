@@ -39,6 +39,7 @@ function restoreToolSettings(){
 }
 function cleanClass(value) { return String(value || "").trim().toLowerCase(); }
 function safeClass(value) { return cleanClass(value).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "unlabeled"; }
+function displayClass(value) { const label=cleanClass(value);return label==="lfcn"?"LFCN":label.replace(/\b\w/g,c=>c.toUpperCase()); }
 function mediaItem() { return state.media[state.mediaIndex] || null; }
 function annotationKey() {
   const item = mediaItem();
@@ -86,7 +87,7 @@ function redo() {
 function rebuildChips(containerId, labels, kind) {
   const holder=$(containerId),addButton=holder.querySelector("[data-add-label]"); holder.replaceChildren();
   for(const label of labels){
-    const button=document.createElement("button"); button.className="chip"; button.textContent=label==="lfcn"?"LFCN":label.replace(/\b\w/g,c=>c.toUpperCase());
+    const button=document.createElement("button"); button.className="chip"; button.textContent=displayClass(label);
     button.dataset.value=label;
     button.addEventListener("click",()=>{
       if(kind==="location") { state.location=label;state.outputPromptReady=true;if(mediaItem())mediaItem().location=label; }
@@ -206,6 +207,29 @@ function render(){
 function isContourPixel(mask,i){
   if(!mask[i])return false;const x=i%state.sourceWidth,y=Math.floor(i/state.sourceWidth);return x<2||y<2||x>=state.sourceWidth-2||y>=state.sourceHeight-2||!mask[i-1]||!mask[i+1]||!mask[i-state.sourceWidth]||!mask[i+state.sourceWidth]||!mask[i-2]||!mask[i+2]||!mask[i-state.sourceWidth*2]||!mask[i+state.sourceWidth*2];
 }
+function maskLabelAnchor(mask){
+  let count=0,sumX=0,sumY=0;
+  for(let i=0;i<mask.length;i++)if(mask[i]){count++;sumX+=i%state.sourceWidth;sumY+=Math.floor(i/state.sourceWidth);}
+  if(!count)return null;
+  const centerX=sumX/count,centerY=sumY/count;let best=null,bestDistance=Infinity;
+  for(let i=0;i<mask.length;i++)if(mask[i]){const x=i%state.sourceWidth,y=Math.floor(i/state.sourceWidth),distance=(x-centerX)**2+(y-centerY)**2;if(distance<bestDistance){best={x,y};bestDistance=distance;}}
+  return best;
+}
+function drawRoundedRect(context,x,y,width,height,radius){
+  const r=Math.min(radius,width/2,height/2);context.beginPath();context.moveTo(x+r,y);context.arcTo(x+width,y,x+width,y+height,r);context.arcTo(x+width,y+height,x,y+height,r);context.arcTo(x,y+height,x,y,r);context.arcTo(x,y,x+width,y,r);context.closePath();
+}
+function renderInstanceLabels(){
+  const selectedIndex=selectedInstanceIndex(),imageLeft=state.offsetX,imageTop=state.offsetY,imageWidth=state.sourceWidth*state.scale,imageHeight=state.sourceHeight*state.scale;
+  ctx.save();ctx.font="600 13px system-ui, sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
+  instances().forEach((instance,index)=>{
+    const anchor=maskLabelAnchor(instance.mask);if(!anchor)return;const text=`${displayClass(instance.className)} #${instance.id}`,paddingX=7,height=22,width=Math.ceil(ctx.measureText(text).width)+paddingX*2;
+    const minX=imageLeft+width/2,maxX=imageLeft+imageWidth-width/2,minY=imageTop+height/2,maxY=imageTop+imageHeight-height/2;
+    let x=imageLeft+(anchor.x+.5)*state.scale,y=imageTop+(anchor.y+.5)*state.scale;
+    x=minX<=maxX?Math.max(minX,Math.min(maxX,x)):imageLeft+imageWidth/2;y=minY<=maxY?Math.max(minY,Math.min(maxY,y)):imageTop+imageHeight/2;
+    drawRoundedRect(ctx,x-width/2,y-height/2,width,height,5);ctx.fillStyle="rgba(20, 27, 34, .9)";ctx.fill();ctx.lineWidth=index===selectedIndex?2:1.5;ctx.strokeStyle=index===selectedIndex?"#fff":classColor(instance.className);ctx.stroke();ctx.fillStyle="#fff";ctx.fillText(text,x,y+.5);
+  });
+  ctx.restore();
+}
 function renderInstances(){
   if(!state.sourceWidth)return;const overlay=document.createElement("canvas");overlay.width=state.sourceWidth;overlay.height=state.sourceHeight;const ox=overlay.getContext("2d");
   const image=ox.createImageData(state.sourceWidth,state.sourceHeight),data=image.data,filled=$("fillMasks").checked,alpha=Math.round(Number($("opacity").value)*2.55);
@@ -219,7 +243,7 @@ function renderInstances(){
     }
   }
   const selectedIndex=selectedInstanceIndex();if(selectedIndex>=0){const mask=instances()[selectedIndex].mask;for(let i=0;i<mask.length;i++)if(isContourPixel(mask,i)){const p=i*4;data[p]=255;data[p+1]=255;data[p+2]=255;data[p+3]=255;}}
-  ox.putImageData(image,0,0);ctx.imageSmoothingEnabled=false;ctx.drawImage(overlay,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);ctx.imageSmoothingEnabled=true;
+  ox.putImageData(image,0,0);ctx.imageSmoothingEnabled=false;ctx.drawImage(overlay,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);ctx.imageSmoothingEnabled=true;renderInstanceLabels();
 }
 function renderWorkingLine(){if(state.points.length<1)return;ctx.strokeStyle=state.activeClass?classColor(state.activeClass):"#00ff00";ctx.lineWidth=2;ctx.beginPath();state.points.forEach((p,i)=>{const x=state.offsetX+p.x*state.scale,y=state.offsetY+p.y*state.scale;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}
 function renderEraserOutline(){
@@ -238,7 +262,7 @@ function completePolygon(){
 function cancelDrawing(){state.points=[];state.drawing=false;render();}
 function hitInstance(point){for(let i=instances().length-1;i>=0;i--){if(instances()[i].mask[point.y*state.sourceWidth+point.x])return i;}return-1;}
 function selectedInstanceIndex(){const selected=state.selectedInstance;if(!selected||selected.key!==annotationKey())return-1;return instances().findIndex(item=>item.className===selected.className&&item.id===selected.id);}
-function selectInstance(index){const item=instances()[index];if(!item)return;state.selectedInstance={key:annotationKey(),className:item.className,id:item.id};status(`Selected ${item.className} ${item.id}`);render();}
+function selectInstance(index){const item=instances()[index];if(!item)return;state.selectedInstance={key:annotationKey(),className:item.className,id:item.id};state.activeClass=item.className;updateChipSelection();status(`Selected ${item.className} ${item.id}`);render();}
 function hideMaskContextMenu(){$("maskContextMenu").hidden=true;}
 function showMaskContextMenu(event){const menu=$("maskContextMenu");menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;menu.hidden=false;}
 function deleteSelectedInstance(){const index=selectedInstanceIndex();if(index<0)return false;const [removed]=instances().splice(index,1);state.selectedInstance=null;hideMaskContextMenu();pushHistory();render();status(`Deleted ${removed.className} ${removed.id}`);queueAutoSave();return true;}
@@ -346,7 +370,7 @@ async function runSelfTest(){
     state.activeClass="artery";state.points=[{x:16,y:16},{x:28,y:16},{x:28,y:28},{x:16,y:28}];completePolygon();
     if(instances().length!==2||instances()[0].id!==1||instances()[1].id!==1)throw new Error("instance creation");
     if(classColor("median")===classColor("artery"))throw new Error("class colors");undo();if(instances().length!==1)throw new Error("undo");redo();if(instances().length!==2)throw new Error("redo");
-    selectInstance(0);if(selectedInstanceIndex()!==0)throw new Error("mask selection");deleteSelectedInstance();if(instances().length!==1)throw new Error("mask deletion");undo();if(instances().length!==2)throw new Error("delete undo");
+    selectInstance(0);if(selectedInstanceIndex()!==0)throw new Error("mask selection");if(state.activeClass!=="median"||!document.querySelector('#nerves .chip[data-value="median"]').classList.contains("selected"))throw new Error("mask class selection");const anchor=maskLabelAnchor(instances()[0].mask);if(!anchor||!instances()[0].mask[anchor.y*state.sourceWidth+anchor.x])throw new Error("mask label anchor");if(maskLabelAnchor(new Uint8Array(state.sourceWidth*state.sourceHeight))!==null)throw new Error("empty mask label");deleteSelectedInstance();if(instances().length!==1)throw new Error("mask deletion");undo();if(instances().length!==2)throw new Error("delete undo");
     if(typeof UTIF!=="object"||typeof UTIF.decode!=="function")throw new Error("TIFF support");
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
   }catch(error){document.body.dataset.selftest=`fail:${error.message}`;}
