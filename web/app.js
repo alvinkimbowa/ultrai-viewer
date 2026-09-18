@@ -16,7 +16,8 @@ const state = {
   manifestVideos: [],
   locations: [...DEFAULT_LOCATIONS], nerves: [...DEFAULT_NERVES], anatomy: [...DEFAULT_ANATOMY],
   instancesByKey: new Map(), undoByKey: new Map(), redoByKey: new Map(), nextIdsByKey: new Map(),
-  sourceWidth: 0, sourceHeight: 0, frameIndex: 0, frameCount: 1, fps: 30,
+  loadedKeys: new Set(), pendingRemovals: [],
+  sourceWidth: 0, sourceHeight: 0, frameIndex: 0, frameCount: 1, frameTimes: [],
   scale: 1, offsetX: 0, offsetY: 0, fit: true, drawing: false, moving: false,
   points: [], moveIndex: -1, moveAnchor: null, moveOriginal: null, moveChanged: false, lastPointer: null, eraserCursor: null,
   selectedInstance: null, outputPromptReady: false,
@@ -41,6 +42,26 @@ function cleanClass(value) { return String(value || "").trim().toLowerCase(); }
 function safeClass(value) { return cleanClass(value).replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "unlabeled"; }
 function displayClass(value) { const label=cleanClass(value);return label==="lfcn"?"LFCN":label.replace(/\b\w/g,c=>c.toUpperCase()); }
 function mediaItem() { return state.media[state.mediaIndex] || null; }
+// The frame whose display window contains `time`. Frame k is shown from frameTimes[k] until
+// frameTimes[k+1], so the frame on screen is the last one whose timestamp has been reached.
+function frameIndexAt(time) {
+  const times = state.frameTimes;
+  if (!times.length) return 0;
+  let low = 0, high = times.length - 1, best = 0;
+  while (low <= high) { const mid = (low + high) >> 1; if (times[mid] <= time + 1e-6) { best = mid; low = mid + 1; } else high = mid - 1; }
+  return best;
+}
+// Seeking to the middle of a frame's window rather than its leading edge keeps rounding in the
+// decoder from landing on the neighbour.
+function frameSeekTime(index) {
+  const times = state.frameTimes;
+  if (!times.length) return 0;
+  const k = Math.max(0, Math.min(times.length - 1, index));
+  const span = k + 1 < times.length ? times[k + 1] - times[k] : (k > 0 ? times[k] - times[k - 1] : 0);
+  const target = times[k] + span / 2;
+  const limit = Number.isFinite(video.duration) && video.duration > 0 ? video.duration - 1e-4 : target;
+  return Math.max(0, Math.min(limit, target));
+}
 function annotationKey() {
   const item = mediaItem();
   if (!item) return "";
@@ -76,11 +97,12 @@ function resetHistory() { const key=annotationKey(); if(key){state.undoByKey.set
 function undo() {
   const key=annotationKey(), stack=state.undoByKey.get(key)||[]; if(stack.length<=1)return;
   const current=stack.pop(); const redo=state.redoByKey.get(key)||[]; redo.push(current); state.redoByKey.set(key,redo);
-  state.instancesByKey.set(key,cloneInstances(stack[stack.length-1]));state.selectedInstance=null;render();queueAutoSave();
+  const restored=cloneInstances(stack[stack.length-1]);stageRemovals(current,restored);
+  state.instancesByKey.set(key,restored);state.selectedInstance=null;render();queueAutoSave();
 }
 function redo() {
   const key=annotationKey(), redoStack=state.redoByKey.get(key)||[]; if(!redoStack.length)return;
-  const restored=redoStack.pop(); state.redoByKey.set(key,redoStack); state.instancesByKey.set(key,cloneInstances(restored));
+  const restored=redoStack.pop(); state.redoByKey.set(key,redoStack); stageRemovals(instances(),restored); state.instancesByKey.set(key,cloneInstances(restored));
   (state.undoByKey.get(key)||[]).push(cloneInstances(restored));state.selectedInstance=null;render();queueAutoSave();
 }
 
@@ -149,20 +171,44 @@ async function openMedia(index){
     if(/\.tiff?$/i.test(item.name)){
       const buffer=await item.file.arrayBuffer(),pages=UTIF.decode(buffer);if(!pages.length)throw new Error("TIFF contains no images");UTIF.decodeImage(buffer,pages[0]);const rgba=UTIF.toRGBA8(pages[0]),surface=document.createElement("canvas");surface.width=pages[0].width;surface.height=pages[0].height;surface.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(rgba),surface.width,surface.height),0,0);item.element=surface;state.sourceWidth=surface.width;state.sourceHeight=surface.height;
     }else{const image=new Image();image.src=item.url;await image.decode();item.element=image;state.sourceWidth=image.naturalWidth;state.sourceHeight=image.naturalHeight;}
-    state.frameIndex=0;state.frameCount=1;
+    state.frameIndex=0;state.frameCount=1;state.frameTimes=[];
   } else {
     video.src=item.url; video.load(); await once(video,"loadedmetadata");
-    state.sourceWidth=video.videoWidth;state.sourceHeight=video.videoHeight;state.frameIndex=0;state.fps=30;state.frameCount=Math.max(1,Math.floor(video.duration*state.fps));
+    state.sourceWidth=video.videoWidth;state.sourceHeight=video.videoHeight;state.frameIndex=0;
+    state.frameTimes=await videoFrameTimes(item);state.frameCount=Math.max(1,state.frameTimes.length);
     video.currentTime=0; await once(video,"seeked").catch(()=>{});
     await loadManifestLocation(item.name);
   }
-  state.fit=true; resizeCanvas(); await loadSavedMasksForCurrent(); if(!state.undoByKey.has(annotationKey()))resetHistory(); updateNavigation(); render(); status(`Loaded ${item.name}`);
+  state.fit=true; await loadSavedMasksForCurrent(); resizeCanvas(); if(!state.undoByKey.has(annotationKey()))resetHistory(); updateNavigation(); render(); status(`Loaded ${item.name}`);
 }
 function once(target,event){return new Promise((resolve,reject)=>{const done=()=>{cleanup();resolve();};const fail=()=>{cleanup();reject(new Error(`Failed waiting for ${event}`));};const cleanup=()=>{target.removeEventListener(event,done);target.removeEventListener("error",fail);};target.addEventListener(event,done,{once:true});target.addEventListener("error",fail,{once:true});setTimeout(done,5000);});}
+// An HTMLVideoElement reports only `duration`, never a frame rate or frame count, so the exact
+// frame boundaries come from the container's own sample table. Cached per media item.
+async function videoFrameTimes(item){
+  if(item.frameTimes)return item.frameTimes;
+  let times=null;
+  try{times=await MP4Frames.frameTimes(item.file);}catch{times=null;}
+  if(!times||times.length<2){status(`Reading frame timing for ${item.name}...`);times=await scanFrameTimes();}
+  item.frameTimes=times&&times.length?times:[];
+  return item.frameTimes;
+}
+// Fallback for containers the parser does not cover: play the clip through once and record the
+// timestamp of every frame the decoder presents.
+function scanFrameTimes(){
+  if(typeof video.requestVideoFrameCallback!=="function")return Promise.resolve([]);
+  return new Promise(resolve=>{
+    const times=[];let callbackId=0,settled=false;
+    const finish=()=>{if(settled)return;settled=true;clearTimeout(guard);if(callbackId)video.cancelVideoFrameCallback(callbackId);video.pause();video.removeEventListener("ended",finish);resolve(times);};
+    const step=(_now,metadata)=>{if(settled)return;if(!times.length||metadata.mediaTime>times[times.length-1]+1e-6)times.push(metadata.mediaTime);callbackId=video.requestVideoFrameCallback(step);};
+    const guard=setTimeout(finish,60000);
+    video.addEventListener("ended",finish,{once:true});
+    video.currentTime=0;callbackId=video.requestVideoFrameCallback(step);video.play().catch(finish);
+  });
+}
 async function setFrame(index,alreadyAtTarget=false){
   const item=mediaItem();if(!item||item.type!=="video")return; index=Math.max(0,Math.min(state.frameCount-1,index));await flushAutoSave();
   sliderPreviewFrame=null;
-  state.frameIndex=index;state.selectedInstance=null;if(!alreadyAtTarget){const targetTime=Math.min(video.duration||0,index/state.fps);if(Math.abs(video.currentTime-targetTime)>.001)video.currentTime=targetTime;if(video.seeking)await once(video,"seeked").catch(()=>{});}
+  state.frameIndex=index;state.selectedInstance=null;if(!alreadyAtTarget){const targetTime=frameSeekTime(index);if(Math.abs(video.currentTime-targetTime)>.001)video.currentTime=targetTime;if(video.seeking)await once(video,"seeked").catch(()=>{});}
   await loadSavedMasksForCurrent();
   if(!state.undoByKey.has(annotationKey()))resetHistory();updateNavigation();render();
 }
@@ -173,13 +219,18 @@ async function processWheelFrames(){
   wheelFrameRunning=true;pauseVideo();while(wheelFrameSteps!==0&&mediaItem()?.type==="video"){const direction=Math.sign(wheelFrameSteps),previous=state.frameIndex;wheelFrameSteps-=direction;if(direction>0)await showNextFrame();else await setFrame(previous-1);if(state.frameIndex===previous)wheelFrameSteps=0;}wheelFrameRunning=false;
 }
 function playNextDecodedFrame(){
-  if(typeof video.requestVideoFrameCallback!=="function")return Promise.resolve(false);return new Promise(resolve=>{const start=video.currentTime;let settled=false,callbackId=0;const finish=success=>{if(settled)return;settled=true;clearTimeout(timeout);if(callbackId)video.cancelVideoFrameCallback(callbackId);pauseVideo();resolve(success);};const check=(_now,metadata)=>{if(settled)return;if(metadata.mediaTime>start+.0001)return finish(true);callbackId=video.requestVideoFrameCallback(check);};const timeout=setTimeout(()=>finish(false),500);callbackId=video.requestVideoFrameCallback(check);video.play().catch(()=>finish(false));});
+  if(typeof video.requestVideoFrameCallback!=="function")return Promise.resolve(null);return new Promise(resolve=>{const start=video.currentTime;let settled=false,callbackId=0;const finish=time=>{if(settled)return;settled=true;clearTimeout(timeout);if(callbackId)video.cancelVideoFrameCallback(callbackId);pauseVideo();resolve(time);};const check=(_now,metadata)=>{if(settled)return;if(metadata.mediaTime>start+.0001)return finish(metadata.mediaTime);callbackId=video.requestVideoFrameCallback(check);};const timeout=setTimeout(()=>finish(null),500);callbackId=video.requestVideoFrameCallback(check);video.play().catch(()=>finish(null));});
 }
 async function showNextFrame(){
-  const item=mediaItem();if(!item||item.type!=="video"||state.frameIndex>=state.frameCount-1)return;await flushAutoSave();const advanced=await playNextDecodedFrame();await setFrame(state.frameIndex+1,advanced);
+  const item=mediaItem();if(!item||item.type!=="video"||state.frameIndex>=state.frameCount-1)return;await flushAutoSave();
+  const reached=await playNextDecodedFrame();
+  // The decoder reports which frame it actually presented, so the counter is read back from the
+  // video rather than tallied; a decode that never arrived falls back to seeking the next frame.
+  if(reached===null)return setFrame(state.frameIndex+1);
+  await setFrame(frameIndexAt(reached),true);
 }
 function previewSliderFrame(index){
-  const item=mediaItem();if(!item||item.type!=="video")return;pauseVideo();sliderPreviewFrame=Math.max(0,Math.min(state.frameCount-1,index));$("frameLabel").textContent=`${sliderPreviewFrame+1} / ${state.frameCount}`;if(sliderPreviewRequest)return;sliderPreviewRequest=requestAnimationFrame(()=>{sliderPreviewRequest=0;if(sliderPreviewFrame===null)return;const time=Math.min(video.duration||0,sliderPreviewFrame/state.fps);if(typeof video.fastSeek==="function")video.fastSeek(time);else video.currentTime=time;});
+  const item=mediaItem();if(!item||item.type!=="video")return;pauseVideo();sliderPreviewFrame=Math.max(0,Math.min(state.frameCount-1,index));$("frameLabel").textContent=`${sliderPreviewFrame+1} / ${state.frameCount}`;if(sliderPreviewRequest)return;sliderPreviewRequest=requestAnimationFrame(()=>{sliderPreviewRequest=0;if(sliderPreviewFrame===null)return;const time=frameSeekTime(sliderPreviewFrame);if(typeof video.fastSeek==="function")video.fastSeek(time);else video.currentTime=time;});
 }
 async function commitSliderFrame(){const index=sliderPreviewFrame;if(index===null)return;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;sliderPreviewFrame=null;await setFrame(index);}
 function updateNavigation(){
@@ -191,7 +242,7 @@ function updateNavigation(){
 }
 function pauseVideo(){video.pause();$("play").textContent="▶";}
 async function togglePlayback(){if(video.paused){await flushAutoSave();video.play();$("play").textContent="❚❚";requestAnimationFrame(playLoop);}else pauseVideo();}
-function playLoop(){if(video.paused)return;state.frameIndex=Math.min(state.frameCount-1,Math.floor(video.currentTime*state.fps));updateNavigation();render();requestAnimationFrame(playLoop);}
+function playLoop(){if(video.paused)return;state.frameIndex=frameIndexAt(video.currentTime);updateNavigation();render();requestAnimationFrame(playLoop);}
 
 function resizeCanvas(){const rect=$("stage").getBoundingClientRect();canvas.width=Math.max(1,Math.round(rect.width));canvas.height=Math.max(1,Math.round(rect.height));if(state.fit)fitView();else clampView();render();}
 function fitView(){if(!state.sourceWidth||!state.sourceHeight)return;state.scale=Math.min(canvas.width/state.sourceWidth,canvas.height/state.sourceHeight);state.offsetX=(canvas.width-state.sourceWidth*state.scale)/2;state.offsetY=(canvas.height-state.sourceHeight*state.scale)/2;state.fit=true;}
@@ -265,7 +316,7 @@ function selectedInstanceIndex(){const selected=state.selectedInstance;if(!selec
 function selectInstance(index){const item=instances()[index];if(!item)return;state.selectedInstance={key:annotationKey(),className:item.className,id:item.id};state.activeClass=item.className;updateChipSelection();status(`Selected ${item.className} ${item.id}`);render();}
 function hideMaskContextMenu(){$("maskContextMenu").hidden=true;}
 function showMaskContextMenu(event){const menu=$("maskContextMenu");menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;menu.hidden=false;}
-function deleteSelectedInstance(){const index=selectedInstanceIndex();if(index<0)return false;const [removed]=instances().splice(index,1);state.selectedInstance=null;hideMaskContextMenu();pushHistory();render();status(`Deleted ${removed.className} ${removed.id}`);queueAutoSave();return true;}
+function deleteSelectedInstance(){const index=selectedInstanceIndex();if(index<0)return false;const [removed]=instances().splice(index,1);state.selectedInstance=null;hideMaskContextMenu();stageRemoval(removed.className,removed.id);pushHistory();render();status(`Deleted ${removed.className} ${removed.id}`);queueAutoSave();return true;}
 function translateMask(mask,dx,dy){const moved=new Uint8Array(mask.length);for(let y=0;y<state.sourceHeight;y++)for(let x=0;x<state.sourceWidth;x++){if(!mask[y*state.sourceWidth+x])continue;const nx=x+dx,ny=y+dy;if(nx>=0&&ny>=0&&nx<state.sourceWidth&&ny<state.sourceHeight)moved[ny*state.sourceWidth+nx]=1;}return moved;}
 function eraseLine(a,b){
   const radius=Number($("radius").value),steps=Math.max(1,Math.ceil(Math.hypot(b.x-a.x,b.y-a.y)));
@@ -288,7 +339,7 @@ canvas.addEventListener("pointermove",(event)=>{
   else if(tool==="eraser")render();
 });
 canvas.addEventListener("pointerleave",()=>{if(!state.drawing&&state.eraserCursor){state.eraserCursor=null;render();}});
-canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;state.instancesByKey.set(annotationKey(),instances().filter(x=>x.mask.some(Boolean)));pushHistory();render();queueAutoSave();}});
+canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;const before=instances(),after=before.filter(x=>x.mask.some(Boolean));stageRemovals(before,after);state.instancesByKey.set(annotationKey(),after);pushHistory();render();queueAutoSave();}});
 canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();const point=toImagePoint(event),index=point?hitInstance(point):-1;if(index>=0){selectInstance(index);showMaskContextMenu(event);}else{hideMaskContextMenu();if($("tool").value==="polygon")completePolygon();}});
 canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;clampView();render();}else if(mediaItem().type==="video"&&event.deltaY!==0)queueWheelFrame(Math.sign(event.deltaY));},{passive:false});
@@ -302,18 +353,40 @@ async function confirmPreviousOutputDirectory(){
 }
 async function maskBlob(instance){const out=document.createElement("canvas");out.width=state.sourceWidth;out.height=state.sourceHeight;const oc=out.getContext("2d"),image=oc.createImageData(out.width,out.height);for(let i=0;i<instance.mask.length;i++){const v=instance.mask[i]?255:0,p=i*4;image.data[p]=v;image.data[p+1]=v;image.data[p+2]=v;image.data[p+3]=255;}oc.putImageData(image,0,0);return new Promise(resolve=>out.toBlob(resolve,"image/png"));}
 async function writeFile(dir,name,data){const handle=await dir.getFileHandle(name,{create:true});const stream=await handle.createWritable();await stream.write(data);await stream.close();}
+function maskFileName(frameName,className,id){return `${frameName}${safeClass(className)}_${String(id).padStart(3,"0")}.png`;}
+function currentMaskTarget(){
+  const item=mediaItem();if(!item)return null;
+  return {folderName:item.name.replace(/\.[^.]+$/,"")||(item.type==="video"?"video":"image"),frameName:item.type==="video"?`frame_${String(state.frameIndex).padStart(6,"0")}_`:""};
+}
 async function saveMaskSet(output,list,frameName=""){
-  const expected=new Set();for(const instance of list){const name=`${frameName}${safeClass(instance.className)}_${String(instance.id).padStart(3,"0")}.png`;expected.add(name);await writeFile(output,name,await maskBlob(instance));}
-  for await(const [name,handle] of output.entries())if(handle.kind==="file"&&name.startsWith(frameName)&&name.endsWith(".png")&&!expected.has(name))await output.removeEntry(name);return list.length;
+  for(const instance of list)await writeFile(output,maskFileName(frameName,instance.className,instance.id),await maskBlob(instance));
+  return list.length;
+}
+// A mask file is removed only when the user removed that specific mask. Nothing enumerates the
+// output folder to work out what to delete, so files this session never loaded are never touched.
+function stageRemoval(className,id){
+  const target=currentMaskTarget();if(!target)return;
+  state.pendingRemovals.push({folderName:target.folderName,fileName:maskFileName(target.frameName,className,id)});
+}
+function stageRemovals(before,after){
+  const kept=new Set(after.map(x=>`${cleanClass(x.className)}#${x.id}`));
+  for(const instance of before)if(!kept.has(`${cleanClass(instance.className)}#${instance.id}`))stageRemoval(instance.className,instance.id);
+}
+async function flushRemovals(){
+  if(!state.outputDir||!state.pendingRemovals.length)return;
+  for(const entry of state.pendingRemovals.splice(0)){
+    try{const output=await state.outputDir.getDirectoryHandle(entry.folderName,{create:true});await output.removeEntry(entry.fileName);}
+    catch(error){if(error.name!=="NotFoundError")throw error;}
+  }
 }
 async function saveCurrentMaskSet(){
-  if(!state.outputDir||!mediaItem())return 0;const item=mediaItem(),folderName=item.name.replace(/\.[^.]+$/,"")||(item.type==="video"?"video":"image"),output=await state.outputDir.getDirectoryHandle(folderName,{create:true}),frameName=item.type==="video"?`frame_${String(state.frameIndex).padStart(6,"0")}_`:"";return saveMaskSet(output,instances(),frameName);
+  if(!state.outputDir||!mediaItem())return 0;const target=currentMaskTarget(),output=await state.outputDir.getDirectoryHandle(target.folderName,{create:true});return saveMaskSet(output,instances(),target.frameName);
 }
 function queueAutoSave(){
   if(!mediaItem()||(!state.outputDir&&!state.outputPromptReady))return;startAutoSave();
 }
 function startAutoSave(){
-  autoSavePromise=autoSavePromise.then(async()=>{try{if(!await confirmPreviousOutputDirectory())return;const saved=await saveCurrentMaskSet();await saveManifest();status(`Autosaved ${saved} mask(s)`);}catch(error){status(`Autosave failed: ${error.message}`);}});
+  autoSavePromise=autoSavePromise.then(async()=>{try{if(!await confirmPreviousOutputDirectory())return;await flushRemovals();const saved=await saveCurrentMaskSet();await saveManifest();status(`Autosaved ${saved} mask(s)`);}catch(error){status(`Autosave failed: ${error.message}`);}});
 }
 async function flushAutoSave(){
   await autoSavePromise;
@@ -341,7 +414,10 @@ async function loadManifestLocation(videoName){
   await loadManifest();const item=mediaItem();if(item&&item.name===videoName){state.location=item.location||null;updateChipSelection();}
 }
 async function loadSavedMasksForCurrent(){
-  if(!state.outputDir||!mediaItem()||state.instancesByKey.has(annotationKey()))return false;const item=mediaItem();
+  // Gated on what has actually been read from disk, not on whether a key exists in memory:
+  // rendering a frame creates an empty entry for it, which must not suppress the read.
+  const key=annotationKey();
+  if(!state.outputDir||!mediaItem()||state.loadedKeys.has(key))return false;const item=mediaItem();
   try{
     const directory=await state.outputDir.getDirectoryHandle(item.name.replace(/\.[^.]+$/,"")||(item.type==="video"?"video":"image"));
     const frameName=item.type==="video"?`frame_${String(state.frameIndex).padStart(6,"0")}_`:"";
@@ -349,15 +425,22 @@ async function loadSavedMasksForCurrent(){
     for await(const [name,handle] of directory.entries()){
       if(handle.kind!=="file"||!name.startsWith(frameName))continue;const match=name.match(pattern);if(!match)continue;const bitmap=await createImageBitmap(await handle.getFile());const temp=document.createElement("canvas");temp.width=state.sourceWidth;temp.height=state.sourceHeight;const tc=temp.getContext("2d");tc.drawImage(bitmap,0,0,temp.width,temp.height);bitmap.close();const pixels=tc.getImageData(0,0,temp.width,temp.height).data,mask=new Uint8Array(temp.width*temp.height);for(let i=0;i<mask.length;i++)mask[i]=pixels[i*4]>=128?1:0;const className=match[1].replaceAll("_"," ").toLowerCase(),id=Number(match[2]);loaded.push({className,id,mask});ids.set(className,Math.max(ids.get(className)||1,id+1));
     }
-    state.instancesByKey.set(annotationKey(),loaded);state.nextIdsByKey.set(annotationKey(),ids);resetHistory();return loaded.length>0;
+    state.loadedKeys.add(key);
+    // Unsaved work already on the canvas wins; file-backed masks fill in around it.
+    const existing=state.instancesByKey.get(key)||[],taken=new Set(existing.map(x=>`${cleanClass(x.className)}#${x.id}`));
+    const merged=[...existing,...loaded.filter(x=>!taken.has(`${cleanClass(x.className)}#${x.id}`))];
+    state.instancesByKey.set(key,merged);
+    const idMap=state.nextIdsByKey.get(key)||new Map();
+    for(const [name,next] of ids)idMap.set(name,Math.max(idMap.get(name)||1,next));
+    state.nextIdsByKey.set(key,idMap);resetHistory();return merged.length>0;
   }catch{return false;}
 }
 
 $("loadImages").onclick=loadImages;$("loadVideos").onclick=loadVideos;$("chooseOutput").onclick=chooseOutput;$("saveMasks").onclick=saveMasks;
-$("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.selectedInstance=null;state.instancesByKey.clear();rebuildMediaList();render();status("Cleared");};
+$("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.selectedInstance=null;state.instancesByKey.clear();state.loadedKeys.clear();state.pendingRemovals.length=0;rebuildMediaList();render();status("Cleared");};
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
 $("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>queueWheelFrame(-1);$("nextFrame").onclick=()=>queueWheelFrame(1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>previewSliderFrame(Number($("frameSlider").value));$("frameSlider").onchange=commitSliderFrame;$("play").onclick=togglePlayback;
-$("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.selectedInstance=null;state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
+$("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.selectedInstance=null;stageRemovals(instances(),[]);state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
 for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=()=>{saveToolSettings();render();};$("tool").onchange=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 $("deleteMask").onclick=deleteSelectedInstance;document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
 video.addEventListener("seeked",()=>{if(sliderPreviewFrame!==null)render();});
