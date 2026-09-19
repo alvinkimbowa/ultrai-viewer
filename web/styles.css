@@ -30,6 +30,8 @@ label:has(input[type=checkbox]) { display: flex; align-items: center; }
 #video { display: none; }
 .context-menu { position: fixed; z-index: 20; padding: 4px; border: 1px solid #7d8790; border-radius: 4px; background: white; box-shadow: 0 3px 12px #0004; }
 .context-menu button { min-height: 28px; padding: 3px 12px; color: #8a1f1f; }
+.context-menu label { display: block; padding: 4px 8px 6px; font-size: 12px; }
+.context-menu select { width: 100%; margin-top: 3px; }
 #transport { display: flex; align-items: center; gap: 5px; }
 #transport button { width: 34px; }
 #frameSlider { flex: 1; }

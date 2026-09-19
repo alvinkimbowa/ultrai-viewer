@@ -307,7 +307,7 @@ function maskFromPolygon(points){
 }
 function completePolygon(){
   if(state.points.length<3)return cancelDrawing();if(!state.activeClass){alert("Select a nerve or other anatomy before drawing.");return cancelDrawing();}
-  const key=annotationKey(), idMap=state.nextIdsByKey.get(key)||new Map(),id=idMap.get(state.activeClass)||1;idMap.set(state.activeClass,id+1);state.nextIdsByKey.set(key,idMap);
+  const id=allocateInstanceId(state.activeClass);
   instances().push({className:state.activeClass,id,mask:maskFromPolygon(state.points)});state.points=[];state.drawing=false;state.outputPromptReady=true;pushHistory();render();status(`Created ${state.activeClass} ${id}`);queueAutoSave();
 }
 function cancelDrawing(){state.points=[];state.drawing=false;render();}
@@ -315,7 +315,30 @@ function hitInstance(point){for(let i=instances().length-1;i>=0;i--){if(instance
 function selectedInstanceIndex(){const selected=state.selectedInstance;if(!selected||selected.key!==annotationKey())return-1;return instances().findIndex(item=>item.className===selected.className&&item.id===selected.id);}
 function selectInstance(index){const item=instances()[index];if(!item)return;state.selectedInstance={key:annotationKey(),className:item.className,id:item.id};state.activeClass=item.className;updateChipSelection();status(`Selected ${item.className} ${item.id}`);render();}
 function hideMaskContextMenu(){$("maskContextMenu").hidden=true;}
-function showMaskContextMenu(event){const menu=$("maskContextMenu");menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;menu.hidden=false;}
+function fillMaskClassMenu(className){
+  const select=$("maskClass"),current=cleanClass(className),groups=[["Nerve",state.nerves],["Other anatomy",state.anatomy]];select.replaceChildren();
+  for(const [label,labels] of groups){const group=document.createElement("optgroup");group.label=label;for(const name of labels){const option=document.createElement("option");option.value=cleanClass(name);option.textContent=displayClass(name);group.append(option);}select.append(group);}
+  if(!classOrder().map(cleanClass).includes(current)){const option=document.createElement("option");option.value=current;option.textContent=displayClass(current);select.prepend(option);}
+  select.value=current;
+}
+function showMaskContextMenu(event){const index=selectedInstanceIndex();if(index<0)return;fillMaskClassMenu(instances()[index].className);const menu=$("maskContextMenu");menu.style.left=`${event.clientX}px`;menu.style.top=`${event.clientY}px`;menu.hidden=false;}
+// Instance ids double as the mask's filename, so a new id must clash neither with a mask on the
+// canvas nor with one already written for this frame; the counter is seeded from the folder.
+function allocateInstanceId(className){
+  const key=annotationKey(),idMap=state.nextIdsByKey.get(key)||new Map(),name=cleanClass(className);
+  const used=new Set(instances().filter(x=>cleanClass(x.className)===name).map(x=>x.id));
+  let id=idMap.get(name)||1;while(used.has(id))id++;
+  idMap.set(name,id+1);state.nextIdsByKey.set(key,idMap);return id;
+}
+function relabelSelectedInstance(className){
+  const index=selectedInstanceIndex();if(index<0)return false;
+  const instance=instances()[index],target=cleanClass(className);
+  if(!target||target===cleanClass(instance.className))return false;
+  const id=allocateInstanceId(target);stageRemoval(instance.className,instance.id);
+  instance.className=target;instance.id=id;
+  state.selectedInstance={key:annotationKey(),className:instance.className,id:instance.id};state.activeClass=target;
+  updateChipSelection();hideMaskContextMenu();pushHistory();render();status(`Relabelled as ${target} ${instance.id}`);queueAutoSave();return true;
+}
 function deleteSelectedInstance(){const index=selectedInstanceIndex();if(index<0)return false;const [removed]=instances().splice(index,1);state.selectedInstance=null;hideMaskContextMenu();stageRemoval(removed.className,removed.id);pushHistory();render();status(`Deleted ${removed.className} ${removed.id}`);queueAutoSave();return true;}
 function translateMask(mask,dx,dy){const moved=new Uint8Array(mask.length);for(let y=0;y<state.sourceHeight;y++)for(let x=0;x<state.sourceWidth;x++){if(!mask[y*state.sourceWidth+x])continue;const nx=x+dx,ny=y+dy;if(nx>=0&&ny>=0&&nx<state.sourceWidth&&ny<state.sourceHeight)moved[ny*state.sourceWidth+nx]=1;}return moved;}
 function eraseLine(a,b){
@@ -442,7 +465,7 @@ $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia
 $("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>queueWheelFrame(-1);$("nextFrame").onclick=()=>queueWheelFrame(1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>previewSliderFrame(Number($("frameSlider").value));$("frameSlider").onchange=commitSliderFrame;$("play").onclick=togglePlayback;
 $("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.selectedInstance=null;stageRemovals(instances(),[]);state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
 for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=()=>{saveToolSettings();render();};$("tool").onchange=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
-$("deleteMask").onclick=deleteSelectedInstance;document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
+$("deleteMask").onclick=deleteSelectedInstance;$("maskClass").onchange=event=>relabelSelectedInstance(event.target.value);document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
 video.addEventListener("seeked",()=>{if(sliderPreviewFrame!==null)render();});
 document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")queueWheelFrame(-1);else if(event.key==="ArrowRight")queueWheelFrame(1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
 async function runSelfTest(){
@@ -453,7 +476,7 @@ async function runSelfTest(){
     state.activeClass="artery";state.points=[{x:16,y:16},{x:28,y:16},{x:28,y:28},{x:16,y:28}];completePolygon();
     if(instances().length!==2||instances()[0].id!==1||instances()[1].id!==1)throw new Error("instance creation");
     if(classColor("median")===classColor("artery"))throw new Error("class colors");undo();if(instances().length!==1)throw new Error("undo");redo();if(instances().length!==2)throw new Error("redo");
-    selectInstance(0);if(selectedInstanceIndex()!==0)throw new Error("mask selection");if(state.activeClass!=="median"||!document.querySelector('#nerves .chip[data-value="median"]').classList.contains("selected"))throw new Error("mask class selection");const anchor=maskLabelAnchor(instances()[0].mask);if(!anchor||!instances()[0].mask[anchor.y*state.sourceWidth+anchor.x])throw new Error("mask label anchor");if(maskLabelAnchor(new Uint8Array(state.sourceWidth*state.sourceHeight))!==null)throw new Error("empty mask label");deleteSelectedInstance();if(instances().length!==1)throw new Error("mask deletion");undo();if(instances().length!==2)throw new Error("delete undo");
+    selectInstance(0);if(selectedInstanceIndex()!==0)throw new Error("mask selection");if(state.activeClass!=="median"||!document.querySelector('#nerves .chip[data-value="median"]').classList.contains("selected"))throw new Error("mask class selection");const anchor=maskLabelAnchor(instances()[0].mask);if(!anchor||!instances()[0].mask[anchor.y*state.sourceWidth+anchor.x])throw new Error("mask label anchor");if(maskLabelAnchor(new Uint8Array(state.sourceWidth*state.sourceHeight))!==null)throw new Error("empty mask label");relabelSelectedInstance("ulnar");if(instances()[0].className!=="ulnar"||selectedInstanceIndex()!==0)throw new Error("mask relabel");undo();if(instances()[0].className!=="median")throw new Error("relabel undo");selectInstance(0);deleteSelectedInstance();if(instances().length!==1)throw new Error("mask deletion");undo();if(instances().length!==2)throw new Error("delete undo");
     if(typeof UTIF!=="object"||typeof UTIF.decode!=="function")throw new Error("TIFF support");
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
   }catch(error){document.body.dataset.selftest=`fail:${error.message}`;}
