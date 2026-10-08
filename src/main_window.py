@@ -33,7 +33,7 @@ from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
 from .canvas import Canvas
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
-from .measurements import compute_cartilage_thickness, compute_echo_intensity
+from .measurements import MeasurementLog, measure
 from threading import Event
 from collections import OrderedDict
 from pathlib import Path
@@ -188,6 +188,7 @@ class MainWindow(QMainWindow):
         # Recomputing on every mask change would stall drawing, so changes are
         # collected and the measurements refresh once the mask has been still
         # for a moment.
+        self._measurement_logs = {}
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.setInterval(250)
@@ -392,31 +393,53 @@ class MainWindow(QMainWindow):
 
     def _update_measurements(self):
         mask = self.canvas.mask
-        image = self.canvas.image
-        px_per_mm_x = self.px_per_mm_x_spin.value()
-        px_per_mm_y = self.px_per_mm_y_spin.value()
-        in_mm = bool(px_per_mm_x and px_per_mm_y)
-        thickness = np.nan
-        echo_intensity = np.nan
-        if mask is not None:
-            binary_mask = mask >= 0.5
-            # A scale of 1 pixel per mm makes the result come out in pixels.
-            thickness = compute_cartilage_thickness(
-                binary_mask,
-                px_per_mm_x if in_mm else 1.0,
-                px_per_mm_y if in_mm else 1.0,
-            )
-            if image is not None and image.shape[:2] == mask.shape:
-                echo_intensity = compute_echo_intensity(image, binary_mask)
+        thickness, unit, echo_intensity = measure(
+            self.canvas.image,
+            None if mask is None else mask >= 0.5,
+            self.px_per_mm_x_spin.value(),
+            self.px_per_mm_y_spin.value(),
+        )
         if np.isnan(thickness):
             self.avg_thickness_label.setText("–")
         else:
-            unit = "mm" if in_mm else "px"
             self.avg_thickness_label.setText(f"{thickness:.2f} {unit}")
         if np.isnan(echo_intensity):
             self.avg_echo_intensity_label.setText("–")
         else:
             self.avg_echo_intensity_label.setText(f"{echo_intensity:.1f} AU")
+
+    def _measurement_log(self, output_dir):
+        # Logs are kept in memory so that stepping through video frames does not
+        # re-read the file each time; they are dropped whenever a background
+        # segmentation run has written to the same files.
+        key = str(output_dir)
+        if key not in self._measurement_logs:
+            self._measurement_logs[key] = MeasurementLog(output_dir)
+        return self._measurement_logs[key]
+
+    def _record_measurement(self, output_dir, file_name, frame=""):
+        """Store the measurements of the mask on screen next to its saved mask."""
+        try:
+            log = self._measurement_log(output_dir)
+            log.set(
+                file_name,
+                frame,
+                self.canvas.image,
+                np.asarray(self.canvas.mask) >= 0.5,
+                self.px_per_mm_x_spin.value(),
+                self.px_per_mm_y_spin.value(),
+            )
+            log.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not save measurements: {exc}")
+
+    def _forget_measurement(self, output_dir, file_name, frame=""):
+        try:
+            log = self._measurement_log(output_dir)
+            log.remove(file_name, frame)
+            log.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not save measurements: {exc}")
 
     def _transport_icon(self, name):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
@@ -847,6 +870,17 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "Delete error", str(exc))
             return
+        if self._mode == "video":
+            self._forget_measurement(
+                self._video_output_dir,
+                Path(self._video_path).name,
+                self._video_frame_index,
+            )
+        elif self._mode == "sequence" and self._sequence_output_dir:
+            self._forget_measurement(
+                self._sequence_output_dir,
+                Path(self._sequence_paths[self._sequence_index]).name,
+            )
         if mask_paths:
             self.statusBar().showMessage("Mask deleted from the output folder")
 
@@ -1032,11 +1066,16 @@ class MainWindow(QMainWindow):
         self._show_batch_dialog(total)
 
         self._batch_thread = QThread(self)
+        self._measurement_logs.clear()
         self._batch_worker = BatchInferenceWorker(
             self._model,
             list(self._sequence_paths),
             self._sequence_output_dir,
             overwrite_existing=overwrite_existing,
+            px_per_mm=(
+                self.px_per_mm_x_spin.value(),
+                self.px_per_mm_y_spin.value(),
+            ),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1120,11 +1159,16 @@ class MainWindow(QMainWindow):
         self._show_video_batch_dialog(len(video_paths), title)
 
         self._batch_thread = QThread(self)
+        self._measurement_logs.clear()
         self._batch_worker = VideoBatchInferenceWorker(
             self._model,
             video_paths,
             self._video_output_dir,
             overwrite_existing=overwrite_existing,
+            px_per_mm=(
+                self.px_per_mm_x_spin.value(),
+                self.px_per_mm_y_spin.value(),
+            ),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1257,6 +1301,7 @@ class MainWindow(QMainWindow):
     def _on_batch_thread_done(self):
         self._batch_thread = None
         self._batch_worker = None
+        self._measurement_logs.clear()
         self.statusBar().showMessage("Ready")
 
     def _load_files(self):
@@ -1747,12 +1792,24 @@ class MainWindow(QMainWindow):
             mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
             if not cv2.imwrite(str(mask_path), mask_uint8):
                 QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_path.name}")
+                return
+            self._record_measurement(
+                self._video_output_dir,
+                Path(self._video_path).name,
+                self._video_frame_index,
+            )
             return
         if mask_path.exists():
             try:
                 mask_path.unlink()
             except OSError as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
+                return
+            self._forget_measurement(
+                self._video_output_dir,
+                Path(self._video_path).name,
+                self._video_frame_index,
+            )
 
     def _update_navigation_buttons(self):
         is_video = self._mode == "video"
@@ -1888,15 +1945,33 @@ class MainWindow(QMainWindow):
         if self._sequence_index < 0 or self._sequence_index >= len(self._sequence_paths):
             return
         self._commit_pending_outline()
-        if not self._canvas_has_roi():
-            return
         image_path = Path(self._sequence_paths[self._sequence_index])
+        if not self._canvas_has_roi():
+            self._remove_emptied_sequence_mask(image_path)
+            return
         output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
         try:
             self.canvas.save_mask(str(output_path))
             self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+            self._record_measurement(self._sequence_output_dir, image_path.name)
         except Exception as exc:
             QMessageBox.warning(self, "Save error", str(exc))
+
+    def _remove_emptied_sequence_mask(self, image_path):
+        """Delete the saved mask of an image whose mask was erased down to nothing."""
+        # An empty canvas only means "erased" when a mask was loaded or drawn for
+        # the image on screen; a saved mask that was never shown must be kept.
+        if not self.canvas.has_mask_data():
+            return
+        if not self.canvas.image_path or Path(self.canvas.image_path) != image_path:
+            return
+        try:
+            for mask_path in self._saved_mask_paths_for_current():
+                mask_path.unlink()
+        except OSError as exc:
+            QMessageBox.warning(self, "Save error", str(exc))
+            return
+        self._forget_measurement(self._sequence_output_dir, image_path.name)
 
     def _save_current_mask(self):
         if self._mode == "video":
@@ -1912,6 +1987,7 @@ class MainWindow(QMainWindow):
             try:
                 self.canvas.save_mask(str(output_path))
                 self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+                self._record_measurement(self._sequence_output_dir, image_path.name)
             except Exception as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
             return
@@ -2354,7 +2430,21 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
     def closeEvent(self, event):
+        self._stop_playback()
+        if self.canvas.is_calibrating():
+            self._end_calibration()
+        self._save_sequence_mask_if_needed()
         self._stash_video_mask_for_current_frame()
+        # A segmentation still running in the background is told to stop and
+        # given time to finish the file it is writing.
+        for worker, thread in (
+            (self._inference_worker, self._inference_thread),
+            (self._batch_worker, self._batch_thread),
+        ):
+            if worker is not None and thread is not None and thread.isRunning():
+                worker.cancel()
+                thread.quit()
+                thread.wait(5000)
         self._clear_video_state()
         super().closeEvent(event)
 
@@ -2482,12 +2572,21 @@ class BatchInferenceWorker(QObject):
     progress = pyqtSignal(int, int)
     image_started = pyqtSignal(str, int, int)
 
-    def __init__(self, model, image_paths, output_dir, overwrite_existing=True):
+    def __init__(
+        self,
+        model,
+        image_paths,
+        output_dir,
+        overwrite_existing=True,
+        px_per_mm=(0.0, 0.0),
+    ):
         super().__init__()
         self._model = model
         self._image_paths = list(image_paths)
         self._output_dir = output_dir
         self._overwrite_existing = bool(overwrite_existing)
+        self._px_per_mm = px_per_mm
+        self._measurement_log = None
         self._cancel_event = Event()
 
     def cancel(self):
@@ -2495,6 +2594,14 @@ class BatchInferenceWorker(QObject):
 
     @pyqtSlot()
     def run(self):
+        try:
+            self._measurement_log = MeasurementLog(self._output_dir)
+            self._segment_images()
+            self._measurement_log.save()
+        except OSError as exc:
+            self.error.emit(f"Could not save measurements: {exc}")
+
+    def _segment_images(self):
         total = len(self._image_paths)
         if total == 0:
             self.error.emit("No images found for batch segmentation.")
@@ -2517,6 +2624,24 @@ class BatchInferenceWorker(QObject):
                     cancel_event=self._cancel_event,
                 )
                 self._save_mask(prediction, image_path)
+                if prediction is not None:
+                    # The model's output has its own fixed size, so it is
+                    # measured at the size of the image it belongs to.
+                    mask = np.asarray(prediction)
+                    height, width = image.shape[:2]
+                    if mask.shape[:2] != (height, width):
+                        mask = cv2.resize(
+                            mask.astype(np.float32),
+                            (width, height),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                    self._measurement_log.set(
+                        Path(image_path).name,
+                        "",
+                        image,
+                        mask >= 0.5,
+                        *self._px_per_mm,
+                    )
             except Exception as exc:
                 if str(exc).lower().startswith("inference canceled"):
                     self.canceled.emit()
@@ -2572,12 +2697,20 @@ class VideoBatchInferenceWorker(QObject):
     frame_started = pyqtSignal(str, int, int, int, int)
     frame_progress = pyqtSignal(int, int)
 
-    def __init__(self, model, video_paths, output_dir, overwrite_existing=True):
+    def __init__(
+        self,
+        model,
+        video_paths,
+        output_dir,
+        overwrite_existing=True,
+        px_per_mm=(0.0, 0.0),
+    ):
         super().__init__()
         self._model = model
         self._video_paths = list(video_paths)
         self._output_dir = Path(output_dir)
         self._overwrite_existing = bool(overwrite_existing)
+        self._px_per_mm = px_per_mm
         self._cancel_event = Event()
 
     def cancel(self):
@@ -2602,6 +2735,7 @@ class VideoBatchInferenceWorker(QObject):
             processed = 0
             skipped = 0
             video_count = len(self._video_paths)
+            measurement_log = MeasurementLog(self._output_dir)
             for video_number, video_path in enumerate(self._video_paths, start=1):
                 video_name = Path(video_path).name
                 capture = cv2.VideoCapture(video_path)
@@ -2657,11 +2791,19 @@ class VideoBatchInferenceWorker(QObject):
                         mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
                         if not cv2.imwrite(str(output_path), mask_uint8):
                             raise RuntimeError(f"Failed to save mask: {output_path}")
+                        measurement_log.set(
+                            video_name,
+                            frame_index,
+                            image,
+                            mask >= 0.5,
+                            *self._px_per_mm,
+                        )
                         processed += 1
                         self.progress.emit(processed, total_frames)
                         self.frame_progress.emit(frame_index + 1, frame_count)
                 finally:
                     capture.release()
+                    measurement_log.save()
                 self.video_finished.emit(video_number, video_count)
             self.finished.emit(processed, skipped)
         except Exception as exc:

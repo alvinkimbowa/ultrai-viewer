@@ -2,6 +2,9 @@
 Measurements computed from a segmented cartilage mask.
 """
 
+import csv
+from pathlib import Path
+
 import cv2
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -88,3 +91,92 @@ def compute_echo_intensity(image, mask):
     if not binary_mask.any():
         return np.nan
     return float(np.mean(to_grayscale(image)[binary_mask]))
+
+
+def measure(image, mask, px_per_mm_x, px_per_mm_y):
+    """Measure a mask, returning (thickness, thickness unit, echo intensity).
+
+    Thickness is in mm when both resolutions are known and in pixels otherwise.
+    Values that cannot be computed are NaN.
+    """
+    in_mm = bool(px_per_mm_x and px_per_mm_y)
+    thickness = np.nan
+    echo_intensity = np.nan
+    if mask is not None:
+        thickness = compute_cartilage_thickness(
+            mask,
+            px_per_mm_x if in_mm else 1.0,
+            px_per_mm_y if in_mm else 1.0,
+        )
+        if image is not None and image.shape[:2] == mask.shape[:2]:
+            echo_intensity = compute_echo_intensity(image, mask)
+    return thickness, "mm" if in_mm else "px", echo_intensity
+
+
+MEASUREMENTS_FILE_NAME = "measurements.csv"
+MEASUREMENT_COLUMNS = [
+    "file",
+    "frame",
+    "average_thickness",
+    "thickness_unit",
+    "average_echo_intensity_au",
+    "pixels_per_mm_x",
+    "pixels_per_mm_y",
+]
+
+
+class MeasurementLog:
+    """The measurements.csv of one output folder, one row per image or video frame.
+
+    `frame` is the frame number for a video and "" for an image.
+    """
+
+    def __init__(self, output_dir):
+        self.path = Path(output_dir) / MEASUREMENTS_FILE_NAME
+        self._rows = {}
+        self._dirty = False
+        if self.path.exists():
+            with open(self.path, newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    key = (row.get("file", ""), row.get("frame", ""))
+                    self._rows[key] = {
+                        column: row.get(column, "") for column in MEASUREMENT_COLUMNS
+                    }
+
+    def set(self, file_name, frame, image, mask, px_per_mm_x, px_per_mm_y):
+        thickness, unit, echo_intensity = measure(image, mask, px_per_mm_x, px_per_mm_y)
+        row = {
+            "file": str(file_name),
+            "frame": str(frame),
+            "average_thickness": "" if np.isnan(thickness) else f"{thickness:.4f}",
+            "thickness_unit": unit,
+            "average_echo_intensity_au": (
+                "" if np.isnan(echo_intensity) else f"{echo_intensity:.2f}"
+            ),
+            "pixels_per_mm_x": f"{px_per_mm_x:.3f}" if px_per_mm_x else "",
+            "pixels_per_mm_y": f"{px_per_mm_y:.3f}" if px_per_mm_y else "",
+        }
+        key = (row["file"], row["frame"])
+        if self._rows.get(key) != row:
+            self._rows[key] = row
+            self._dirty = True
+
+    def remove(self, file_name, frame):
+        if self._rows.pop((str(file_name), str(frame)), None) is not None:
+            self._dirty = True
+
+    def save(self):
+        if not self._dirty:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        def order(key):
+            file_name, frame = key
+            return file_name, int(frame) if frame.isdigit() else -1
+
+        with open(self.path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=MEASUREMENT_COLUMNS)
+            writer.writeheader()
+            for key in sorted(self._rows, key=order):
+                writer.writerow(self._rows[key])
+        self._dirty = False
