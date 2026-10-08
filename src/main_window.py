@@ -1723,6 +1723,19 @@ class MainWindow(QMainWindow):
                 return self._last_video_input_dir or self._last_image_input_dir
             return self._last_image_input_dir or self._last_video_input_dir
 
+        def default_output_dir():
+            if selection["kind"] == "video":
+                remembered = self._last_video_output_dir
+            else:
+                remembered = self._last_image_output_dir
+            directory = self._sequence_output_dir or self._video_output_dir or remembered
+            return directory if directory and Path(directory).is_dir() else ""
+
+        # The suggested folder follows the kind of file selected until the user
+        # picks or types a folder of their own.
+        suggested = {"dir": default_output_dir()}
+        output_line.setText(suggested["dir"])
+
         def with_suffix(paths, extensions):
             return [str(path) for path in paths if Path(path).suffix.lower() in extensions]
 
@@ -1737,6 +1750,9 @@ class MainWindow(QMainWindow):
                 self._last_image_input_dir = directory
             self._last_load_kind = kind
             self._save_persisted_paths()
+            if output_line.text().strip() == suggested["dir"]:
+                suggested["dir"] = default_output_dir()
+                output_line.setText(suggested["dir"])
 
         def ask_kind():
             box = QMessageBox(dialog)
@@ -1804,7 +1820,9 @@ class MainWindow(QMainWindow):
                 start_dir = self._last_video_output_dir or self._last_video_input_dir
             else:
                 start_dir = self._last_image_output_dir or self._last_image_input_dir
-            directory = QFileDialog.getExistingDirectory(dialog, "Select output folder", start_dir)
+            directory = QFileDialog.getExistingDirectory(
+                dialog, "Select output folder", output_line.text().strip() or start_dir
+            )
             if directory:
                 output_line.setText(directory)
 
