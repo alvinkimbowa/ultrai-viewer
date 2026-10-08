@@ -413,18 +413,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(sep3)
 
         layout.addWidget(QLabel("Models:"))
-        model_device_row = QHBoxLayout()
-        model_device_row.addWidget(QLabel("Model:"))
+        model_device_form = QFormLayout()
+        model_device_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
         self.model_picker = QComboBox()
         self.model_picker.addItem("No models loaded")
         self.model_picker.setEnabled(False)
-        model_device_row.addWidget(self.model_picker)
-        model_device_row.addSpacing(6)
-        model_device_row.addWidget(QLabel("Device:"))
+        model_device_form.addRow("Model:", self.model_picker)
         self.device_picker = QComboBox()
         self.device_picker.setEnabled(False)
-        model_device_row.addWidget(self.device_picker)
-        layout.addLayout(model_device_row)
+        model_device_form.addRow("Device:", self.device_picker)
+        layout.addLayout(model_device_form)
 
         layout.addSpacing(16)
         sep4 = QFrame()
