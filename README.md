@@ -64,22 +64,22 @@ python app.py
 ### Single image segmentation
 
 1. Launch the app.
-2. Load one or more images.
+2. Click `Load files` and choose one or more images and an output folder.
 3. Select a model from the sidebar.
-4. Click `Segment`.
+4. Click `Segment image`.
 5. Refine the result with the editing tools if needed.
 6. Save the mask.
 
 ### Batch image segmentation
 
-1. Load an image sequence and choose an output folder.
+1. Click `Load files`, choose a folder of images and an output folder.
 2. Select a model.
-3. Click `Batch segment`.
+3. Click `Segment all files`.
 4. Masks are written to the chosen output folder as `<image_stem>.png`.
 
 ### Video annotation
 
-1. Load one or more videos and choose an output folder.
+1. Click `Load files`, choose one or more videos and an output folder.
 2. Navigate across videos and frames.
 3. Draw or edit masks frame by frame.
 4. Assign `Location` and `Nerve` labels.

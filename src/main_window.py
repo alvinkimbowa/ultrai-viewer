@@ -39,6 +39,9 @@ import numpy as np
 import cv2
 import tifffile
 
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv")
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -176,8 +179,9 @@ class MainWindow(QMainWindow):
         self._last_image_output_dir = ""
         self._last_video_input_dir = ""
         self._last_video_output_dir = ""
+        self._last_load_kind = "image"
         self._load_persisted_paths()
-        self._update_output_dir_tooltips()
+        self._update_output_dir_tooltip()
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
         self._playback_interval_ms = 33
@@ -197,22 +201,19 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("File")
-        self.load_image_action = QAction("Load Image...", self)
-        file_menu.addAction(self.load_image_action)
-        self.load_video_action = QAction("Load Video...", self)
-        file_menu.addAction(self.load_video_action)
-        self.load_mask_action = QAction("Load Mask...", self)
-        file_menu.addAction(self.load_mask_action)
-        self.segment_action = QAction("Segment", self)
+        self.load_files_action = QAction("Load files...", self)
+        file_menu.addAction(self.load_files_action)
+        self.segment_action = QAction("Segment image", self)
         file_menu.addAction(self.segment_action)
-        self.segment_batch_action = QAction("Batch segment", self)
-        file_menu.addAction(self.segment_batch_action)
+        self.segment_video_action = QAction("Segment video", self)
+        self.segment_video_action.setEnabled(False)
+        file_menu.addAction(self.segment_video_action)
+        self.segment_all_action = QAction("Segment all files", self)
+        file_menu.addAction(self.segment_all_action)
         file_menu.addSeparator()
-        self.save_mask_action = QAction("Save mask...", self)
+        self.save_mask_action = QAction("Save masks", self)
         self.save_mask_action.setShortcut(QKeySequence.StandardKey.Save)
         file_menu.addAction(self.save_mask_action)
-        self.save_video_masks_action = QAction("Save video masks...", self)
-        file_menu.addAction(self.save_video_masks_action)
         self.clear_mask_action = QAction("Clear Mask", self)
         file_menu.addAction(self.clear_mask_action)
         self.close_image_action = QAction("Close Image", self)
@@ -250,6 +251,7 @@ class MainWindow(QMainWindow):
         self._last_image_output_dir = str(settings.value("paths/image_output_dir", "", str) or "")
         self._last_video_input_dir = str(settings.value("paths/video_input_dir", "", str) or "")
         self._last_video_output_dir = str(settings.value("paths/video_output_dir", "", str) or "")
+        self._last_load_kind = str(settings.value("paths/last_load_kind", "image", str) or "image")
 
     def _save_persisted_paths(self):
         settings = self._settings()
@@ -257,6 +259,7 @@ class MainWindow(QMainWindow):
         settings.setValue("paths/image_output_dir", self._last_image_output_dir)
         settings.setValue("paths/video_input_dir", self._last_video_input_dir)
         settings.setValue("paths/video_output_dir", self._last_video_output_dir)
+        settings.setValue("paths/last_load_kind", self._last_load_kind)
 
     def _transport_icon(self, name):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
@@ -320,98 +323,50 @@ class MainWindow(QMainWindow):
             button.setMinimumHeight(min_height)
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        layout.addWidget(QLabel("Images:"))
-        load_row = QHBoxLayout()
-        self.open_image_btn = QPushButton("Load image(s)")
-        configure_button(self.open_image_btn)
-        load_row.addWidget(self.open_image_btn)
-        layout.addLayout(load_row)
-        self.image_output_btn = QPushButton("Select output folder")
-        configure_button(self.image_output_btn)
-        layout.addWidget(self.image_output_btn)
+        layout.addWidget(QLabel("Files:"))
+        self.load_btn = QPushButton("Load files")
+        configure_button(self.load_btn)
+        layout.addWidget(self.load_btn)
+        self.output_btn = QPushButton("Select output folder")
+        configure_button(self.output_btn)
+        layout.addWidget(self.output_btn)
+        self.clear_files_btn = QPushButton("Clear files")
+        configure_button(self.clear_files_btn)
+        layout.addWidget(self.clear_files_btn)
 
-        mask_row = QHBoxLayout()
-        self.open_mask_btn = QPushButton("Load mask(s)")
-        configure_button(self.open_mask_btn)
-        mask_row.addWidget(self.open_mask_btn)
-        self.clear_sequence_btn = QPushButton("Clear image(s)")
-        configure_button(self.clear_sequence_btn)
-        mask_row.addWidget(self.clear_sequence_btn)
-        layout.addLayout(mask_row)
-
-        self.sequence_combo = QComboBox()
-        self.sequence_combo.setEnabled(False)
-        layout.addWidget(self.sequence_combo)
-        image_nav_row = QHBoxLayout()
-        self.image_prev_btn = QPushButton("Prev")
-        self.image_prev_btn.setEnabled(False)
-        configure_button(self.image_prev_btn)
-        image_nav_row.addWidget(self.image_prev_btn)
-        self.image_next_btn = QPushButton("Next")
-        self.image_next_btn.setEnabled(False)
-        configure_button(self.image_next_btn)
-        image_nav_row.addWidget(self.image_next_btn)
-        layout.addLayout(image_nav_row)
-        self.save_btn = QPushButton("Save masks")
-        configure_button(self.save_btn)
-        layout.addWidget(self.save_btn)
-
-        image_segment_row = QHBoxLayout()
-        self.run_btn = QPushButton("Segment")
-        configure_button(self.run_btn)
-        image_segment_row.addWidget(self.run_btn)
-        self.run_batch_btn = QPushButton("Batch segment")
-        configure_button(self.run_batch_btn)
-        image_segment_row.addWidget(self.run_batch_btn)
-        layout.addLayout(image_segment_row)
-
-        layout.addSpacing(16)
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep2)
-
-        layout.addWidget(QLabel("Videos:"))
-        self.video_btn = QPushButton("Load video(s)")
-        configure_button(self.video_btn)
-        layout.addWidget(self.video_btn)
-        self.video_output_btn = QPushButton("Select output folder")
-        configure_button(self.video_output_btn)
-        layout.addWidget(self.video_output_btn)
-        self.clear_video_btn = QPushButton("Clear video(s)")
-        configure_button(self.clear_video_btn)
-        layout.addWidget(self.clear_video_btn)
-        self.video_combo = QComboBox()
-        self.video_combo.setEnabled(False)
-        layout.addWidget(self.video_combo)
+        self.file_combo = QComboBox()
+        self.file_combo.setEnabled(False)
+        layout.addWidget(self.file_combo)
 
         nav_row = QHBoxLayout()
         self.prev_btn = QPushButton("Prev")
         self.prev_btn.setEnabled(False)
         configure_button(self.prev_btn)
         nav_row.addWidget(self.prev_btn)
-
         self.next_btn = QPushButton("Next")
         self.next_btn.setEnabled(False)
         configure_button(self.next_btn)
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
-        self.save_video_btn = QPushButton("Save masks")
-        configure_button(self.save_video_btn)
-        layout.addWidget(self.save_video_btn)
 
-        video_segment_row = QHBoxLayout()
-        self.segment_frame_btn = QPushButton("Segment frame")
-        configure_button(self.segment_frame_btn)
-        video_segment_row.addWidget(self.segment_frame_btn)
+        segment_row = QHBoxLayout()
+        self.segment_btn = QPushButton("Segment image")
+        self.segment_btn.setToolTip("Segment the image or video frame on screen")
+        configure_button(self.segment_btn)
+        segment_row.addWidget(self.segment_btn)
         self.segment_video_btn = QPushButton("Segment video")
+        self.segment_video_btn.setEnabled(False)
         configure_button(self.segment_video_btn)
-        video_segment_row.addWidget(self.segment_video_btn)
-        layout.addLayout(video_segment_row)
+        segment_row.addWidget(self.segment_video_btn)
+        layout.addLayout(segment_row)
 
-        self.batch_video_segment_btn = QPushButton("Segment all videos")
-        configure_button(self.batch_video_segment_btn)
-        layout.addWidget(self.batch_video_segment_btn)
+        self.segment_all_btn = QPushButton("Segment all files")
+        configure_button(self.segment_all_btn)
+        layout.addWidget(self.segment_all_btn)
+
+        self.save_btn = QPushButton("Save masks")
+        configure_button(self.save_btn)
+        layout.addWidget(self.save_btn)
 
         layout.addSpacing(16)
         sep3 = QFrame()
@@ -514,26 +469,18 @@ class MainWindow(QMainWindow):
         return panel
 
     def _wire_actions(self):
-        self.open_image_btn.clicked.connect(self._load_sequence)
-        self.load_image_action.triggered.connect(self._load_sequence)
-        self.video_btn.clicked.connect(self._load_video)
-        self.load_video_action.triggered.connect(self._load_video)
-        self.image_output_btn.clicked.connect(self._change_image_output_dir)
-        self.video_output_btn.clicked.connect(self._change_video_output_dir)
-        self.open_mask_btn.clicked.connect(self.canvas.load_mask_dialog)
-        self.load_mask_action.triggered.connect(self.canvas.load_mask_dialog)
+        self.load_btn.clicked.connect(self._load_files)
+        self.load_files_action.triggered.connect(self._load_files)
+        self.output_btn.clicked.connect(self._change_output_dir)
         self.exit_action.triggered.connect(self.close)
-        self.run_btn.clicked.connect(self._run_current_image_inference)
-        self.segment_action.triggered.connect(self._run_current_image_inference)
-        self.run_batch_btn.clicked.connect(self._run_batch_inference)
-        self.segment_batch_action.triggered.connect(self._run_batch_inference)
-        self.segment_frame_btn.clicked.connect(self._run_current_video_frame_inference)
+        self.segment_btn.clicked.connect(self._segment_current)
+        self.segment_action.triggered.connect(self._segment_current)
         self.segment_video_btn.clicked.connect(self._run_current_video_inference)
-        self.batch_video_segment_btn.clicked.connect(self._run_all_videos_inference)
+        self.segment_video_action.triggered.connect(self._run_current_video_inference)
+        self.segment_all_btn.clicked.connect(self._segment_all)
+        self.segment_all_action.triggered.connect(self._segment_all)
         self.save_btn.clicked.connect(self._save_current_mask)
         self.save_mask_action.triggered.connect(self._save_current_mask)
-        self.save_video_btn.clicked.connect(self._save_video_masks)
-        self.save_video_masks_action.triggered.connect(self._save_video_masks)
         self.clear_btn.clicked.connect(self.canvas.clear_mask)
         self.clear_mask_action.triggered.connect(self.canvas.clear_mask)
         self.close_btn.clicked.connect(self._close_current_image)
@@ -549,12 +496,8 @@ class MainWindow(QMainWindow):
         self.redo_action.triggered.connect(self.canvas.redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
-        self.clear_sequence_btn.clicked.connect(self._clear_sequence)
-        self.sequence_combo.currentIndexChanged.connect(self._on_sequence_selected)
-        self.image_prev_btn.clicked.connect(self._show_previous_sequence)
-        self.image_next_btn.clicked.connect(self._show_next_sequence)
-        self.clear_video_btn.clicked.connect(self._clear_video_sequence)
-        self.video_combo.currentIndexChanged.connect(self._on_video_selected)
+        self.clear_files_btn.clicked.connect(self._clear_sequence)
+        self.file_combo.currentIndexChanged.connect(self._on_file_selected)
         self.prev_btn.clicked.connect(self._show_previous_sequence)
         self.next_btn.clicked.connect(self._show_next_sequence)
         self.play_btn.clicked.connect(self._toggle_playback)
@@ -651,33 +594,6 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(self._base_title)
 
-    def _load_single_image(self):
-        image_paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Load image(s)",
-            self._last_image_input_dir,
-            "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
-        )
-        if not image_paths:
-            return
-        self._last_image_input_dir = str(Path(image_paths[0]).parent)
-        self._save_persisted_paths()
-        self._stop_playback()
-        if self._mode == "video":
-            self._stash_video_mask_for_current_frame()
-            self._clear_video_state()
-        self._mode = "sequence"
-        self._sequence_paths = list(image_paths)
-        self._sequence_index = 0
-        self._sequence_output_dir = None
-        self._update_output_dir_tooltips()
-        self.sequence_combo.setEnabled(True)
-        self.sequence_combo.clear()
-        self.sequence_combo.addItems([Path(p).name for p in self._sequence_paths])
-        self._set_slider_state(0, len(self._sequence_paths) - 1, enabled=bool(self._sequence_paths))
-        self._set_sequence_index(0)
-        self.statusBar().showMessage(f"Loaded {len(self._sequence_paths)} image(s)")
-
     def _close_current_image(self):
         self._stop_playback()
         self._stash_video_mask_for_current_frame()
@@ -735,7 +651,7 @@ class MainWindow(QMainWindow):
 
     def _run_current_image_inference(self):
         if self._mode != "sequence":
-            QMessageBox.information(self, "No image", "Load one or more images first.")
+            QMessageBox.information(self, "No files", "Load files first.")
             return
         if 0 <= self._sequence_index < len(self._sequence_paths):
             existing_path = self._find_sequence_mask_path(
@@ -749,7 +665,7 @@ class MainWindow(QMainWindow):
         if self._mode != "video" or self._video_frame_index < 0:
             QMessageBox.information(self, "No video", "Load a video first.")
             return
-        selected_index = self.video_combo.currentIndex()
+        selected_index = self.file_combo.currentIndex()
         if selected_index < 0 or selected_index >= len(self._video_paths):
             QMessageBox.information(self, "No video", "Select a video first.")
             return
@@ -793,13 +709,6 @@ class MainWindow(QMainWindow):
         return choice == QMessageBox.StandardButton.Yes
 
     def _run_batch_inference(self):
-        if self._mode == "video":
-            QMessageBox.information(
-                self,
-                "Video mode",
-                "Batch segmentation is currently available for image sequences only.",
-            )
-            return
         if not self._sequence_paths:
             QMessageBox.information(self, "No sequence", "Load an image sequence first.")
             return
@@ -864,7 +773,7 @@ class MainWindow(QMainWindow):
         if self._mode != "video":
             QMessageBox.information(self, "No video", "Load a video first.")
             return
-        selected_index = self.video_combo.currentIndex()
+        selected_index = self.file_combo.currentIndex()
         if selected_index < 0 or selected_index >= len(self._video_paths):
             QMessageBox.information(self, "No video", "Select a video first.")
             return
@@ -1064,32 +973,34 @@ class MainWindow(QMainWindow):
         self._batch_worker = None
         self.statusBar().showMessage("Ready")
 
-    def _load_sequence(self):
-        dialog_result = self._show_sequence_dialog()
+    def _load_files(self):
+        dialog_result = self._show_load_dialog()
         if dialog_result is None:
             return
+        kind, paths, output_dir = dialog_result
+        if kind == "video":
+            self._load_video(paths, output_dir)
+        else:
+            self._load_sequence(paths, output_dir)
+
+    def _load_sequence(self, paths, output_dir):
         self._stop_playback()
         if self._mode == "video":
             self._stash_video_mask_for_current_frame()
             self._clear_video_state()
-        paths, output_dir = dialog_result
         self._mode = "sequence"
         self._sequence_paths = list(paths)
         self._sequence_index = 0
         self._sequence_output_dir = output_dir
-        self._update_output_dir_tooltips()
-        self.sequence_combo.setEnabled(True)
-        self.sequence_combo.clear()
-        self.sequence_combo.addItems([Path(p).name for p in self._sequence_paths])
+        self._update_output_dir_tooltip()
+        self.file_combo.setEnabled(True)
+        self.file_combo.clear()
+        self.file_combo.addItems([Path(p).name for p in self._sequence_paths])
         self._set_slider_state(0, len(self._sequence_paths) - 1, enabled=bool(self._sequence_paths))
         self._set_sequence_index(0)
         self.statusBar().showMessage(f"Sequence loaded: {len(self._sequence_paths)} images")
 
-    def _load_video(self):
-        dialog_result = self._show_video_dialog()
-        if dialog_result is None:
-            return
-        video_paths, output_dir = dialog_result
+    def _load_video(self, video_paths, output_dir):
         self._stop_playback()
         if self._mode == "sequence":
             self._save_sequence_mask_if_needed()
@@ -1101,17 +1012,42 @@ class MainWindow(QMainWindow):
         self._video_output_dir = output_dir
         self._last_video_output_dir = output_dir
         self._save_persisted_paths()
-        self._update_output_dir_tooltips()
+        self._update_output_dir_tooltip()
         self._mode = "video"
-        self.video_combo.setEnabled(True)
-        self.video_combo.clear()
-        self.video_combo.addItems([Path(p).name for p in self._video_paths])
+        self.file_combo.setEnabled(True)
+        self.file_combo.clear()
+        self.file_combo.addItems([Path(p).name for p in self._video_paths])
         self._open_video_at_index(0, start_frame=0)
 
+    def _change_output_dir(self):
+        if self._mode == "video":
+            self._change_video_output_dir()
+        elif self._mode == "sequence":
+            self._change_image_output_dir()
+        else:
+            QMessageBox.information(self, "No files", "Load files first.")
+
+    def _segment_current(self):
+        if self._mode == "video":
+            self._run_current_video_frame_inference()
+        else:
+            self._run_current_image_inference()
+
+    def _segment_all(self):
+        if self._mode == "video":
+            self._run_all_videos_inference()
+        elif self._mode == "sequence":
+            self._run_batch_inference()
+        else:
+            QMessageBox.information(self, "No files", "Load files first.")
+
+    def _on_file_selected(self, index):
+        if self._mode == "video":
+            self._on_video_selected(index)
+        else:
+            self._on_sequence_selected(index)
+
     def _change_image_output_dir(self):
-        if self._mode != "sequence":
-            QMessageBox.information(self, "No images", "Load images first.")
-            return
         directory = QFileDialog.getExistingDirectory(
             self,
             "Select output folder",
@@ -1125,7 +1061,7 @@ class MainWindow(QMainWindow):
         self._sequence_output_dir = directory
         self._last_image_output_dir = directory
         self._save_persisted_paths()
-        self._update_output_dir_tooltips()
+        self._update_output_dir_tooltip()
         if 0 <= self._sequence_index < len(self._sequence_paths):
             mask_path = self._find_sequence_mask_path(self._sequence_paths[self._sequence_index])
             if mask_path:
@@ -1135,9 +1071,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Output folder: {directory}")
 
     def _change_video_output_dir(self):
-        if self._mode != "video":
-            QMessageBox.information(self, "No video", "Load a video first.")
-            return
         directory = QFileDialog.getExistingDirectory(
             self,
             "Select output folder",
@@ -1152,7 +1085,7 @@ class MainWindow(QMainWindow):
         self._video_output_dir = directory
         self._last_video_output_dir = directory
         self._save_persisted_paths()
-        self._update_output_dir_tooltips()
+        self._update_output_dir_tooltip()
         if self._video_path and self._video_frame_index >= 0:
             saved_mask = self._load_saved_video_mask_for_frame(
                 self._video_path, self._video_frame_index
@@ -1163,17 +1096,18 @@ class MainWindow(QMainWindow):
                 self.canvas.clear_mask()
         self.statusBar().showMessage(f"Output folder: {directory}")
 
-    def _update_output_dir_tooltips(self):
-        self.image_output_btn.setToolTip(self._sequence_output_dir or "No output folder selected")
-        self.video_output_btn.setToolTip(self._video_output_dir or "No output folder selected")
+    def _update_output_dir_tooltip(self):
+        self.output_btn.setToolTip(
+            self._sequence_output_dir or self._video_output_dir or "No output folder selected"
+        )
 
     def _clear_sequence_state(self, clear_canvas):
         self._sequence_paths = []
         self._sequence_index = -1
         self._sequence_output_dir = None
-        self._update_output_dir_tooltips()
-        self.sequence_combo.clear()
-        self.sequence_combo.setEnabled(False)
+        self._update_output_dir_tooltip()
+        self.file_combo.clear()
+        self.file_combo.setEnabled(False)
         if clear_canvas:
             self.canvas.clear_image()
 
@@ -1181,8 +1115,8 @@ class MainWindow(QMainWindow):
         self._stop_playback()
         if self._video_capture is not None:
             self._video_capture.release()
-        self.video_combo.clear()
-        self.video_combo.setEnabled(False)
+        self.file_combo.clear()
+        self.file_combo.setEnabled(False)
         self._video_paths = []
         self._video_list_index = -1
         self._video_path = None
@@ -1191,25 +1125,10 @@ class MainWindow(QMainWindow):
         self._video_fps = 0.0
         self._video_frame_index = -1
         self._video_output_dir = None
-        self._update_output_dir_tooltips()
+        self._update_output_dir_tooltip()
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
         self._video_use_random_seek = False
-
-    def _clear_video_sequence(self):
-        if self._mode != "video":
-            return
-        self._stop_playback()
-        self._stash_video_mask_for_current_frame()
-        self._clear_video_state()
-        self._mode = "none"
-        self._set_slider_state(0, 0, enabled=False)
-        self.image_prev_btn.setEnabled(False)
-        self.image_next_btn.setEnabled(False)
-        self.prev_btn.setEnabled(False)
-        self.next_btn.setEnabled(False)
-        self.canvas.clear_image()
-        self.statusBar().showMessage("Video sequence cleared")
 
     def _video_output_root_for_path(self, video_path):
         output_dir = (self._video_output_dir or "").strip()
@@ -1263,9 +1182,9 @@ class MainWindow(QMainWindow):
         self._video_frame_index = -1
         self._video_decode_pos = -1
         self._video_frame_cache.clear()
-        self.video_combo.blockSignals(True)
-        self.video_combo.setCurrentIndex(video_index)
-        self.video_combo.blockSignals(False)
+        self.file_combo.blockSignals(True)
+        self.file_combo.setCurrentIndex(video_index)
+        self.file_combo.blockSignals(False)
         self._set_slider_state(0, frame_count - 1, enabled=frame_count > 0)
         target_frame = int(start_frame)
         if target_frame < 0:
@@ -1284,12 +1203,9 @@ class MainWindow(QMainWindow):
         self._clear_sequence_state(clear_canvas=False)
         self._mode = "none"
         self._set_slider_state(0, 0, enabled=False)
-        self.image_prev_btn.setEnabled(False)
-        self.image_next_btn.setEnabled(False)
-        self.prev_btn.setEnabled(False)
-        self.next_btn.setEnabled(False)
+        self._update_navigation_buttons()
         self.canvas.clear_image()
-        self.statusBar().showMessage("Sequence/video cleared")
+        self.statusBar().showMessage("Files cleared")
 
     def _on_sequence_selected(self, index):
         if self._mode != "sequence":
@@ -1427,9 +1343,9 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self._sequence_paths):
             return
         self._sequence_index = index
-        self.sequence_combo.blockSignals(True)
-        self.sequence_combo.setCurrentIndex(index)
-        self.sequence_combo.blockSignals(False)
+        self.file_combo.blockSignals(True)
+        self.file_combo.setCurrentIndex(index)
+        self.file_combo.blockSignals(False)
         self._load_sequence_image()
 
     def _reopen_video_capture(self):
@@ -1553,15 +1469,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Save error", str(exc))
 
     def _update_navigation_buttons(self):
-        if self._mode == "video":
+        is_video = self._mode == "video"
+        self.segment_video_btn.setEnabled(is_video)
+        self.segment_video_action.setEnabled(is_video)
+        if is_video:
             can_prev = self._video_list_index > 0
             can_next = 0 <= self._video_list_index < len(self._video_paths) - 1
             can_prev_frame = self._video_frame_index > 0
             can_next_frame = (
                 self._video_frame_index >= 0 and self._video_frame_index < self._video_frame_count - 1
             )
-            self.image_prev_btn.setEnabled(False)
-            self.image_next_btn.setEnabled(False)
             self.prev_btn.setEnabled(can_prev)
             self.next_btn.setEnabled(can_next)
             self.play_btn.setEnabled(self._video_frame_count > 1)
@@ -1573,18 +1490,14 @@ class MainWindow(QMainWindow):
         if self._mode == "sequence":
             can_prev = self._sequence_index > 0
             can_next = self._sequence_index < len(self._sequence_paths) - 1
-            self.image_prev_btn.setEnabled(can_prev)
-            self.image_next_btn.setEnabled(can_next)
-            self.prev_btn.setEnabled(False)
-            self.next_btn.setEnabled(False)
+            self.prev_btn.setEnabled(can_prev)
+            self.next_btn.setEnabled(can_next)
             self.play_btn.setEnabled(False)
             self.frame_first_btn.setEnabled(can_prev)
             self.frame_prev_btn.setEnabled(can_prev)
             self.frame_next_btn.setEnabled(can_next)
             self.frame_last_btn.setEnabled(can_next)
             return
-        self.image_prev_btn.setEnabled(False)
-        self.image_next_btn.setEnabled(False)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.play_btn.setEnabled(False)
@@ -1766,7 +1679,7 @@ class MainWindow(QMainWindow):
             self._video_output_dir = output_dir
             self._last_video_output_dir = output_dir
             self._save_persisted_paths()
-            self._update_output_dir_tooltips()
+            self._update_output_dir_tooltip()
         video_output_root = Path(output_dir) / Path(self._video_path).stem
         annotated_count = 0
         if video_output_root.exists() and video_output_root.is_dir():
@@ -1793,9 +1706,9 @@ class MainWindow(QMainWindow):
                 return str(candidate)
         return None
 
-    def _show_sequence_dialog(self):
+    def _show_load_dialog(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Load image sequence")
+        dialog.setWindowTitle("Load files")
         layout = QFormLayout(dialog)
 
         input_line = QLineEdit(dialog)
@@ -1803,54 +1716,101 @@ class MainWindow(QMainWindow):
         input_line.setReadOnly(True)
 
         selected_paths = []
+        selection = {"kind": self._last_load_kind}
+
+        def input_dir():
+            if selection["kind"] == "video":
+                return self._last_video_input_dir or self._last_image_input_dir
+            return self._last_image_input_dir or self._last_video_input_dir
+
+        def with_suffix(paths, extensions):
+            return [str(path) for path in paths if Path(path).suffix.lower() in extensions]
+
+        def choose(kind, paths, description, directory):
+            selected_paths[:] = paths
+            selection["kind"] = kind
+            noun = "videos" if kind == "video" else "images"
+            input_line.setText(f"{description}{len(paths)} {noun}")
+            if kind == "video":
+                self._last_video_input_dir = directory
+            else:
+                self._last_image_input_dir = directory
+            self._last_load_kind = kind
+            self._save_persisted_paths()
+
+        def ask_kind():
+            box = QMessageBox(dialog)
+            box.setWindowTitle("Images or videos")
+            box.setText("This folder contains both images and videos. Which do you want to load?")
+            images_btn = box.addButton("Images", QMessageBox.ButtonRole.AcceptRole)
+            videos_btn = box.addButton("Videos", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.clickedButton() is images_btn:
+                return "image"
+            if box.clickedButton() is videos_btn:
+                return "video"
+            return None
 
         def select_folder():
-            directory = QFileDialog.getExistingDirectory(
-                dialog, "Select input folder", self._last_image_input_dir
-            )
-            if directory:
-                paths = sorted(
-                    str(path)
-                    for path in Path(directory).iterdir()
-                    if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+            directory = QFileDialog.getExistingDirectory(dialog, "Select input folder", input_dir())
+            if not directory:
+                return
+            entries = sorted(Path(directory).iterdir())
+            images = with_suffix(entries, IMAGE_EXTENSIONS)
+            videos = with_suffix(entries, VIDEO_EXTENSIONS)
+            if images and videos:
+                kind = ask_kind()
+                if kind is None:
+                    return
+            elif images or videos:
+                kind = "image" if images else "video"
+            else:
+                QMessageBox.information(
+                    dialog, "No files", "No images or videos found in the selected folder."
                 )
-                if paths:
-                    selected_paths[:] = paths
-                    input_line.setText(f"{directory} ({len(paths)} images)")
-                    self._last_image_input_dir = directory
-                    self._save_persisted_paths()
-                else:
-                    QMessageBox.information(
-                        dialog, "No images", "No images found in the selected folder."
-                    )
+                return
+            choose(kind, videos if kind == "video" else images, f"{directory}: ", directory)
 
         def select_files():
+            image_filter = " ".join(f"*{ext}" for ext in IMAGE_EXTENSIONS)
+            video_filter = " ".join(f"*{ext}" for ext in VIDEO_EXTENSIONS)
             files, _ = QFileDialog.getOpenFileNames(
                 dialog,
-                "Select images",
-                self._last_image_input_dir,
-                "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
+                "Select files",
+                input_dir(),
+                f"Images and videos ({image_filter} {video_filter});;"
+                f"Images ({image_filter});;Videos ({video_filter})",
             )
-            if files:
-                selected_paths[:] = list(files)
-                input_line.setText(f"{len(files)} images selected")
-                self._last_image_input_dir = str(Path(files[0]).parent)
-                self._save_persisted_paths()
+            if not files:
+                return
+            images = with_suffix(files, IMAGE_EXTENSIONS)
+            videos = with_suffix(files, VIDEO_EXTENSIONS)
+            if images and videos:
+                QMessageBox.information(
+                    dialog,
+                    "Mixed selection",
+                    "Select either images or videos, not both.",
+                )
+                return
+            if not images and not videos:
+                QMessageBox.information(dialog, "No files", "Select image or video files.")
+                return
+            kind = "image" if images else "video"
+            choose(kind, images or videos, "", str(Path(files[0]).parent))
 
         def browse_output():
-            directory = QFileDialog.getExistingDirectory(
-                dialog,
-                "Select output folder",
-                self._last_image_output_dir or self._last_image_input_dir,
-            )
+            if selection["kind"] == "video":
+                start_dir = self._last_video_output_dir or self._last_video_input_dir
+            else:
+                start_dir = self._last_image_output_dir or self._last_image_input_dir
+            directory = QFileDialog.getExistingDirectory(dialog, "Select output folder", start_dir)
             if directory:
                 output_line.setText(directory)
-                self._last_image_output_dir = directory
-                self._save_persisted_paths()
 
         input_row = QHBoxLayout()
         folder_btn = QPushButton("Select folder")
-        files_btn = QPushButton("Select images")
+        files_btn = QPushButton("Select files")
         folder_btn.clicked.connect(select_folder)
         files_btn.clicked.connect(select_files)
         input_row.addWidget(folder_btn)
@@ -1870,7 +1830,7 @@ class MainWindow(QMainWindow):
 
         def validate_and_accept():
             if not selected_paths:
-                QMessageBox.information(dialog, "Missing fields", "Select input images or a folder.")
+                QMessageBox.information(dialog, "Missing fields", "Select input files or a folder.")
                 return
             if not output_line.text().strip():
                 QMessageBox.information(dialog, "Missing fields", "Select an output folder.")
@@ -1883,107 +1843,12 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         output_dir = output_line.text().strip()
-        self._last_image_output_dir = output_dir
-        if selected_paths:
-            self._last_image_input_dir = str(Path(selected_paths[0]).parent)
+        if selection["kind"] == "video":
+            self._last_video_output_dir = output_dir
+        else:
+            self._last_image_output_dir = output_dir
         self._save_persisted_paths()
-        return selected_paths, output_dir
-
-    def _show_video_dialog(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Load video sequence")
-        layout = QFormLayout(dialog)
-
-        input_line = QLineEdit(dialog)
-        output_line = QLineEdit(dialog)
-        input_line.setReadOnly(True)
-
-        selected_paths = []
-
-        def select_folder():
-            directory = QFileDialog.getExistingDirectory(
-                dialog, "Select input folder", self._last_video_input_dir
-            )
-            if directory:
-                paths = sorted(
-                    str(path)
-                    for path in Path(directory).iterdir()
-                    if path.suffix.lower() in (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv")
-                )
-                if paths:
-                    selected_paths[:] = paths
-                    input_line.setText(f"{directory} ({len(paths)} videos)")
-                    self._last_video_input_dir = directory
-                    self._save_persisted_paths()
-                else:
-                    QMessageBox.information(
-                        dialog, "No videos", "No videos found in the selected folder."
-                    )
-
-        def select_files():
-            files, _ = QFileDialog.getOpenFileNames(
-                dialog,
-                "Select video(s)",
-                self._last_video_input_dir,
-                "Video Files (*.mp4 *.avi *.mov *.mkv *.m4v *.wmv)",
-            )
-            if files:
-                selected_paths[:] = list(files)
-                input_line.setText(f"{len(files)} videos selected")
-                self._last_video_input_dir = str(Path(files[0]).parent)
-                self._save_persisted_paths()
-
-        def browse_output():
-            directory = QFileDialog.getExistingDirectory(
-                dialog,
-                "Select output folder",
-                self._video_output_dir or self._last_video_output_dir or self._last_video_input_dir,
-            )
-            if directory:
-                output_line.setText(directory)
-                self._last_video_output_dir = directory
-                self._save_persisted_paths()
-
-        input_row = QHBoxLayout()
-        folder_btn = QPushButton("Select folder")
-        files_btn = QPushButton("Select videos")
-        folder_btn.clicked.connect(select_folder)
-        files_btn.clicked.connect(select_files)
-        input_row.addWidget(folder_btn)
-        input_row.addWidget(files_btn)
-        layout.addRow("Input source:", input_row)
-        layout.addRow("Input selection:", input_line)
-
-        output_row = QHBoxLayout()
-        output_btn = QPushButton("Browse")
-        output_btn.clicked.connect(browse_output)
-        output_row.addWidget(output_line)
-        output_row.addWidget(output_btn)
-        layout.addRow("Output folder:", output_row)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        layout.addRow(buttons)
-
-        def validate_and_accept():
-            if not selected_paths:
-                QMessageBox.information(dialog, "Missing fields", "Select input videos or a folder.")
-                return
-            if not output_line.text().strip():
-                QMessageBox.information(dialog, "Missing fields", "Select an output folder.")
-                return
-            dialog.accept()
-
-        buttons.accepted.connect(validate_and_accept)
-        buttons.rejected.connect(dialog.reject)
-
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-        output_dir = output_line.text().strip()
-        self._last_video_output_dir = output_dir
-        if selected_paths:
-            self._last_video_input_dir = str(Path(selected_paths[0]).parent)
-        self._save_persisted_paths()
-        return selected_paths, output_dir
+        return selection["kind"], list(selected_paths), output_dir
 
     def _preload_model(self):
         if not self._model.has_model():

@@ -65,16 +65,6 @@ class Canvas(QWidget):
         if path:
             self.load_image(path)
 
-    def load_mask_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Mask",
-            "",
-            "Mask Files (*.tif *.tiff *.png *.bmp *.jpg *.jpeg)",
-        )
-        if path:
-            self.load_mask(path)
-
     def save_mask_dialog(self):
         if not self.has_mask_data():
             QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")

@@ -30,11 +30,11 @@ The current app size is ~800 MB. Future versions will be smaller and more optimi
 ## Quick Start
 
 1) Launch the app (UltAIViewer.exe on Windows, UltAIViewer on Linux).
-2) Load an image: File > Load Image.
+2) Click **Load files**, choose your images and an output folder.
 3) Select a model (left panel, Model dropdown).
-4) Click Segment to run inference.
+4) Click **Segment image** to run inference.
 5) Edit results if needed (Freehand Line, Segmented Line, Paint Brush, Eraser).
-6) Save the mask: File > Save Mask (PNG recommended).
+6) Click **Save masks** (or press Ctrl+S).
 
 ## Supported Images and ROI
 
@@ -54,18 +54,21 @@ This build runs on CPU only.
 
 ## Segmentation (Single Image)
 
-1) Load an image.
+1) Click **Load files** and choose the image(s) and output folder.
 2) Choose the model.
-3) Click Segment.
+3) Click **Segment image**.
 4) Wait for the progress dialog to finish.
 5) Edit the mask if needed.
 
+A load is either images or videos, not both together. **Segment video** is only
+available while videos are loaded.
+
 ## Batch Segmentation (Many Images)
 
-1) Click "Load image sequence".
+1) Click **Load files**.
 2) Select a folder or select multiple images.
 3) Choose an output folder.
-4) Click Batch segment.
+4) Click **Segment all files**.
 5) Wait for the progress dialog to finish.
 
 Results are saved automatically in the output folder as PNG files. You can preview
@@ -75,10 +78,10 @@ them and segment only missing images.
 
 ## Video Segmentation
 
-1) Click **Load video(s)** and choose the videos and output folder.
-2) Use **Segment frame** to segment only the displayed frame for editing.
+1) Click **Load files** and choose the videos and output folder.
+2) Use **Segment image** to segment only the displayed frame for editing.
 3) Use **Segment video** to segment every frame of the selected video.
-4) Use **Segment all videos** to segment every frame of all loaded videos.
+4) Use **Segment all files** to segment every frame of all loaded videos.
 
 If saved masks already exist, the app asks whether to overwrite them or preserve
 them and segment only missing frames. Masks are saved as PNG files under
@@ -100,11 +103,12 @@ processed and saved.
 - Ctrl + scroll: zoom in/out.
 - Shift + scroll: horizontal scroll (when zoomed).
 - Scroll up/down: move to the previous/next image or video frame.
+- Prev/Next: move to the previous/next image, or the previous/next video.
 
 ## Saving
 
-- Save Mask: saves the current mask as PNG.
-- If a batch output folder is selected, Ctrl+S saves directly to that folder.
+- Save masks (Ctrl+S): saves the current mask as PNG in the output folder.
+- Select output folder: switches to a different output folder without reloading the files.
 
 ## Tips
 
