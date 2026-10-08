@@ -177,6 +177,7 @@ class MainWindow(QMainWindow):
         self._last_video_input_dir = ""
         self._last_video_output_dir = ""
         self._load_persisted_paths()
+        self._update_output_dir_tooltips()
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
         self._playback_interval_ms = 33
@@ -325,6 +326,9 @@ class MainWindow(QMainWindow):
         configure_button(self.open_image_btn)
         load_row.addWidget(self.open_image_btn)
         layout.addLayout(load_row)
+        self.image_output_btn = QPushButton("Select output folder")
+        configure_button(self.image_output_btn)
+        layout.addWidget(self.image_output_btn)
 
         mask_row = QHBoxLayout()
         self.open_mask_btn = QPushButton("Load mask(s)")
@@ -371,6 +375,9 @@ class MainWindow(QMainWindow):
         self.video_btn = QPushButton("Load video(s)")
         configure_button(self.video_btn)
         layout.addWidget(self.video_btn)
+        self.video_output_btn = QPushButton("Select output folder")
+        configure_button(self.video_output_btn)
+        layout.addWidget(self.video_output_btn)
         self.clear_video_btn = QPushButton("Clear video(s)")
         configure_button(self.clear_video_btn)
         layout.addWidget(self.clear_video_btn)
@@ -511,6 +518,8 @@ class MainWindow(QMainWindow):
         self.load_image_action.triggered.connect(self._load_sequence)
         self.video_btn.clicked.connect(self._load_video)
         self.load_video_action.triggered.connect(self._load_video)
+        self.image_output_btn.clicked.connect(self._change_image_output_dir)
+        self.video_output_btn.clicked.connect(self._change_video_output_dir)
         self.open_mask_btn.clicked.connect(self.canvas.load_mask_dialog)
         self.load_mask_action.triggered.connect(self.canvas.load_mask_dialog)
         self.exit_action.triggered.connect(self.close)
@@ -661,6 +670,7 @@ class MainWindow(QMainWindow):
         self._sequence_paths = list(image_paths)
         self._sequence_index = 0
         self._sequence_output_dir = None
+        self._update_output_dir_tooltips()
         self.sequence_combo.setEnabled(True)
         self.sequence_combo.clear()
         self.sequence_combo.addItems([Path(p).name for p in self._sequence_paths])
@@ -1067,6 +1077,7 @@ class MainWindow(QMainWindow):
         self._sequence_paths = list(paths)
         self._sequence_index = 0
         self._sequence_output_dir = output_dir
+        self._update_output_dir_tooltips()
         self.sequence_combo.setEnabled(True)
         self.sequence_combo.clear()
         self.sequence_combo.addItems([Path(p).name for p in self._sequence_paths])
@@ -1090,16 +1101,77 @@ class MainWindow(QMainWindow):
         self._video_output_dir = output_dir
         self._last_video_output_dir = output_dir
         self._save_persisted_paths()
+        self._update_output_dir_tooltips()
         self._mode = "video"
         self.video_combo.setEnabled(True)
         self.video_combo.clear()
         self.video_combo.addItems([Path(p).name for p in self._video_paths])
         self._open_video_at_index(0, start_frame=0)
 
+    def _change_image_output_dir(self):
+        if self._mode != "sequence":
+            QMessageBox.information(self, "No images", "Load images first.")
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select output folder",
+            self._sequence_output_dir or self._last_image_output_dir or self._last_image_input_dir,
+        )
+        if not directory or directory == self._sequence_output_dir:
+            return
+        # The mask on screen belongs to the previous folder, so it is written there
+        # and the canvas then shows whatever the chosen folder holds for this image.
+        self._save_sequence_mask_if_needed()
+        self._sequence_output_dir = directory
+        self._last_image_output_dir = directory
+        self._save_persisted_paths()
+        self._update_output_dir_tooltips()
+        if 0 <= self._sequence_index < len(self._sequence_paths):
+            mask_path = self._find_sequence_mask_path(self._sequence_paths[self._sequence_index])
+            if mask_path:
+                self.canvas.load_mask(mask_path)
+            else:
+                self.canvas.clear_mask()
+        self.statusBar().showMessage(f"Output folder: {directory}")
+
+    def _change_video_output_dir(self):
+        if self._mode != "video":
+            QMessageBox.information(self, "No video", "Load a video first.")
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select output folder",
+            self._video_output_dir or self._last_video_output_dir or self._last_video_input_dir,
+        )
+        if not directory or directory == self._video_output_dir:
+            return
+        self._stop_playback()
+        # Stashing writes the on-screen mask to the folder in effect, so it has to
+        # happen before the switch and the canvas reloaded from the chosen folder after.
+        self._stash_video_mask_for_current_frame()
+        self._video_output_dir = directory
+        self._last_video_output_dir = directory
+        self._save_persisted_paths()
+        self._update_output_dir_tooltips()
+        if self._video_path and self._video_frame_index >= 0:
+            saved_mask = self._load_saved_video_mask_for_frame(
+                self._video_path, self._video_frame_index
+            )
+            if saved_mask is not None:
+                self.canvas.set_mask(saved_mask)
+            else:
+                self.canvas.clear_mask()
+        self.statusBar().showMessage(f"Output folder: {directory}")
+
+    def _update_output_dir_tooltips(self):
+        self.image_output_btn.setToolTip(self._sequence_output_dir or "No output folder selected")
+        self.video_output_btn.setToolTip(self._video_output_dir or "No output folder selected")
+
     def _clear_sequence_state(self, clear_canvas):
         self._sequence_paths = []
         self._sequence_index = -1
         self._sequence_output_dir = None
+        self._update_output_dir_tooltips()
         self.sequence_combo.clear()
         self.sequence_combo.setEnabled(False)
         if clear_canvas:
@@ -1119,6 +1191,7 @@ class MainWindow(QMainWindow):
         self._video_fps = 0.0
         self._video_frame_index = -1
         self._video_output_dir = None
+        self._update_output_dir_tooltips()
         self._video_frame_cache.clear()
         self._video_decode_pos = -1
         self._video_use_random_seek = False
@@ -1693,6 +1766,7 @@ class MainWindow(QMainWindow):
             self._video_output_dir = output_dir
             self._last_video_output_dir = output_dir
             self._save_persisted_paths()
+            self._update_output_dir_tooltips()
         video_output_root = Path(output_dir) / Path(self._video_path).stem
         annotated_count = 0
         if video_output_root.exists() and video_output_root.is_dir():
