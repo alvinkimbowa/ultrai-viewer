@@ -109,6 +109,8 @@ processed and saved.
 
 - Save masks (Ctrl+S): saves the current mask as PNG in the output folder.
 - Select output folder: switches to a different output folder without reloading the files.
+- Delete mask: removes the mask from the screen and deletes its saved file from the output folder. Ctrl+Z brings the mask back on screen.
+- Close file: closes the image or video on screen and keeps the others loaded.
 
 ## Tips
 

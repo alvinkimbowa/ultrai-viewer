@@ -41,6 +41,7 @@ import tifffile
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv")
+MASK_EXTENSIONS = (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg")
 
 
 class MainWindow(QMainWindow):
@@ -214,10 +215,10 @@ class MainWindow(QMainWindow):
         self.save_mask_action = QAction("Save masks", self)
         self.save_mask_action.setShortcut(QKeySequence.StandardKey.Save)
         file_menu.addAction(self.save_mask_action)
-        self.clear_mask_action = QAction("Clear Mask", self)
-        file_menu.addAction(self.clear_mask_action)
-        self.close_image_action = QAction("Close Image", self)
-        file_menu.addAction(self.close_image_action)
+        self.delete_mask_action = QAction("Delete mask", self)
+        file_menu.addAction(self.delete_mask_action)
+        self.close_file_action = QAction("Close file", self)
+        file_menu.addAction(self.close_file_action)
         file_menu.addSeparator()
         self.exit_action = QAction("Exit", self)
         file_menu.addAction(self.exit_action)
@@ -365,10 +366,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.segment_all_btn)
 
         clear_row = QHBoxLayout()
-        self.clear_btn = QPushButton("Clear Mask")
-        configure_button(self.clear_btn)
-        clear_row.addWidget(self.clear_btn)
-        self.close_btn = QPushButton("Close Image")
+        self.delete_mask_btn = QPushButton("Delete mask")
+        configure_button(self.delete_mask_btn)
+        clear_row.addWidget(self.delete_mask_btn)
+        self.close_btn = QPushButton("Close file")
         configure_button(self.close_btn)
         clear_row.addWidget(self.close_btn)
         layout.addLayout(clear_row)
@@ -481,10 +482,10 @@ class MainWindow(QMainWindow):
         self.segment_all_action.triggered.connect(self._segment_all)
         self.save_btn.clicked.connect(self._save_current_mask)
         self.save_mask_action.triggered.connect(self._save_current_mask)
-        self.clear_btn.clicked.connect(self.canvas.clear_mask)
-        self.clear_mask_action.triggered.connect(self.canvas.clear_mask)
-        self.close_btn.clicked.connect(self._close_current_image)
-        self.close_image_action.triggered.connect(self._close_current_image)
+        self.delete_mask_btn.clicked.connect(self._delete_current_mask)
+        self.delete_mask_action.triggered.connect(self._delete_current_mask)
+        self.close_btn.clicked.connect(self._close_current_file)
+        self.close_file_action.triggered.connect(self._close_current_file)
         self.tool_picker.currentIndexChanged.connect(self._on_tool_changed)
         self.brush_radius.valueChanged.connect(self._on_brush_radius_changed)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
@@ -594,14 +595,95 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(self._base_title)
 
-    def _close_current_image(self):
+    def _saved_mask_paths_for_current(self):
+        if self._mode == "sequence" and 0 <= self._sequence_index < len(self._sequence_paths):
+            if not self._sequence_output_dir:
+                return []
+            image_path = Path(self._sequence_paths[self._sequence_index])
+            candidates = [
+                Path(self._sequence_output_dir) / f"{image_path.stem}{ext}" for ext in MASK_EXTENSIONS
+            ]
+            # When the output folder is also the input folder, the image itself has
+            # the file name its mask would have.
+            return [
+                path
+                for path in candidates
+                if path.is_file() and path.resolve() != image_path.resolve()
+            ]
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
+            if mask_path is not None and mask_path.is_file():
+                return [mask_path]
+        return []
+
+    def _delete_current_mask(self):
+        self._commit_pending_outline()
+        mask_paths = self._saved_mask_paths_for_current()
+        if not mask_paths and not self._canvas_has_roi():
+            return
+        if self._mode == "video":
+            target = f"frame {self._video_frame_index + 1} of {Path(self._video_path).name}"
+        elif self._mode == "sequence":
+            target = Path(self._sequence_paths[self._sequence_index]).name
+        else:
+            target = "this image"
+        choice = QMessageBox.question(
+            self,
+            "Delete mask",
+            f"Delete the mask for {target}?\n\nThe mask will be permanently deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        self.canvas.clear_mask()
+        try:
+            for mask_path in mask_paths:
+                mask_path.unlink()
+        except OSError as exc:
+            QMessageBox.warning(self, "Delete error", str(exc))
+            return
+        if mask_paths:
+            self.statusBar().showMessage("Mask deleted from the output folder")
+
+    def _close_current_file(self):
+        if self._mode == "video":
+            paths, index = self._video_paths, self._video_list_index
+        elif self._mode == "sequence":
+            paths, index = self._sequence_paths, self._sequence_index
+        else:
+            return
+        if index < 0 or index >= len(paths):
+            return
+        closed_name = Path(paths[index]).name
+        choice = QMessageBox.question(
+            self,
+            "Close file",
+            f"Close {closed_name}?\n\n"
+            "The file will be closed but not deleted, and the masks will be saved.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
         self._stop_playback()
         self._stash_video_mask_for_current_frame()
-        self._clear_video_state()
-        self._clear_sequence_state(clear_canvas=False)
-        self._mode = "none"
-        self._set_slider_state(0, 0, enabled=False)
-        self.canvas.clear_image()
+        self._save_sequence_mask_if_needed()
+        if len(paths) == 1:
+            self._clear_sequence()
+            self.statusBar().showMessage(f"Closed {closed_name}")
+            return
+        del paths[index]
+        self.file_combo.blockSignals(True)
+        self.file_combo.removeItem(index)
+        self.file_combo.blockSignals(False)
+        next_index = min(index, len(paths) - 1)
+        if self._mode == "video":
+            self._open_video_at_index(next_index, start_frame=0)
+        else:
+            self._set_slider_state(0, len(paths) - 1, enabled=True)
+            self._set_sequence_index(next_index)
+        self.statusBar().showMessage(f"Closed {closed_name}")
 
     def _screen_bounds(self):
         screen = QApplication.primaryScreen()
@@ -1700,7 +1782,7 @@ class MainWindow(QMainWindow):
             return None
         stem = Path(image_path).stem
         output_dir = Path(self._sequence_output_dir)
-        for ext in (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
+        for ext in MASK_EXTENSIONS:
             candidate = output_dir / f"{stem}{ext}"
             if candidate.exists():
                 return str(candidate)
@@ -2244,7 +2326,7 @@ class BatchInferenceWorker(QObject):
     def _existing_mask_path(self, image_path):
         stem = Path(image_path).stem
         output_dir = Path(self._output_dir)
-        for extension in (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"):
+        for extension in MASK_EXTENSIONS:
             candidate = output_dir / f"{stem}{extension}"
             if candidate.exists():
                 return candidate
