@@ -2623,10 +2623,9 @@ class BatchInferenceWorker(QObject):
                     image,
                     cancel_event=self._cancel_event,
                 )
-                self._save_mask(prediction, image_path)
                 if prediction is not None:
                     # The model's output has its own fixed size, so it is
-                    # measured at the size of the image it belongs to.
+                    # brought back to the size of the image it belongs to.
                     mask = np.asarray(prediction)
                     height, width = image.shape[:2]
                     if mask.shape[:2] != (height, width):
@@ -2635,6 +2634,7 @@ class BatchInferenceWorker(QObject):
                             (width, height),
                             interpolation=cv2.INTER_NEAREST,
                         )
+                    self._save_mask(mask, image_path)
                     self._measurement_log.set(
                         Path(image_path).name,
                         "",
@@ -2678,10 +2678,8 @@ class BatchInferenceWorker(QObject):
             raise ValueError(f"Unsupported image format: {file_path}")
         return image
 
-    def _save_mask(self, prediction, image_path):
-        if prediction is None:
-            return
-        mask_uint8 = (prediction >= 0.5).astype(np.uint8) * 255
+    def _save_mask(self, mask, image_path):
+        mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
         output_path = Path(self._output_dir) / f"{Path(image_path).stem}.png"
         if not cv2.imwrite(str(output_path), mask_uint8):
             raise RuntimeError(f"Failed to save mask: {output_path}")
