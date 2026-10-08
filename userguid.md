@@ -112,6 +112,21 @@ processed and saved.
 - Delete mask: removes the mask from the screen and deletes its saved file from the output folder. Ctrl+Z brings the mask back on screen.
 - Close file: closes the image or video on screen and keeps the others loaded.
 
+## Measurements
+
+The Measurements section of the left panel shows numbers for the mask on screen. They update by themselves when the mask changes.
+
+- **Pixels per mm (x, y)**: the image scale. Type the values, or click **Calibrate**, drag the two horizontal and two vertical lines onto a known distance, and enter the real distance between each pair. Without both values, results are shown in pixels.
+- **View**: **Full cartilage** measures the mask as one piece. **Per region** splits it into lateral, notch (the intercondylar region) and medial, each in its own colour.
+- **Knee**: Right or Left. It decides which side of the image is lateral and which is medial, and stays as set for the following images or frames until you change it.
+- **Centre point**: in Per region view a yellow diamond marks the middle of the intercondylar notch on the top surface of the cartilage. The app suggests a position; with the Select tool, drag it left or right to correct it. **Reset centre point** returns to the suggestion. The notch region is 25% of the image width, centred on the diamond.
+- **Area**: size of the mask.
+- **Length**: length of the cartilage-bone line, the bottom edge of the mask, shown as a dotted line.
+- **Thickness**: area divided by length.
+- **Echo intensity** and **Variation**: the average brightness inside the mask and how much it varies (standard deviation), in arbitrary units (AU).
+
+Every time a mask is saved, its measurements are saved to `measurements.csv` in the output folder, one row per image or video frame, holding both the whole-mask and the per-region numbers.
+
 ## Tips
 
 - If the image looks too dark or bright, check the original export.

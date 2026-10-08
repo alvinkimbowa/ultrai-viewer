@@ -7,8 +7,25 @@ import numpy as np
 import cv2
 import tifffile
 from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox, QScrollBar, QStyle
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF
+from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
+
+from .measurements import (
+    cartilage_edges,
+    region_columns,
+    suggest_centre_x,
+    surface_point,
+)
+
+
+REGION_COLORS = {
+    "lateral": (255, 170, 0),
+    "intercondylar": (255, 60, 220),
+    "medial": (120, 190, 255),
+}
+WHOLE_MASK_COLOR = (255, 255, 180)
+CENTRE_MARKER_COLOR = (255, 235, 0)
+REGION_LABELS = {"lateral": "Lateral", "intercondylar": "Notch", "medial": "Medial"}
 
 
 class Canvas(QWidget):
@@ -42,6 +59,15 @@ class Canvas(QWidget):
         # Calibration lines in image pixels: "h" holds the y positions of the two
         # horizontal lines, "v" the x positions of the two vertical lines. They
         # outlive a calibration so the next one starts from the same places.
+        # Per-region view splits the mask into lateral, intercondylar and medial
+        # around a centre point on the cartilage's top surface. A centre_x of None
+        # means the suggested centre is used; a number is a position the user set.
+        self.region_view = False
+        self.knee_side = "right"
+        self.centre_x = None
+        self._centre_drag = False
+        self._region_overlay = None
+
         self._calibrating = False
         self._calibration_lines = None
         self._calibration_drag = None
@@ -119,6 +145,7 @@ class Canvas(QWidget):
         self.image_path = source_name or None
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
+        self.centre_x = None
         self._refresh_mask_pixmap()
         self._last_outline = []
         self._mask_touched = False
@@ -230,6 +257,62 @@ class Canvas(QWidget):
             self._refresh_mask_pixmap()
         self.update()
         return True
+
+    def set_region_view(self, enabled):
+        self.region_view = bool(enabled)
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def set_knee_side(self, knee_side):
+        self.knee_side = knee_side
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def set_centre_x(self, centre_x):
+        self.centre_x = None if centre_x is None else float(centre_x)
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def _build_region_overlay(self, binary):
+        """Work out what is drawn over the mask: the bone line, and the regions."""
+        columns, _, bottom = cartilage_edges(binary)
+        if len(columns) == 0:
+            return None
+        width = binary.shape[1]
+        if self.region_view:
+            centre_x = self.centre_x
+            if centre_x is None:
+                centre_x = suggest_centre_x(binary)
+            spans = region_columns(width, centre_x, self.knee_side)
+            centre = surface_point(binary, centre_x)
+        else:
+            spans = {"whole": (0, width)}
+            centre = None
+        # One polyline per unbroken run of columns, so gaps in the mask stay gaps.
+        bone_lines = []
+        for name, (start, stop) in spans.items():
+            inside = (columns >= start) & (columns < stop)
+            region_columns_x = columns[inside]
+            region_bottom = bottom[inside]
+            if len(region_columns_x) == 0:
+                continue
+            breaks = np.nonzero(np.diff(region_columns_x) > 1)[0] + 1
+            for xs, ys in zip(
+                np.split(region_columns_x, breaks), np.split(region_bottom, breaks)
+            ):
+                bone_lines.append((name, xs + 0.5, ys + 1.0))
+        return {"spans": spans, "centre": centre, "bone_lines": bone_lines}
+
+    def _centre_marker_hit(self, pos):
+        overlay = self._region_overlay
+        if not self.region_view or overlay is None or overlay["centre"] is None:
+            return False
+        scale, offset_x, offset_y = self._current_view()
+        centre_x, centre_y = overlay["centre"]
+        return (
+            abs(pos.x() - (offset_x + centre_x * scale)) <= 10
+            and abs(pos.y() - (offset_y + centre_y * scale)) <= 10
+        )
 
     def start_calibration(self):
         if self.image is None:
@@ -412,29 +495,44 @@ class Canvas(QWidget):
         self.mask_changed.emit()
         if self.mask is None:
             self.mask_pixmap = None
+            self._region_overlay = None
             return
         height, width = self.mask.shape
-        color = np.array([255, 255, 180], dtype=np.uint8)
-        if self.show_contour_only:
-            binary = (self.mask > 0).astype(np.uint8)
-            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            rgba = np.zeros((height, width, 4), dtype=np.uint8)
-            contour_alpha = int(255 * self.mask_opacity)
-            cv2.drawContours(
-                rgba,
-                contours,
-                -1,
-                (int(color[0]), int(color[1]), int(color[2]), int(contour_alpha)),
-                self._roi_outline_thickness_px(),
-            )
+        binary = (self.mask > 0).astype(np.uint8)
+        self._region_overlay = self._build_region_overlay(binary)
+        if self.region_view and self._region_overlay is not None:
+            colored_spans = [
+                (REGION_COLORS[name], span)
+                for name, span in self._region_overlay["spans"].items()
+            ]
         else:
-            alpha = (self.mask * 255.0 * self.mask_opacity).astype(np.uint8)
-            base = (self.mask * 255.0).astype(np.float32)
-            rgba = np.zeros((height, width, 4), dtype=np.uint8)
-            rgba[:, :, 0] = (base * float(color[0]) / 255.0).astype(np.uint8)
-            rgba[:, :, 1] = (base * float(color[1]) / 255.0).astype(np.uint8)
-            rgba[:, :, 2] = (base * float(color[2]) / 255.0).astype(np.uint8)
-            rgba[:, :, 3] = alpha
+            colored_spans = [(WHOLE_MASK_COLOR, (0, width))]
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        for color, (start, stop) in colored_spans:
+            if stop <= start:
+                continue
+            if self.show_contour_only:
+                region = np.zeros_like(binary)
+                region[:, start:stop] = binary[:, start:stop]
+                contours, _ = cv2.findContours(
+                    region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                cv2.drawContours(
+                    rgba,
+                    contours,
+                    -1,
+                    (*color, int(255 * self.mask_opacity)),
+                    self._roi_outline_thickness_px(),
+                )
+            else:
+                level = self.mask[:, start:stop]
+                for channel in range(3):
+                    rgba[:, start:stop, channel] = (level * color[channel]).astype(
+                        np.uint8
+                    )
+                rgba[:, start:stop, 3] = (level * 255.0 * self.mask_opacity).astype(
+                    np.uint8
+                )
         rgba = np.ascontiguousarray(rgba)
         bytes_per_line = rgba.strides[0]
         q_image = QImage(
@@ -575,7 +673,9 @@ class Canvas(QWidget):
             point = self._screen_to_image(event.position().toPoint())
             if point is None:
                 return
-            if self.tool == "freehand":
+            if self.tool == "select":
+                self._centre_drag = self._centre_marker_hit(event.position().toPoint())
+            elif self.tool == "freehand":
                 self._drawing = True
                 self._freehand_points = [point]
                 self._last_outline = []
@@ -612,6 +712,17 @@ class Canvas(QWidget):
                 self._set_calibration_cursor(self._calibration_line_at(pos))
             return
         self._cursor_pos = self._screen_to_image(event.position().toPoint())
+        if self.tool == "select":
+            pos = event.position().toPoint()
+            if self._centre_drag:
+                scale, offset_x, _ = self._current_view()
+                width = self.image.shape[1]
+                self.set_centre_x(max(0.0, min(float(width), (pos.x() - offset_x) / scale)))
+            elif self._centre_marker_hit(pos):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.unsetCursor()
+            return
         if not self._drawing:
             if self.tool in ("brush", "eraser"):
                 self.update()
@@ -637,6 +748,7 @@ class Canvas(QWidget):
         if self._calibrating:
             self._calibration_drag = None
             return
+        self._centre_drag = False
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
                 if self.fill_roi and len(self._freehand_points) > 2:
@@ -687,6 +799,8 @@ class Canvas(QWidget):
         if self.mask_pixmap is not None:
             painter.drawPixmap(target, self.mask_pixmap)
 
+        self._paint_region_overlay(painter, scale, offset_x, offset_y)
+
         if self.tool == "polyline" and self._poly_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for point in self._poly_points:
@@ -730,6 +844,64 @@ class Canvas(QWidget):
             for x in self._calibration_lines["v"]:
                 screen_x = int(offset_x + x * scale)
                 painter.drawLine(screen_x, offset_y, screen_x, offset_y + draw_h)
+
+    def _paint_region_overlay(self, painter, scale, offset_x, offset_y):
+        overlay = self._region_overlay
+        if overlay is None or self.mask_opacity <= 0:
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # The bone line follows the mask outline, so it is drawn as coloured dots
+        # on a dark line to stay visible on top of an outline of the same colour.
+        for name, xs, ys in overlay["bone_lines"]:
+            polygon = QPolygonF(
+                [
+                    QPointF(offset_x + x * scale, offset_y + y * scale)
+                    for x, y in zip(xs, ys)
+                ]
+            )
+            color = REGION_COLORS.get(name, WHOLE_MASK_COLOR)
+            painter.setPen(QPen(QColor(0, 0, 0), 4, Qt.PenStyle.SolidLine))
+            painter.drawPolyline(polygon)
+            dotted = QPen(QColor(*color), 3, Qt.PenStyle.DotLine)
+            dotted.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(dotted)
+            painter.drawPolyline(polygon)
+        if self.region_view and overlay["centre"] is not None:
+            font = painter.font()
+            font.setBold(True)
+            painter.setFont(font)
+            metrics = painter.fontMetrics()
+            columns, top, _ = cartilage_edges(self.mask > 0)
+            for name, (start, stop) in overlay["spans"].items():
+                inside = (columns >= start) & (columns < stop)
+                if not inside.any():
+                    continue
+                label = REGION_LABELS[name]
+                middle_x = offset_x + (columns[inside].mean() + 0.5) * scale
+                label_y = offset_y + top[inside].min() * scale - 8
+                painter.setPen(QColor(*REGION_COLORS[name]))
+                painter.drawText(
+                    QPointF(middle_x - metrics.horizontalAdvance(label) / 2, label_y),
+                    label,
+                )
+            centre_x, centre_y = overlay["centre"]
+            x = offset_x + centre_x * scale
+            y = offset_y + centre_y * scale
+            size = 7
+            painter.setPen(QPen(QColor(0, 0, 0), 1))
+            painter.setBrush(QColor(*CENTRE_MARKER_COLOR))
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(x, y - size),
+                        QPointF(x + size, y),
+                        QPointF(x, y + size),
+                        QPointF(x - size, y),
+                    ]
+                )
+            )
+        painter.restore()
 
     def undo(self):
         if len(self._undo_stack) <= 1:

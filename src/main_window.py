@@ -27,13 +27,14 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QDialogButtonBox,
     QFrame,
+    QGridLayout,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
-from .canvas import Canvas
+from .canvas import Canvas, REGION_COLORS
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
-from .measurements import MeasurementLog, measure
+from .measurements import MeasurementLog, REGION_NAMES, measure
 from threading import Event
 from collections import OrderedDict
 from pathlib import Path
@@ -51,7 +52,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._base_title = "UltAI Viewer"
         self.setWindowTitle(self._base_title)
-        self._sidebar_width = 260
+        self._sidebar_width = 300
 
         self._create_menu_bar()
 
@@ -216,6 +217,19 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         self.calibrate_btn.clicked.connect(self._start_calibration)
+        self.view_picker.setCurrentIndex(
+            0 if settings.value("measurements/view", "region", str) == "full" else 1
+        )
+        self.knee_picker.setCurrentIndex(
+            max(0, self.knee_picker.findData(
+                str(settings.value("measurements/knee_side", "right", str))
+            ))
+        )
+        self.view_picker.currentIndexChanged.connect(self._on_measurement_view_changed)
+        self.knee_picker.currentIndexChanged.connect(self._on_knee_side_changed)
+        self.reset_centre_btn.clicked.connect(lambda: self.canvas.set_centre_x(None))
+        self.canvas.set_knee_side(self.knee_picker.currentData())
+        self._on_measurement_view_changed()
         self.canvas.image_loaded.connect(self._on_image_loaded_during_calibration)
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
@@ -391,22 +405,87 @@ class MainWindow(QMainWindow):
         self._end_calibration()
         self.statusBar().showMessage("Calibration applied")
 
+    def _on_measurement_view_changed(self):
+        region_view = bool(self.view_picker.currentData())
+        self._settings().setValue(
+            "measurements/view", "region" if region_view else "full"
+        )
+        self.canvas.set_region_view(region_view)
+        self.knee_picker.setEnabled(region_view)
+        self.reset_centre_btn.setEnabled(region_view)
+        for region in self._result_columns:
+            visible = (region != "whole") if region_view else (region == "whole")
+            self._result_headers[region].setVisible(visible and region_view)
+            for (value_region, _), label in self._result_values.items():
+                if value_region == region:
+                    label.setVisible(visible)
+        self._update_measurements()
+
+    def _on_knee_side_changed(self):
+        knee_side = self.knee_picker.currentData()
+        self._settings().setValue("measurements/knee_side", knee_side)
+        self.canvas.set_knee_side(knee_side)
+
+    def _restore_frame_inputs(self):
+        """Bring back the knee side and centre point saved for the frame on screen.
+
+        A frame with nothing saved keeps the knee side already selected and uses
+        the suggested centre.
+        """
+        if self._mode == "video" and self._video_path:
+            output_dir = self._video_output_dir
+            file_name, frame = Path(self._video_path).name, self._video_frame_index
+        elif self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            output_dir = self._sequence_output_dir
+            file_name, frame = Path(self._sequence_paths[self._sequence_index]).name, ""
+        else:
+            return
+        if not output_dir:
+            return
+        try:
+            row = self._measurement_log(output_dir).get(file_name, frame)
+        except OSError:
+            return
+        if row is None:
+            return
+        knee_index = self.knee_picker.findData(row.get("knee_side"))
+        if knee_index >= 0:
+            self.knee_picker.setCurrentIndex(knee_index)
+        if row.get("centre_set_by") == "user":
+            try:
+                self.canvas.set_centre_x(float(row["centre_x"]))
+            except (TypeError, ValueError):
+                pass
+
     def _update_measurements(self):
         mask = self.canvas.mask
-        thickness, unit, echo_intensity = measure(
+        result = measure(
             self.canvas.image,
             None if mask is None else mask >= 0.5,
             self.px_per_mm_x_spin.value(),
             self.px_per_mm_y_spin.value(),
+            self.canvas.centre_x,
+            self.canvas.knee_side,
         )
-        if np.isnan(thickness):
-            self.avg_thickness_label.setText("–")
-        else:
-            self.avg_thickness_label.setText(f"{thickness:.2f} {unit}")
-        if np.isnan(echo_intensity):
-            self.avg_echo_intensity_label.setText("–")
-        else:
-            self.avg_echo_intensity_label.setText(f"{echo_intensity:.1f} AU")
+        unit = result["unit"]
+        row_titles = {
+            "area": f"Area ({unit}²)",
+            "length": f"Length ({unit})",
+            "thickness": f"Thickness ({unit})",
+            "echo_mean": "Echo intensity (AU)",
+            "echo_sd": "Variation (AU)",
+        }
+        for measure_name, title in row_titles.items():
+            self._result_row_labels[measure_name].setText(title)
+        for (region, measure_name), label in self._result_values.items():
+            value = result["regions"][region][measure_name]
+            if np.isnan(value):
+                label.setText("–")
+            else:
+                decimals = 1 if measure_name in ("echo_mean", "echo_sd") else 2
+                label.setText(f"{value:.{decimals}f}")
 
     def _measurement_log(self, output_dir):
         # Logs are kept in memory so that stepping through video frames does not
@@ -428,6 +507,8 @@ class MainWindow(QMainWindow):
                 np.asarray(self.canvas.mask) >= 0.5,
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
+                self.canvas.centre_x,
+                self.canvas.knee_side,
             )
             log.save()
         except OSError as exc:
@@ -677,14 +758,64 @@ class MainWindow(QMainWindow):
         configure_button(self.calibrate_btn)
         layout.addWidget(self.calibrate_btn)
 
-        results_form = QFormLayout()
-        self.avg_thickness_label = QLabel("–")
-        results_form.addRow("Average thickness:", self.avg_thickness_label)
-        self.avg_echo_intensity_label = QLabel("–")
-        results_form.addRow(
-            "Average echo intensity:", self.avg_echo_intensity_label
+        view_form = QFormLayout()
+        view_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.view_picker = QComboBox()
+        self.view_picker.addItem("Full cartilage", False)
+        self.view_picker.addItem("Per region", True)
+        view_form.addRow("View:", self.view_picker)
+        self.knee_picker = QComboBox()
+        self.knee_picker.addItem("Right", "right")
+        self.knee_picker.addItem("Left", "left")
+        self.knee_picker.setToolTip(
+            "Which knee the image shows. It decides which side is lateral and "
+            "which is medial."
         )
-        layout.addLayout(results_form)
+        view_form.addRow("Knee:", self.knee_picker)
+        layout.addLayout(view_form)
+        self.reset_centre_btn = QPushButton("Reset centre point")
+        self.reset_centre_btn.setToolTip(
+            "Move the diamond back to the position the app suggests"
+        )
+        configure_button(self.reset_centre_btn)
+        layout.addWidget(self.reset_centre_btn)
+
+        # One column of values per region; the view decides which columns show.
+        results_grid = QGridLayout()
+        results_grid.setHorizontalSpacing(8)
+        self._result_columns = ("whole",) + REGION_NAMES
+        column_titles = {
+            "whole": "Whole",
+            "lateral": "Lateral",
+            "intercondylar": "Notch",
+            "medial": "Medial",
+        }
+        self._result_headers = {}
+        self._result_row_labels = {}
+        self._result_values = {}
+        for column, region in enumerate(self._result_columns, start=1):
+            header = QLabel(column_titles[region])
+            header.setAlignment(Qt.AlignmentFlag.AlignRight)
+            if region in REGION_COLORS:
+                red, green, blue = REGION_COLORS[region]
+                header.setStyleSheet(
+                    f"color: rgb({red}, {green}, {blue}); font-weight: bold;"
+                )
+            results_grid.addWidget(header, 0, column)
+            self._result_headers[region] = header
+        for row, measure_name in enumerate(
+            ("area", "length", "thickness", "echo_mean", "echo_sd"), start=1
+        ):
+            row_label = QLabel()
+            results_grid.addWidget(row_label, row, 0)
+            self._result_row_labels[measure_name] = row_label
+            for column, region in enumerate(self._result_columns, start=1):
+                value = QLabel("–")
+                value.setAlignment(Qt.AlignmentFlag.AlignRight)
+                results_grid.addWidget(value, row, column)
+                self._result_values[(region, measure_name)] = value
+        results_grid.setColumnStretch(0, 1)
+        layout.addLayout(results_grid)
 
         layout.addSpacing(6)
         sep_measurements = QFrame()
@@ -945,7 +1076,7 @@ class MainWindow(QMainWindow):
         min_h = min(650, max_h)
         width = max(min_w, width)
         height = max(min_h, height)
-        self._sidebar_width = min(260, max(180, int(screen_rect.width() * 0.22)))
+        self._sidebar_width = min(300, max(180, int(screen_rect.width() * 0.22)))
         return (width, height)
 
     def _on_tool_changed(self, index):
@@ -1076,6 +1207,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
             ),
+            knee_side=self.knee_picker.currentData(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1169,6 +1301,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
             ),
+            knee_side=self.knee_picker.currentData(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1667,6 +1800,7 @@ class MainWindow(QMainWindow):
             self.canvas.load_mask(mask_path)
         else:
             self.canvas.clear_mask()
+        self._restore_frame_inputs()
         self._update_navigation_buttons()
         self._set_slider_value(self._sequence_index)
 
@@ -1763,6 +1897,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_mask(np.copy(cached_mask))
         else:
             self.canvas.clear_mask()
+        self._restore_frame_inputs()
         self._set_slider_value(frame_index)
         self._update_navigation_buttons()
         self._update_title_with_image(self._video_path or "")
@@ -2579,6 +2714,7 @@ class BatchInferenceWorker(QObject):
         output_dir,
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
+        knee_side="right",
     ):
         super().__init__()
         self._model = model
@@ -2586,6 +2722,7 @@ class BatchInferenceWorker(QObject):
         self._output_dir = output_dir
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
+        self._knee_side = knee_side
         self._measurement_log = None
         self._cancel_event = Event()
 
@@ -2641,6 +2778,8 @@ class BatchInferenceWorker(QObject):
                         image,
                         mask >= 0.5,
                         *self._px_per_mm,
+                        knee_side=self._knee_side,
+                        prefer_saved=True,
                     )
             except Exception as exc:
                 if str(exc).lower().startswith("inference canceled"):
@@ -2702,6 +2841,7 @@ class VideoBatchInferenceWorker(QObject):
         output_dir,
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
+        knee_side="right",
     ):
         super().__init__()
         self._model = model
@@ -2709,6 +2849,7 @@ class VideoBatchInferenceWorker(QObject):
         self._output_dir = Path(output_dir)
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
+        self._knee_side = knee_side
         self._cancel_event = Event()
 
     def cancel(self):
@@ -2795,6 +2936,8 @@ class VideoBatchInferenceWorker(QObject):
                             image,
                             mask >= 0.5,
                             *self._px_per_mm,
+                            knee_side=self._knee_side,
+                            prefer_saved=True,
                         )
                         processed += 1
                         self.progress.emit(processed, total_frames)
