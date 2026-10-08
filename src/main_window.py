@@ -331,9 +331,6 @@ class MainWindow(QMainWindow):
         self.output_btn = QPushButton("Select output folder")
         configure_button(self.output_btn)
         layout.addWidget(self.output_btn)
-        self.clear_files_btn = QPushButton("Clear files")
-        configure_button(self.clear_files_btn)
-        layout.addWidget(self.clear_files_btn)
 
         self.file_combo = QComboBox()
         self.file_combo.setEnabled(False)
@@ -350,6 +347,35 @@ class MainWindow(QMainWindow):
         nav_row.addWidget(self.next_btn)
         layout.addLayout(nav_row)
 
+        close_row = QHBoxLayout()
+        self.close_btn = QPushButton("Close file")
+        configure_button(self.close_btn)
+        close_row.addWidget(self.close_btn)
+        self.clear_files_btn = QPushButton("Clear files")
+        configure_button(self.clear_files_btn)
+        close_row.addWidget(self.clear_files_btn)
+        layout.addLayout(close_row)
+
+        layout.addSpacing(16)
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep3)
+
+        layout.addWidget(QLabel("Image Analysis:"))
+        model_device_form = QFormLayout()
+        model_device_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        self.model_picker = QComboBox()
+        self.model_picker.addItem("No models loaded")
+        self.model_picker.setEnabled(False)
+        model_device_form.addRow("Model:", self.model_picker)
+        self.device_picker = QComboBox()
+        self.device_picker.setEnabled(False)
+        model_device_form.addRow("Device:", self.device_picker)
+        layout.addLayout(model_device_form)
+
         segment_row = QHBoxLayout()
         self.segment_btn = QPushButton("Segment image")
         self.segment_btn.setToolTip("Segment the image or video frame on screen")
@@ -365,38 +391,14 @@ class MainWindow(QMainWindow):
         configure_button(self.segment_all_btn)
         layout.addWidget(self.segment_all_btn)
 
-        clear_row = QHBoxLayout()
+        mask_row = QHBoxLayout()
         self.delete_mask_btn = QPushButton("Delete mask")
         configure_button(self.delete_mask_btn)
-        clear_row.addWidget(self.delete_mask_btn)
-        self.close_btn = QPushButton("Close file")
-        configure_button(self.close_btn)
-        clear_row.addWidget(self.close_btn)
-        layout.addLayout(clear_row)
-
+        mask_row.addWidget(self.delete_mask_btn)
         self.save_btn = QPushButton("Save masks")
         configure_button(self.save_btn)
-        layout.addWidget(self.save_btn)
-
-        layout.addSpacing(16)
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.Shape.HLine)
-        sep3.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep3)
-
-        layout.addWidget(QLabel("Models:"))
-        model_device_form = QFormLayout()
-        model_device_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        self.model_picker = QComboBox()
-        self.model_picker.addItem("No models loaded")
-        self.model_picker.setEnabled(False)
-        model_device_form.addRow("Model:", self.model_picker)
-        self.device_picker = QComboBox()
-        self.device_picker.setEnabled(False)
-        model_device_form.addRow("Device:", self.device_picker)
-        layout.addLayout(model_device_form)
+        mask_row.addWidget(self.save_btn)
+        layout.addLayout(mask_row)
 
         layout.addSpacing(16)
         sep4 = QFrame()
