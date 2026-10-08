@@ -364,6 +364,15 @@ class MainWindow(QMainWindow):
         configure_button(self.segment_all_btn)
         layout.addWidget(self.segment_all_btn)
 
+        clear_row = QHBoxLayout()
+        self.clear_btn = QPushButton("Clear Mask")
+        configure_button(self.clear_btn)
+        clear_row.addWidget(self.clear_btn)
+        self.close_btn = QPushButton("Close Image")
+        configure_button(self.close_btn)
+        clear_row.addWidget(self.close_btn)
+        layout.addLayout(clear_row)
+
         self.save_btn = QPushButton("Save masks")
         configure_button(self.save_btn)
         layout.addWidget(self.save_btn)
@@ -448,15 +457,6 @@ class MainWindow(QMainWindow):
         configure_button(self.redo_btn)
         undo_redo_row.addWidget(self.redo_btn)
         layout.addLayout(undo_redo_row)
-
-        clear_row = QHBoxLayout()
-        self.clear_btn = QPushButton("Clear Mask")
-        configure_button(self.clear_btn)
-        clear_row.addWidget(self.clear_btn)
-        self.close_btn = QPushButton("Close Image")
-        configure_button(self.close_btn)
-        clear_row.addWidget(self.close_btn)
-        layout.addLayout(clear_row)
 
         layout.addSpacing(6)
         sep_end = QFrame()
