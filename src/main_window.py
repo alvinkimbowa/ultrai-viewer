@@ -728,12 +728,14 @@ class MainWindow(QMainWindow):
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         layout.addWidget(QLabel("Files:"))
+        files_row = QHBoxLayout()
         self.load_btn = QPushButton("Load files")
         configure_button(self.load_btn)
-        layout.addWidget(self.load_btn)
+        files_row.addWidget(self.load_btn)
         self.output_btn = QPushButton("Select output folder")
         configure_button(self.output_btn)
-        layout.addWidget(self.output_btn)
+        files_row.addWidget(self.output_btn)
+        layout.addLayout(files_row)
 
         self.file_combo = QComboBox()
         self.file_combo.setEnabled(False)
