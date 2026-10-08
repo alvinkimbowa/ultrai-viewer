@@ -32,6 +32,7 @@ class Canvas(QWidget):
     image_loaded = pyqtSignal(str)
     navigation_requested = pyqtSignal(int)
     mask_changed = pyqtSignal()
+    limit_lines_moved = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -67,6 +68,16 @@ class Canvas(QWidget):
         self.centre_x = None
         self._centre_drag = False
         self._region_overlay = None
+
+        # Two vertical and two horizontal lines, in image pixels, that box in the
+        # part of the image to segment: "v" holds the x positions of the vertical
+        # pair, "h" the y positions of the horizontal pair. While they are on, the
+        # mask outside the box is hidden, not saved and not measured, but stays in
+        # self.mask. The positions outlive images so the same limits apply to the
+        # next one.
+        self.limits_enabled = False
+        self._limit_lines = None
+        self._limit_drag = None
 
         self._calibrating = False
         self._calibration_lines = None
@@ -120,7 +131,7 @@ class Canvas(QWidget):
     def save_mask(self, file_path):
         if not self.has_mask_data():
             raise ValueError("No mask available to save.")
-        mask_uint8 = (self.mask >= 0.5).astype(np.uint8) * 255
+        mask_uint8 = (self.visible_mask() >= 0.5).astype(np.uint8) * 255
         lower_path = file_path.lower()
         if lower_path.endswith((".tif", ".tiff")):
             tifffile.imwrite(file_path, mask_uint8)
@@ -146,6 +157,7 @@ class Canvas(QWidget):
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
         self.centre_x = None
+        self._fit_limit_lines()
         self._refresh_mask_pixmap()
         self._last_outline = []
         self._mask_touched = False
@@ -257,6 +269,78 @@ class Canvas(QWidget):
             self._refresh_mask_pixmap()
         self.update()
         return True
+
+    def _fit_limit_lines(self):
+        """Keep the limit lines inside the image, placing any that are missing."""
+        if self.image is None:
+            return
+        height, width = self.image.shape[:2]
+        if self._limit_lines is None:
+            if not self.limits_enabled:
+                return
+            self._limit_lines = {}
+        for axis, extent in (("v", width), ("h", height)):
+            pair = self._limit_lines.get(axis) or [0.1 * extent, 0.9 * extent]
+            self._limit_lines[axis] = [max(0.0, min(float(extent), p)) for p in pair]
+
+    def set_limits_enabled(self, enabled):
+        self.limits_enabled = bool(enabled)
+        self._fit_limit_lines()
+        self._limit_drag = None
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def limit_lines(self):
+        if self._limit_lines is None:
+            return None
+        return {axis: list(pair) for axis, pair in self._limit_lines.items()}
+
+    def set_limit_lines(self, lines):
+        if lines is None:
+            self._limit_lines = None
+        else:
+            self._limit_lines = {
+                axis: [float(p) for p in pair] for axis, pair in lines.items()
+            }
+            self._fit_limit_lines()
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def limit_box(self):
+        """Pixel box (left, right, top, bottom) inside the limit lines, or None when off."""
+        if not self.limits_enabled or self._limit_lines is None or self.image is None:
+            return None
+        self._fit_limit_lines()
+        left, right = sorted(int(round(x)) for x in self._limit_lines["v"])
+        top, bottom = sorted(int(round(y)) for y in self._limit_lines["h"])
+        return left, right, top, bottom
+
+    def visible_mask(self):
+        """The mask as shown, saved and measured: empty outside the limit lines."""
+        if self.mask is None:
+            return None
+        box = self.limit_box()
+        if box is None:
+            return self.mask
+        left, right, top, bottom = box
+        visible = np.zeros_like(self.mask)
+        visible[top:bottom, left:right] = self.mask[top:bottom, left:right]
+        return visible
+
+    def _limit_line_at(self, pos):
+        if not self.limits_enabled or self._limit_lines is None:
+            return None
+        scale, offset_x, offset_y = self._current_view()
+        best = None
+        for axis, screen_value, offset in (
+            ("v", pos.x(), offset_x),
+            ("h", pos.y(), offset_y),
+        ):
+            for index, value in enumerate(self._limit_lines.get(axis, [])):
+                distance = abs(screen_value - (offset + value * scale))
+                if distance <= 6 and (best is None or distance < best[0]):
+                    best = (distance, axis, index)
+        return None if best is None else (best[1], best[2])
 
     def set_region_view(self, enabled):
         self.region_view = bool(enabled)
@@ -383,7 +467,7 @@ class Canvas(QWidget):
         self._calibration_lines[axis][index] = value
         self.update()
 
-    def _set_calibration_cursor(self, line):
+    def _set_line_cursor(self, line):
         if line is None:
             self.unsetCursor()
         elif line[0] == "h":
@@ -498,7 +582,8 @@ class Canvas(QWidget):
             self._region_overlay = None
             return
         height, width = self.mask.shape
-        binary = (self.mask > 0).astype(np.uint8)
+        shown = self.visible_mask()
+        binary = (shown > 0).astype(np.uint8)
         self._region_overlay = self._build_region_overlay(binary)
         if self.region_view and self._region_overlay is not None:
             colored_spans = [
@@ -525,7 +610,7 @@ class Canvas(QWidget):
                     self._roi_outline_thickness_px(),
                 )
             else:
-                level = self.mask[:, start:stop]
+                level = shown[:, start:stop]
                 for channel in range(3):
                     rgba[:, start:stop, channel] = (level * color[channel]).astype(
                         np.uint8
@@ -674,7 +759,10 @@ class Canvas(QWidget):
             if point is None:
                 return
             if self.tool == "select":
-                self._centre_drag = self._centre_marker_hit(event.position().toPoint())
+                pos = event.position().toPoint()
+                self._centre_drag = self._centre_marker_hit(pos)
+                if not self._centre_drag:
+                    self._limit_drag = self._limit_line_at(pos)
             elif self.tool == "freehand":
                 self._drawing = True
                 self._freehand_points = [point]
@@ -709,7 +797,7 @@ class Canvas(QWidget):
             if self._calibration_drag is not None:
                 self._move_calibration_line(*self._calibration_drag, pos)
             else:
-                self._set_calibration_cursor(self._calibration_line_at(pos))
+                self._set_line_cursor(self._calibration_line_at(pos))
             return
         self._cursor_pos = self._screen_to_image(event.position().toPoint())
         if self.tool == "select":
@@ -718,10 +806,21 @@ class Canvas(QWidget):
                 scale, offset_x, _ = self._current_view()
                 width = self.image.shape[1]
                 self.set_centre_x(max(0.0, min(float(width), (pos.x() - offset_x) / scale)))
+            elif self._limit_drag is not None:
+                axis, index = self._limit_drag
+                scale, offset_x, offset_y = self._current_view()
+                height, width = self.image.shape[:2]
+                if axis == "v":
+                    value = max(0.0, min(float(width), (pos.x() - offset_x) / scale))
+                else:
+                    value = max(0.0, min(float(height), (pos.y() - offset_y) / scale))
+                self._limit_lines[axis][index] = value
+                self._refresh_mask_pixmap()
+                self.update()
             elif self._centre_marker_hit(pos):
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
             else:
-                self.unsetCursor()
+                self._set_line_cursor(self._limit_line_at(pos))
             return
         if not self._drawing:
             if self.tool in ("brush", "eraser"):
@@ -749,6 +848,9 @@ class Canvas(QWidget):
             self._calibration_drag = None
             return
         self._centre_drag = False
+        if self._limit_drag is not None:
+            self._limit_drag = None
+            self.limit_lines_moved.emit()
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
                 if self.fill_roi and len(self._freehand_points) > 2:
@@ -800,6 +902,7 @@ class Canvas(QWidget):
             painter.drawPixmap(target, self.mask_pixmap)
 
         self._paint_region_overlay(painter, scale, offset_x, offset_y)
+        self._paint_limits(painter, scale, offset_x, offset_y, draw_w, draw_h)
 
         if self.tool == "polyline" and self._poly_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
@@ -845,6 +948,26 @@ class Canvas(QWidget):
                 screen_x = int(offset_x + x * scale)
                 painter.drawLine(screen_x, offset_y, screen_x, offset_y + draw_h)
 
+    def _paint_limits(self, painter, scale, offset_x, offset_y, draw_w, draw_h):
+        if not self.limits_enabled or self._limit_lines is None:
+            return
+        left = int(offset_x + min(self._limit_lines["v"]) * scale)
+        right = int(offset_x + max(self._limit_lines["v"]) * scale)
+        top = int(offset_y + min(self._limit_lines["h"]) * scale)
+        bottom = int(offset_y + max(self._limit_lines["h"]) * scale)
+        shade = QColor(0, 0, 0, 120)
+        painter.fillRect(QRect(offset_x, offset_y, left - offset_x, draw_h), shade)
+        painter.fillRect(QRect(right, offset_y, offset_x + draw_w - right, draw_h), shade)
+        painter.fillRect(QRect(left, offset_y, right - left, top - offset_y), shade)
+        painter.fillRect(
+            QRect(left, bottom, right - left, offset_y + draw_h - bottom), shade
+        )
+        painter.setPen(QPen(QColor(120, 255, 120), 2, Qt.PenStyle.DashLine))
+        for x in (left, right):
+            painter.drawLine(x, offset_y, x, offset_y + draw_h)
+        for y in (top, bottom):
+            painter.drawLine(offset_x, y, offset_x + draw_w, y)
+
     def _paint_region_overlay(self, painter, scale, offset_x, offset_y):
         overlay = self._region_overlay
         if overlay is None or self.mask_opacity <= 0:
@@ -872,7 +995,7 @@ class Canvas(QWidget):
             font.setBold(True)
             painter.setFont(font)
             metrics = painter.fontMetrics()
-            columns, top, _ = cartilage_edges(self.mask > 0)
+            columns, top, _ = cartilage_edges(self.visible_mask() > 0)
             for name, (start, stop) in overlay["spans"].items():
                 inside = (columns >= start) & (columns < stop)
                 if not inside.any():

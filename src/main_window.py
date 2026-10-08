@@ -45,6 +45,64 @@ import tifffile
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv")
 MASK_EXTENSIONS = (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg")
+MIN_LIMITED_SIZE = 8
+
+
+def box_to_segment(image, box):
+    """Clamp a limit box (left, right, top, bottom) to an image.
+
+    Returns None when there is no box or it leaves too little to segment.
+    """
+    if box is None:
+        return None
+    height, width = image.shape[:2]
+    left, right = min(box[0], width), min(box[1], width)
+    top, bottom = min(box[2], height), min(box[3], height)
+    if right - left < MIN_LIMITED_SIZE or bottom - top < MIN_LIMITED_SIZE:
+        return None
+    return left, right, top, bottom
+
+
+def own_roi(default_box, frame_rois, measurement_log, file_name, frame):
+    """The ROI box to use for one image or frame, or None for no ROI.
+
+    An ROI chosen for that frame in this session comes first, then the one saved
+    with its measurements; a frame with neither takes the one in force when the
+    run started. Either of the first two can also say "off".
+    """
+    for roi in (
+        frame_rois.get((file_name, str(frame))),
+        measurement_log.saved_roi(file_name, frame),
+    ):
+        if roi is not None:
+            return roi or None
+    return default_box
+
+
+def crop_to_box(image, box):
+    if box is None:
+        return image
+    left, right, top, bottom = box
+    return np.ascontiguousarray(image[top:bottom, left:right])
+
+
+def place_prediction(prediction, image, box):
+    """Turn a model output into a mask the size of the image.
+
+    The model's output has its own fixed size. With a box (left, right, top,
+    bottom) it covers only that part of the image, and the rest of the mask is
+    left empty.
+    """
+    height, width = image.shape[:2]
+    left, right, top, bottom = (0, width, 0, height) if box is None else box
+    part = np.asarray(prediction).astype(np.float32)
+    if part.shape[:2] != (bottom - top, right - left):
+        part = cv2.resize(
+            part, (right - left, bottom - top), interpolation=cv2.INTER_NEAREST
+        )
+    mask = np.zeros((height, width), dtype=np.float32)
+    mask[top:bottom, left:right] = part
+    return mask
 
 
 class MainWindow(QMainWindow):
@@ -162,6 +220,7 @@ class MainWindow(QMainWindow):
         self._last_prediction = None
         self._inference_thread = None
         self._inference_worker = None
+        self._inference_box = None
         self._inference_dialog = None
         self._sequence_paths = []
         self._sequence_index = -1
@@ -190,6 +249,10 @@ class MainWindow(QMainWindow):
         # collected and the measurements refresh once the mask has been still
         # for a moment.
         self._measurement_logs = {}
+        # ROI chosen by hand in this session for an image or frame, by
+        # _current_frame_key(): (switched on?, line positions).
+        self._frame_rois = {}
+        self._restoring_frame_roi = False
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.setInterval(250)
@@ -217,6 +280,15 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         self.calibrate_btn.clicked.connect(self._start_calibration)
+        saved_limits = str(settings.value("limits/lines", "", str) or "").split(",")
+        if len(saved_limits) == 4:
+            try:
+                x1, x2, y1, y2 = (float(v) for v in saved_limits)
+                self.canvas.set_limit_lines({"v": [x1, x2], "h": [y1, y2]})
+            except ValueError:
+                pass
+        self.limit_checkbox.toggled.connect(self._on_limits_toggled)
+        self.canvas.limit_lines_moved.connect(self._remember_frame_roi)
         self.view_picker.setCurrentIndex(
             0 if settings.value("measurements/view", "region", str) == "full" else 1
         )
@@ -421,17 +493,30 @@ class MainWindow(QMainWindow):
                     label.setVisible(visible)
         self._update_measurements()
 
+    def _on_limits_toggled(self, enabled):
+        self.canvas.set_limits_enabled(enabled)
+        if self._restoring_frame_roi:
+            return
+        self._remember_frame_roi()
+        if enabled:
+            self.statusBar().showMessage(
+                "Set ROI on: drag the green lines with the Select tool"
+            )
+
+    def _save_limit_lines(self):
+        lines = self.canvas.limit_lines()
+        if lines is not None:
+            self._settings().setValue(
+                "limits/lines", ",".join(f"{p:.1f}" for p in lines["v"] + lines["h"])
+            )
+
     def _on_knee_side_changed(self):
         knee_side = self.knee_picker.currentData()
         self._settings().setValue("measurements/knee_side", knee_side)
         self.canvas.set_knee_side(knee_side)
 
-    def _restore_frame_inputs(self):
-        """Bring back the knee side and centre point saved for the frame on screen.
-
-        A frame with nothing saved keeps the knee side already selected and uses
-        the suggested centre.
-        """
+    def _current_frame_key(self):
+        """(output folder, file name, frame) of the image or frame on screen, or None."""
         if self._mode == "video" and self._video_path:
             output_dir = self._video_output_dir
             file_name, frame = Path(self._video_path).name, self._video_frame_index
@@ -441,13 +526,50 @@ class MainWindow(QMainWindow):
             output_dir = self._sequence_output_dir
             file_name, frame = Path(self._sequence_paths[self._sequence_index]).name, ""
         else:
-            return
+            return None
         if not output_dir:
+            return None
+        return str(output_dir), file_name, str(frame)
+
+    def _remember_frame_roi(self):
+        """Note the ROI now on screen as the one chosen for this image or frame."""
+        key = self._current_frame_key()
+        if key is not None:
+            self._frame_rois[key] = (
+                self.canvas.limits_enabled,
+                self.canvas.limit_lines(),
+            )
+        self._save_limit_lines()
+
+    def _restore_frame_inputs(self):
+        """Bring back the knee side, centre point and ROI of the frame on screen.
+
+        A frame with nothing of its own keeps the knee side and ROI already in
+        force and uses the suggested centre.
+        """
+        key = self._current_frame_key()
+        if key is None:
             return
+        output_dir, file_name, frame = key
         try:
-            row = self._measurement_log(output_dir).get(file_name, frame)
+            log = self._measurement_log(output_dir)
         except OSError:
             return
+        roi = self._frame_rois.get(key)
+        if roi is None:
+            saved = log.saved_roi(file_name, frame)
+            if saved is False:
+                roi = (False, None)
+            elif saved is not None:
+                roi = (True, {"v": list(saved[:2]), "h": list(saved[2:])})
+        if roi is not None:
+            enabled, lines = roi
+            if lines is not None:
+                self.canvas.set_limit_lines(lines)
+            self._restoring_frame_roi = True
+            self.limit_checkbox.setChecked(enabled)
+            self._restoring_frame_roi = False
+        row = log.get(file_name, frame)
         if row is None:
             return
         knee_index = self.knee_picker.findData(row.get("knee_side"))
@@ -459,8 +581,26 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 pass
 
+    def _frame_roi_boxes(self, output_dir):
+        """ROIs chosen in this session for files of an output folder.
+
+        Maps (file name, frame) to a box (left, right, top, bottom), or to False
+        where ROI was switched off.
+        """
+        boxes = {}
+        for (folder, file_name, frame), (enabled, lines) in self._frame_rois.items():
+            if folder != str(output_dir):
+                continue
+            if not enabled or lines is None:
+                boxes[(file_name, frame)] = False
+                continue
+            left, right = sorted(int(round(x)) for x in lines["v"])
+            top, bottom = sorted(int(round(y)) for y in lines["h"])
+            boxes[(file_name, frame)] = (left, right, top, bottom)
+        return boxes
+
     def _update_measurements(self):
-        mask = self.canvas.mask
+        mask = self.canvas.visible_mask()
         result = measure(
             self.canvas.image,
             None if mask is None else mask >= 0.5,
@@ -504,11 +644,14 @@ class MainWindow(QMainWindow):
                 file_name,
                 frame,
                 self.canvas.image,
-                np.asarray(self.canvas.mask) >= 0.5,
+                np.asarray(self.canvas.visible_mask()) >= 0.5,
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
                 self.canvas.centre_x,
                 self.canvas.knee_side,
+                limits=self.canvas.limit_box(),
+                roi_off=self._frame_rois.get(self._current_frame_key(), (True,))[0]
+                is False,
             )
             log.save()
         except OSError as exc:
@@ -633,7 +776,16 @@ class MainWindow(QMainWindow):
         model_device_form.addRow("Model:", self.model_picker)
         self.device_picker = QComboBox()
         self.device_picker.setEnabled(False)
-        model_device_form.addRow("Device:", self.device_picker)
+        self.limit_checkbox = QCheckBox("Set ROI")
+        self.limit_checkbox.setToolTip(
+            "Show two vertical and two horizontal lines and segment only inside "
+            "them. With the Select tool, drag the lines to move them. Mask "
+            "outside the lines is hidden, and is not saved or measured."
+        )
+        device_row = QHBoxLayout()
+        device_row.addWidget(self.device_picker, stretch=1)
+        device_row.addWidget(self.limit_checkbox)
+        model_device_form.addRow("Device:", device_row)
         layout.addLayout(model_device_form)
 
         segment_row = QHBoxLayout()
@@ -1208,6 +1360,8 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
             ),
             knee_side=self.knee_picker.currentData(),
+            limits=self.canvas.limit_box(),
+            frame_rois=self._frame_roi_boxes(self._sequence_output_dir),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1302,6 +1456,8 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
             ),
             knee_side=self.knee_picker.currentData(),
+            limits=self.canvas.limit_box(),
+            frame_rois=self._frame_roi_boxes(self._video_output_dir),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1903,9 +2059,17 @@ class MainWindow(QMainWindow):
         self._update_title_with_image(self._video_path or "")
 
     def _canvas_has_roi(self):
-        if self.canvas.mask is None:
+        mask = self.canvas.visible_mask()
+        if mask is None:
             return False
-        return bool(np.any(np.asarray(self.canvas.mask) >= 0.5))
+        return bool(np.any(np.asarray(mask) >= 0.5))
+
+    def _mask_hidden_by_limits(self):
+        """True when the canvas holds mask that the limit lines keep out of view."""
+        mask = self.canvas.mask
+        if mask is None or self.canvas.limit_box() is None:
+            return False
+        return bool(np.any(np.asarray(mask) >= 0.5)) and not self._canvas_has_roi()
 
     def _commit_pending_outline(self):
         if self.canvas is None:
@@ -1923,7 +2087,7 @@ class MainWindow(QMainWindow):
             return
         mask_path.parent.mkdir(parents=True, exist_ok=True)
         if self._canvas_has_roi():
-            mask = np.asarray(self.canvas.mask, dtype=np.float32)
+            mask = np.asarray(self.canvas.visible_mask(), dtype=np.float32)
             mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
             if not cv2.imwrite(str(mask_path), mask_uint8):
                 QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_path.name}")
@@ -1933,6 +2097,8 @@ class MainWindow(QMainWindow):
                 Path(self._video_path).name,
                 self._video_frame_index,
             )
+            return
+        if self._mask_hidden_by_limits():
             return
         if mask_path.exists():
             try:
@@ -2096,7 +2262,7 @@ class MainWindow(QMainWindow):
         """Delete the saved mask of an image whose mask was erased down to nothing."""
         # An empty canvas only means "erased" when a mask was loaded or drawn for
         # the image on screen; a saved mask that was never shown must be kept.
-        if not self.canvas.has_mask_data():
+        if not self.canvas.has_mask_data() or self._mask_hidden_by_limits():
             return
         if not self.canvas.image_path or Path(self.canvas.image_path) != image_path:
             return
@@ -2497,7 +2663,10 @@ class MainWindow(QMainWindow):
         self._show_inference_dialog()
 
         self._inference_thread = QThread(self)
-        self._inference_worker = InferenceWorker(self._model, self.canvas.image)
+        self._inference_box = box_to_segment(self.canvas.image, self.canvas.limit_box())
+        self._inference_worker = InferenceWorker(
+            self._model, crop_to_box(self.canvas.image, self._inference_box)
+        )
         self._inference_worker.moveToThread(self._inference_thread)
         self._inference_thread.started.connect(self._inference_worker.run)
         self._inference_worker.finished.connect(self._on_inference_finished)
@@ -2545,8 +2714,12 @@ class MainWindow(QMainWindow):
 
     def _on_inference_finished(self, prediction):
         self._last_prediction = prediction
-        if self._last_prediction is not None:
-            self.canvas.set_mask(self._last_prediction)
+        if self._last_prediction is not None and self.canvas.image is not None:
+            self.canvas.set_mask(
+                place_prediction(
+                    self._last_prediction, self.canvas.image, self._inference_box
+                )
+            )
         self.statusBar().showMessage("Segmentation complete")
         self._close_inference_dialog()
 
@@ -2566,6 +2739,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._stop_playback()
+        self._save_limit_lines()
         if self.canvas.is_calibrating():
             self._end_calibration()
         self._save_sequence_mask_if_needed()
@@ -2715,6 +2889,8 @@ class BatchInferenceWorker(QObject):
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
         knee_side="right",
+        limits=None,
+        frame_rois=None,
     ):
         super().__init__()
         self._model = model
@@ -2723,6 +2899,8 @@ class BatchInferenceWorker(QObject):
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
         self._knee_side = knee_side
+        self._limits = limits
+        self._frame_rois = frame_rois or {}
         self._measurement_log = None
         self._cancel_event = Event()
 
@@ -2756,21 +2934,22 @@ class BatchInferenceWorker(QObject):
                 continue
             try:
                 image = self._load_image(image_path)
-                prediction = self._model.run_inference(
+                box = box_to_segment(
                     image,
+                    own_roi(
+                        self._limits,
+                        self._frame_rois,
+                        self._measurement_log,
+                        Path(image_path).name,
+                        "",
+                    ),
+                )
+                prediction = self._model.run_inference(
+                    crop_to_box(image, box),
                     cancel_event=self._cancel_event,
                 )
                 if prediction is not None:
-                    # The model's output has its own fixed size, so it is
-                    # brought back to the size of the image it belongs to.
-                    mask = np.asarray(prediction)
-                    height, width = image.shape[:2]
-                    if mask.shape[:2] != (height, width):
-                        mask = cv2.resize(
-                            mask.astype(np.float32),
-                            (width, height),
-                            interpolation=cv2.INTER_NEAREST,
-                        )
+                    mask = place_prediction(prediction, image, box)
                     self._save_mask(mask, image_path)
                     self._measurement_log.set(
                         Path(image_path).name,
@@ -2780,6 +2959,7 @@ class BatchInferenceWorker(QObject):
                         *self._px_per_mm,
                         knee_side=self._knee_side,
                         prefer_saved=True,
+                        limits=box,
                     )
             except Exception as exc:
                 if str(exc).lower().startswith("inference canceled"):
@@ -2842,6 +3022,8 @@ class VideoBatchInferenceWorker(QObject):
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
         knee_side="right",
+        limits=None,
+        frame_rois=None,
     ):
         super().__init__()
         self._model = model
@@ -2850,6 +3032,8 @@ class VideoBatchInferenceWorker(QObject):
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
         self._knee_side = knee_side
+        self._limits = limits
+        self._frame_rois = frame_rois or {}
         self._cancel_event = Event()
 
     def cancel(self):
@@ -2912,21 +3096,24 @@ class VideoBatchInferenceWorker(QObject):
                             image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         else:
                             image = frame
-                        prediction = self._model.run_inference(
+                        box = box_to_segment(
                             image,
+                            own_roi(
+                                self._limits,
+                                self._frame_rois,
+                                measurement_log,
+                                video_name,
+                                frame_index,
+                            ),
+                        )
+                        prediction = self._model.run_inference(
+                            crop_to_box(image, box),
                             cancel_event=self._cancel_event,
                         )
                         if self._cancel_event.is_set():
                             self.canceled.emit()
                             return
-                        mask = np.asarray(prediction)
-                        frame_height, frame_width = frame.shape[:2]
-                        if mask.shape[:2] != (frame_height, frame_width):
-                            mask = cv2.resize(
-                                mask.astype(np.float32),
-                                (frame_width, frame_height),
-                                interpolation=cv2.INTER_NEAREST,
-                            )
+                        mask = place_prediction(prediction, image, box)
                         mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
                         if not cv2.imwrite(str(output_path), mask_uint8):
                             raise RuntimeError(f"Failed to save mask: {output_path}")
@@ -2938,6 +3125,7 @@ class VideoBatchInferenceWorker(QObject):
                             *self._px_per_mm,
                             knee_side=self._knee_side,
                             prefer_saved=True,
+                            limits=box,
                         )
                         processed += 1
                         self.progress.emit(processed, total_frames)

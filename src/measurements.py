@@ -224,6 +224,11 @@ MEASUREMENT_COLUMNS = [
     "knee_side",
     "centre_x",
     "centre_set_by",
+    "roi_state",
+    "limit_left",
+    "limit_right",
+    "limit_top",
+    "limit_bottom",
     "pixels_per_mm_x",
     "pixels_per_mm_y",
     "unit",
@@ -255,6 +260,25 @@ class MeasurementLog:
     def get(self, file_name, frame):
         return self._rows.get((str(file_name), str(frame)))
 
+    def saved_roi(self, file_name, frame):
+        """The ROI stored for a row.
+
+        A box (left, right, top, bottom) when the row was saved with ROI on, False
+        when ROI was switched off for it, None when it has no ROI of its own.
+        """
+        row = self.get(file_name, frame)
+        if row is None:
+            return None
+        if row.get("roi_state") == "off":
+            return False
+        try:
+            return tuple(
+                int(row[column])
+                for column in ("limit_left", "limit_right", "limit_top", "limit_bottom")
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def set(
         self,
         file_name,
@@ -266,11 +290,15 @@ class MeasurementLog:
         centre_x=None,
         knee_side="right",
         prefer_saved=False,
+        limits=None,
+        roi_off=False,
     ):
         """Measure a mask and store it as the row of its image or frame.
 
         centre_x of None means the suggested centre. With prefer_saved, a knee side
         and a user-placed centre already stored for the row win over the arguments.
+        limits is the box (left, right, top, bottom) the mask was confined to, if any;
+        roi_off records that ROI was switched off for this row in particular.
         """
         key = (str(file_name), str(frame))
         saved = self._rows.get(key)
@@ -291,6 +319,11 @@ class MeasurementLog:
                 "" if result["centre_x"] is None else f"{result['centre_x']:.1f}"
             ),
             "centre_set_by": "auto" if centre_x is None else "user",
+            "roi_state": "on" if limits is not None else ("off" if roi_off else ""),
+            "limit_left": "" if limits is None else str(limits[0]),
+            "limit_right": "" if limits is None else str(limits[1]),
+            "limit_top": "" if limits is None else str(limits[2]),
+            "limit_bottom": "" if limits is None else str(limits[3]),
             "pixels_per_mm_x": f"{px_per_mm_x:.3f}" if px_per_mm_x else "",
             "pixels_per_mm_y": f"{px_per_mm_y:.3f}" if px_per_mm_y else "",
             "unit": result["unit"],

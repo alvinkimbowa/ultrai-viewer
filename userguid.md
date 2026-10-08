@@ -112,6 +112,15 @@ processed and saved.
 - Delete mask: removes the mask from the screen and deletes its saved file from the output folder. Ctrl+Z brings the mask back on screen.
 - Close file: closes the image or video on screen and keeps the others loaded.
 
+## Set ROI
+
+Tick **Set ROI** (left panel, under Device) to show two vertical and two horizontal green lines on the image. With the Select tool, drag them to box in the part of the image you want.
+
+- Segmentation then runs only on the part of the image inside the lines.
+- A mask that already exists is hidden outside the lines. Only the part inside the lines is saved and measured. Moving the lines back out shows the hidden part again, as long as you have not left that image or frame.
+- Each image or frame keeps its own ROI. Once you move the lines or tick/untick the box on an image or frame, that choice belongs to it and comes back whenever you return to it.
+- An image or frame with no ROI of its own takes whatever is in force when you arrive at it, so a choice carries forward until you reach one that has its own.
+
 ## Measurements
 
 The Measurements section of the left panel shows numbers for the mask on screen. They update by themselves when the mask changes.
