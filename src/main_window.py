@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QSlider,
     QSpinBox,
+    QDoubleSpinBox,
     QComboBox,
     QCheckBox,
     QScrollArea,
@@ -32,6 +33,7 @@ from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
 from .canvas import Canvas
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
+from .measurements import compute_cartilage_thickness, compute_echo_intensity
 from threading import Event
 from collections import OrderedDict
 from pathlib import Path
@@ -183,6 +185,37 @@ class MainWindow(QMainWindow):
         self._last_load_kind = "image"
         self._load_persisted_paths()
         self._update_output_dir_tooltip()
+        # Recomputing on every mask change would stall drawing, so changes are
+        # collected and the measurements refresh once the mask has been still
+        # for a moment.
+        self._measurement_timer = QTimer(self)
+        self._measurement_timer.setSingleShot(True)
+        self._measurement_timer.setInterval(250)
+        self._measurement_timer.timeout.connect(self._update_measurements)
+        self.canvas.mask_changed.connect(self._measurement_timer.start)
+        settings = self._settings()
+        for spin, key in (
+            (self.px_per_mm_x_spin, "measurements/px_per_mm_x"),
+            (self.px_per_mm_y_spin, "measurements/px_per_mm_y"),
+        ):
+            spin.setValue(float(settings.value(key, 0.0, float) or 0.0))
+            spin.valueChanged.connect(self._on_px_per_mm_changed)
+        self._build_calibration_dialog()
+        self.h_lines_mm_spin.setValue(
+            float(settings.value("calibration/h_lines_mm", 0.0, float) or 0.0)
+        )
+        self.v_lines_mm_spin.setValue(
+            float(settings.value("calibration/v_lines_mm", 0.0, float) or 0.0)
+        )
+        saved_lines = str(settings.value("calibration/lines", "", str) or "").split(",")
+        if len(saved_lines) == 4:
+            try:
+                y1, y2, x1, x2 = (float(v) for v in saved_lines)
+                self.canvas.set_calibration_lines({"h": [y1, y2], "v": [x1, x2]})
+            except ValueError:
+                pass
+        self.calibrate_btn.clicked.connect(self._start_calibration)
+        self.canvas.image_loaded.connect(self._on_image_loaded_during_calibration)
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
         self._playback_interval_ms = 33
@@ -261,6 +294,129 @@ class MainWindow(QMainWindow):
         settings.setValue("paths/video_input_dir", self._last_video_input_dir)
         settings.setValue("paths/video_output_dir", self._last_video_output_dir)
         settings.setValue("paths/last_load_kind", self._last_load_kind)
+
+    def _on_px_per_mm_changed(self):
+        settings = self._settings()
+        settings.setValue("measurements/px_per_mm_x", self.px_per_mm_x_spin.value())
+        settings.setValue("measurements/px_per_mm_y", self.px_per_mm_y_spin.value())
+        self._update_measurements()
+
+    def _build_calibration_dialog(self):
+        # Shown without blocking the main window, so the lines on the image can
+        # be dragged while the dialog is open.
+        self.calibration_dialog = QDialog(self)
+        self.calibration_dialog.setWindowTitle("Calibrate")
+        dialog_layout = QVBoxLayout(self.calibration_dialog)
+        hint = QLabel(
+            "Drag the lines on the image onto a known distance, then enter the "
+            "physical distance between each pair of lines."
+        )
+        hint.setWordWrap(True)
+        dialog_layout.addWidget(hint)
+        form = QFormLayout()
+        self.h_lines_mm_spin = QDoubleSpinBox()
+        self.v_lines_mm_spin = QDoubleSpinBox()
+        for spin in (self.h_lines_mm_spin, self.v_lines_mm_spin):
+            spin.setRange(0.0, 10000.0)
+            spin.setDecimals(2)
+            spin.setSuffix(" mm")
+            spin.setSpecialValueText("Not set")
+        form.addRow("Distance between horizontal lines:", self.h_lines_mm_spin)
+        form.addRow("Distance between vertical lines:", self.v_lines_mm_spin)
+        dialog_layout.addLayout(form)
+        self.calibration_buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self.calibration_buttons.accepted.connect(self._apply_calibration)
+        self.calibration_buttons.rejected.connect(self.calibration_dialog.reject)
+        self.calibration_dialog.rejected.connect(self._end_calibration)
+        dialog_layout.addWidget(self.calibration_buttons)
+
+    def _start_calibration(self):
+        if not self.canvas.start_calibration():
+            QMessageBox.information(
+                self, "Calibrate", "Load an image or video before calibrating."
+            )
+            return
+        self.calibrate_btn.setEnabled(False)
+        self.calibration_dialog.show()
+        self.statusBar().showMessage("Calibrating: drag the lines on the image")
+
+    def _end_calibration(self):
+        self.canvas.stop_calibration()
+        self.calibration_dialog.hide()
+        self.calibrate_btn.setEnabled(True)
+        lines = self.canvas.calibration_lines()
+        if lines is not None:
+            self._settings().setValue(
+                "calibration/lines",
+                ",".join(f"{v:.3f}" for v in lines["h"] + lines["v"]),
+            )
+
+    def _on_image_loaded_during_calibration(self, source_name):
+        # An empty name means the image was closed, which leaves nothing to
+        # place the lines on.
+        if not source_name and self.canvas.is_calibrating():
+            self._end_calibration()
+
+    def _apply_calibration(self):
+        h_mm = self.h_lines_mm_spin.value()
+        v_mm = self.v_lines_mm_spin.value()
+        h_gap_px, v_gap_px = self.canvas.calibration_gaps()
+        if not h_mm and not v_mm:
+            QMessageBox.information(
+                self,
+                "Calibrate",
+                "Enter the real distance for at least one pair of lines.",
+            )
+            return
+        if (h_mm and h_gap_px == 0) or (v_mm and v_gap_px == 0):
+            QMessageBox.information(
+                self,
+                "Calibrate",
+                "The two lines of a pair are on top of each other. "
+                "Move them apart first.",
+            )
+            return
+        # The horizontal lines are spaced down the image, so they give the y
+        # resolution; the vertical lines are spaced across it and give x.
+        if h_mm:
+            self.px_per_mm_y_spin.setValue(h_gap_px / h_mm)
+        if v_mm:
+            self.px_per_mm_x_spin.setValue(v_gap_px / v_mm)
+        settings = self._settings()
+        settings.setValue("calibration/h_lines_mm", h_mm)
+        settings.setValue("calibration/v_lines_mm", v_mm)
+        self._end_calibration()
+        self.statusBar().showMessage("Calibration applied")
+
+    def _update_measurements(self):
+        mask = self.canvas.mask
+        image = self.canvas.image
+        px_per_mm_x = self.px_per_mm_x_spin.value()
+        px_per_mm_y = self.px_per_mm_y_spin.value()
+        in_mm = bool(px_per_mm_x and px_per_mm_y)
+        thickness = np.nan
+        echo_intensity = np.nan
+        if mask is not None:
+            binary_mask = mask >= 0.5
+            # A scale of 1 pixel per mm makes the result come out in pixels.
+            thickness = compute_cartilage_thickness(
+                binary_mask,
+                px_per_mm_x if in_mm else 1.0,
+                px_per_mm_y if in_mm else 1.0,
+            )
+            if image is not None and image.shape[:2] == mask.shape:
+                echo_intensity = compute_echo_intensity(image, binary_mask)
+        if np.isnan(thickness):
+            self.avg_thickness_label.setText("–")
+        else:
+            unit = "mm" if in_mm else "px"
+            self.avg_thickness_label.setText(f"{thickness:.2f} {unit}")
+        if np.isnan(echo_intensity):
+            self.avg_echo_intensity_label.setText("–")
+        else:
+            self.avg_echo_intensity_label.setText(f"{echo_intensity:.1f} AU")
 
     def _transport_icon(self, name):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
@@ -466,6 +622,52 @@ class MainWindow(QMainWindow):
         sep_end.setFrameShape(QFrame.Shape.HLine)
         sep_end.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep_end)
+
+        layout.addWidget(QLabel("Measurements:"))
+        self.px_per_mm_x_spin = QDoubleSpinBox()
+        self.px_per_mm_y_spin = QDoubleSpinBox()
+        for spin, direction in (
+            (self.px_per_mm_x_spin, "across"),
+            (self.px_per_mm_y_spin, "down"),
+        ):
+            spin.setRange(0.0, 10000.0)
+            spin.setDecimals(3)
+            spin.setSpecialValueText("Not set")
+            spin.setToolTip(
+                f"How many image pixels make up one millimetre going {direction} "
+                "the image. While either value is not set, thickness is shown "
+                "in pixels."
+            )
+        layout.addWidget(QLabel("Pixels per mm:"))
+        px_per_mm_row = QHBoxLayout()
+        px_per_mm_row.addWidget(QLabel("x"))
+        px_per_mm_row.addWidget(self.px_per_mm_x_spin, stretch=1)
+        px_per_mm_row.addSpacing(8)
+        px_per_mm_row.addWidget(QLabel("y"))
+        px_per_mm_row.addWidget(self.px_per_mm_y_spin, stretch=1)
+        layout.addLayout(px_per_mm_row)
+
+        self.calibrate_btn = QPushButton("Calibrate")
+        self.calibrate_btn.setToolTip(
+            "Work out the pixels per mm by placing lines a known distance apart"
+        )
+        configure_button(self.calibrate_btn)
+        layout.addWidget(self.calibrate_btn)
+
+        results_form = QFormLayout()
+        self.avg_thickness_label = QLabel("–")
+        results_form.addRow("Average thickness:", self.avg_thickness_label)
+        self.avg_echo_intensity_label = QLabel("–")
+        results_form.addRow(
+            "Average echo intensity:", self.avg_echo_intensity_label
+        )
+        layout.addLayout(results_form)
+
+        layout.addSpacing(6)
+        sep_measurements = QFrame()
+        sep_measurements.setFrameShape(QFrame.Shape.HLine)
+        sep_measurements.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(sep_measurements)
 
         layout.addStretch()
 

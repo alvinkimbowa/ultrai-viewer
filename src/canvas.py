@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt, QRect, QPoint, pyqtSignal
 class Canvas(QWidget):
     image_loaded = pyqtSignal(str)
     navigation_requested = pyqtSignal(int)
+    mask_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -37,6 +38,13 @@ class Canvas(QWidget):
         self._freehand_points = []
         self._last_outline = []
         self._cursor_pos = None
+
+        # Calibration lines in image pixels: "h" holds the y positions of the two
+        # horizontal lines, "v" the x positions of the two vertical lines. They
+        # outlive a calibration so the next one starts from the same places.
+        self._calibrating = False
+        self._calibration_lines = None
+        self._calibration_drag = None
 
         self.scale = 1.0
         self.min_scale = 0.1
@@ -144,6 +152,7 @@ class Canvas(QWidget):
             self._mask_touched = False
             self._reset_history()
             self.update()
+            self.mask_changed.emit()
             return
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
@@ -221,6 +230,83 @@ class Canvas(QWidget):
             self._refresh_mask_pixmap()
         self.update()
         return True
+
+    def start_calibration(self):
+        if self.image is None:
+            return False
+        height, width = self.image.shape[:2]
+        if self._calibration_lines is None:
+            self._calibration_lines = {
+                "h": [height / 3.0, 2.0 * height / 3.0],
+                "v": [width / 3.0, 2.0 * width / 3.0],
+            }
+        lines = self._calibration_lines
+        lines["h"] = [max(0.0, min(float(height), y)) for y in lines["h"]]
+        lines["v"] = [max(0.0, min(float(width), x)) for x in lines["v"]]
+        self._calibrating = True
+        self._calibration_drag = None
+        self.update()
+        return True
+
+    def stop_calibration(self):
+        self._calibrating = False
+        self._calibration_drag = None
+        self.unsetCursor()
+        self.update()
+
+    def is_calibrating(self):
+        return self._calibrating
+
+    def calibration_lines(self):
+        if self._calibration_lines is None:
+            return None
+        return {axis: list(values) for axis, values in self._calibration_lines.items()}
+
+    def set_calibration_lines(self, lines):
+        self._calibration_lines = {
+            "h": [float(v) for v in lines["h"]],
+            "v": [float(v) for v in lines["v"]],
+        }
+        self.update()
+
+    def calibration_gaps(self):
+        """Pixel distance between the horizontal pair and between the vertical pair."""
+        lines = self._calibration_lines
+        if lines is None:
+            return 0.0, 0.0
+        return abs(lines["h"][1] - lines["h"][0]), abs(lines["v"][1] - lines["v"][0])
+
+    def _calibration_line_at(self, pos):
+        scale, offset_x, offset_y = self._current_view()
+        grab_distance = 6
+        best = None
+        for axis, screen_value, offset in (
+            ("h", pos.y(), offset_y),
+            ("v", pos.x(), offset_x),
+        ):
+            for index, value in enumerate(self._calibration_lines[axis]):
+                distance = abs(screen_value - (offset + value * scale))
+                if distance <= grab_distance and (best is None or distance < best[0]):
+                    best = (distance, axis, index)
+        return None if best is None else (best[1], best[2])
+
+    def _move_calibration_line(self, axis, index, pos):
+        scale, offset_x, offset_y = self._current_view()
+        height, width = self.image.shape[:2]
+        if axis == "h":
+            value = max(0.0, min(float(height), (pos.y() - offset_y) / scale))
+        else:
+            value = max(0.0, min(float(width), (pos.x() - offset_x) / scale))
+        self._calibration_lines[axis][index] = value
+        self.update()
+
+    def _set_calibration_cursor(self, line):
+        if line is None:
+            self.unsetCursor()
+        elif line[0] == "h":
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
 
     def fit_to_window(self):
         if self.pixmap is None:
@@ -323,6 +409,7 @@ class Canvas(QWidget):
         return np.clip(data, 0.0, 1.0)
 
     def _refresh_mask_pixmap(self):
+        self.mask_changed.emit()
         if self.mask is None:
             self.mask_pixmap = None
             return
@@ -478,6 +565,12 @@ class Canvas(QWidget):
     def mousePressEvent(self, event):
         if self.image is None:
             return
+        if self._calibrating:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._calibration_drag = self._calibration_line_at(
+                    event.position().toPoint()
+                )
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             point = self._screen_to_image(event.position().toPoint())
             if point is None:
@@ -511,6 +604,13 @@ class Canvas(QWidget):
     def mouseMoveEvent(self, event):
         if self.image is None:
             return
+        if self._calibrating:
+            pos = event.position().toPoint()
+            if self._calibration_drag is not None:
+                self._move_calibration_line(*self._calibration_drag, pos)
+            else:
+                self._set_calibration_cursor(self._calibration_line_at(pos))
+            return
         self._cursor_pos = self._screen_to_image(event.position().toPoint())
         if not self._drawing:
             if self.tool in ("brush", "eraser"):
@@ -534,6 +634,9 @@ class Canvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
+        if self._calibrating:
+            self._calibration_drag = None
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
                 if self.fill_roi and len(self._freehand_points) > 2:
@@ -617,6 +720,16 @@ class Canvas(QWidget):
             painter.setPen(QPen(QColor(0, 255, 0), 1, Qt.PenStyle.SolidLine))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawEllipse(center, radius, radius)
+
+        if self._calibrating and self._calibration_lines is not None:
+            painter.setPen(QPen(QColor(0, 220, 255), 2, Qt.PenStyle.SolidLine))
+            for y in self._calibration_lines["h"]:
+                screen_y = int(offset_y + y * scale)
+                painter.drawLine(offset_x, screen_y, offset_x + draw_w, screen_y)
+            painter.setPen(QPen(QColor(255, 170, 0), 2, Qt.PenStyle.SolidLine))
+            for x in self._calibration_lines["v"]:
+                screen_x = int(offset_x + x * scale)
+                painter.drawLine(screen_x, offset_y, screen_x, offset_y + draw_h)
 
     def undo(self):
         if len(self._undo_stack) <= 1:
