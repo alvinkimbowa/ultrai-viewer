@@ -110,7 +110,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._base_title = "UltAI Viewer"
         self.setWindowTitle(self._base_title)
-        self._sidebar_width = 300
+        self._sidebar_width = 340
 
         self._create_menu_bar()
 
@@ -500,7 +500,7 @@ class MainWindow(QMainWindow):
         self._remember_frame_roi()
         if enabled:
             self.statusBar().showMessage(
-                "Set ROI on: drag the green lines with the Select tool"
+                "Select ROI on: drag the green lines with the Select tool"
             )
 
     def _save_limit_lines(self):
@@ -778,7 +778,7 @@ class MainWindow(QMainWindow):
         model_device_form.addRow("Model:", self.model_picker)
         self.device_picker = QComboBox()
         self.device_picker.setEnabled(False)
-        self.limit_checkbox = QCheckBox("Set ROI")
+        self.limit_checkbox = QCheckBox("Select ROI")
         self.limit_checkbox.setToolTip(
             "Show two vertical and two horizontal lines and segment only inside "
             "them. With the Select tool, drag the lines to move them. Mask "
@@ -829,9 +829,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_picker.setCurrentIndex(0)
         tools_row.addWidget(self.tool_picker)
-        self.fill_roi_checkbox = QCheckBox("Fill ROI")
-        tools_row.addWidget(self.fill_roi_checkbox)
-        self.fill_roi_checkbox.setChecked(False)
+        self.fill_mask_checkbox = QCheckBox("Fill mask")
+        tools_row.addWidget(self.fill_mask_checkbox)
+        self.fill_mask_checkbox.setChecked(False)
         layout.addLayout(tools_row)
 
         layout.addSpacing(5)
@@ -888,21 +888,23 @@ class MainWindow(QMainWindow):
             (self.px_per_mm_x_spin, "across"),
             (self.px_per_mm_y_spin, "down"),
         ):
-            spin.setRange(0.0, 10000.0)
-            spin.setDecimals(3)
+            spin.setRange(0.0, 999.99)
+            spin.setDecimals(2)
+            spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             spin.setSpecialValueText("Not set")
             spin.setToolTip(
                 f"How many image pixels make up one millimetre going {direction} "
                 "the image. While either value is not set, thickness is shown "
                 "in pixels."
             )
-        layout.addWidget(QLabel("Pixels per mm:"))
         px_per_mm_row = QHBoxLayout()
+        px_per_mm_row.addWidget(QLabel("Pixels per mm:"))
         px_per_mm_row.addWidget(QLabel("x"))
-        px_per_mm_row.addWidget(self.px_per_mm_x_spin, stretch=1)
+        px_per_mm_row.addWidget(self.px_per_mm_x_spin)
         px_per_mm_row.addSpacing(8)
         px_per_mm_row.addWidget(QLabel("y"))
-        px_per_mm_row.addWidget(self.px_per_mm_y_spin, stretch=1)
+        px_per_mm_row.addWidget(self.px_per_mm_y_spin)
+        px_per_mm_row.addStretch(1)
         layout.addLayout(px_per_mm_row)
 
         self.calibrate_btn = QPushButton("Calibrate")
@@ -912,12 +914,13 @@ class MainWindow(QMainWindow):
         configure_button(self.calibrate_btn)
         layout.addWidget(self.calibrate_btn)
 
-        view_form = QFormLayout()
-        view_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        view_row = QHBoxLayout()
         self.view_picker = QComboBox()
         self.view_picker.addItem("Full cartilage", False)
         self.view_picker.addItem("Per region", True)
-        view_form.addRow("View:", self.view_picker)
+        view_row.addWidget(QLabel("View:"))
+        view_row.addWidget(self.view_picker, stretch=1)
+        view_row.addSpacing(8)
         self.knee_picker = QComboBox()
         self.knee_picker.addItem("Right", "right")
         self.knee_picker.addItem("Left", "left")
@@ -925,8 +928,9 @@ class MainWindow(QMainWindow):
             "Which knee the image shows. It decides which side is lateral and "
             "which is medial."
         )
-        view_form.addRow("Knee:", self.knee_picker)
-        layout.addLayout(view_form)
+        view_row.addWidget(QLabel("Knee:"))
+        view_row.addWidget(self.knee_picker)
+        layout.addLayout(view_row)
         self.reset_centre_btn = QPushButton("Reset centre point")
         self.reset_centre_btn.setToolTip(
             "Move the diamond back to the position the app suggests"
@@ -1002,7 +1006,7 @@ class MainWindow(QMainWindow):
         self.brush_radius.valueChanged.connect(self._on_brush_radius_changed)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
-        self.fill_roi_checkbox.toggled.connect(self.canvas.set_fill_roi)
+        self.fill_mask_checkbox.toggled.connect(self.canvas.set_fill_mask)
         self.undo_btn.clicked.connect(self.canvas.undo)
         self.redo_btn.clicked.connect(self.canvas.redo)
         self.undo_action.triggered.connect(self.canvas.undo)
@@ -1230,7 +1234,7 @@ class MainWindow(QMainWindow):
         min_h = min(650, max_h)
         width = max(min_w, width)
         height = max(min_h, height)
-        self._sidebar_width = min(300, max(180, int(screen_rect.width() * 0.22)))
+        self._sidebar_width = min(340, max(180, int(screen_rect.width() * 0.22)))
         return (width, height)
 
     def _on_tool_changed(self, index):
@@ -1244,7 +1248,7 @@ class MainWindow(QMainWindow):
         tool = tool_map.get(index, "select")
         self.canvas.set_tool(tool)
         if tool in ("brush", "eraser"):
-            self.fill_roi_checkbox.setChecked(True)
+            self.fill_mask_checkbox.setChecked(True)
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)

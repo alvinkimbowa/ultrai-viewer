@@ -49,7 +49,7 @@ class Canvas(QWidget):
 
         self.tool = "select"
         self.brush_radius = 4
-        self.fill_roi = False
+        self.fill_mask = False
         self._drawing = False
         self._last_point = None
         self._poly_points = []
@@ -244,10 +244,10 @@ class Canvas(QWidget):
     def set_brush_radius(self, radius):
         self.brush_radius = max(1, int(radius))
 
-    def set_fill_roi(self, enabled):
-        self.fill_roi = bool(enabled)
-        self.show_contour_only = not self.fill_roi
-        if self.fill_roi and self._last_outline:
+    def set_fill_mask(self, enabled):
+        self.fill_mask = bool(enabled)
+        self.show_contour_only = not self.fill_mask
+        if self.fill_mask and self._last_outline:
             self.commit_pending_outline_to_mask()
         if self.mask is not None:
             self._refresh_mask_pixmap()
@@ -730,7 +730,7 @@ class Canvas(QWidget):
             self._poly_points = []
             self.update()
             return
-        if self.fill_roi:
+        if self.fill_mask:
             self._ensure_mask()
             points = np.array(
                 [[p.x(), p.y()] for p in self._poly_points],
@@ -853,7 +853,7 @@ class Canvas(QWidget):
             self.limit_lines_moved.emit()
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
-                if self.fill_roi and len(self._freehand_points) > 2:
+                if self.fill_mask and len(self._freehand_points) > 2:
                     self._ensure_mask()
                     points = np.array(
                         [[p.x(), p.y()] for p in self._freehand_points],

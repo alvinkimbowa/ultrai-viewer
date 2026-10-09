@@ -90,12 +90,12 @@ processed and saved.
 
 ## Editing Tools
 
-- Freehand Line: draw an outline ROI.
+- Freehand Line: draw an outline.
 - Segmented Line: click to add points, right-click or double-click to finish.
 - Paint Brush: add mask.
 - Eraser: remove mask.
 - Tool Radius: controls edit thickness.
-- Fill ROI: unchecked shows contour; checked fills the ROI into the mask.
+- Fill mask: unchecked shows only the outline; checked fills the outline into the mask.
 - Ctrl+Z to undo, Ctrl+Y to redo.
 
 ## Zoom and Scroll
@@ -112,9 +112,9 @@ processed and saved.
 - Delete mask: removes the mask from the screen and deletes its saved file from the output folder. Ctrl+Z brings the mask back on screen.
 - Close file: closes the image or video on screen and keeps the others loaded.
 
-## Set ROI
+## Select ROI
 
-Tick **Set ROI** (left panel, under Device) to show two vertical and two horizontal green lines on the image. With the Select tool, drag them to box in the part of the image you want.
+Tick **Select ROI** (left panel, next to Device) to show two vertical and two horizontal green lines on the image. With the Select tool, drag them to box in the part of the image you want.
 
 - Segmentation then runs only on the part of the image inside the lines.
 - A mask that already exists is hidden outside the lines. Only the part inside the lines is saved and measured. Moving the lines back out shows the hidden part again, as long as you have not left that image or frame.
