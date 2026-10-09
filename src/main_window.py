@@ -579,7 +579,7 @@ class MainWindow(QMainWindow):
                         found.setdefault(folder, []).append((video_path, name, frame))
         return found
 
-    def _on_roi_drawn(self):
+    def _on_roi_drawn(self, previous):
         if not self._save_current_roi():
             return
         targets = self._other_frames()
@@ -596,12 +596,18 @@ class MainWindow(QMainWindow):
             "Apply ROI",
             f"Apply this ROI to {others}?\n\n"
             "It replaces any ROI they have, and where one of them already has a "
-            "saved mask, the mask is trimmed to the ROI.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            "saved mask, the mask is trimmed to the ROI.\n\n"
+            "Cancel discards the box you just drew.",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.No,
         )
         if choice == QMessageBox.StandardButton.Yes:
             self._apply_roi_to(targets, self.canvas.roi_box(), count)
+        elif choice == QMessageBox.StandardButton.Cancel:
+            self.canvas.set_roi(previous)
+            self._save_current_roi()
 
     def _apply_roi_to(self, targets, box, count):
         """Give a box to the frames listed by _other_frames, trimming saved masks."""

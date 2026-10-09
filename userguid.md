@@ -121,7 +121,7 @@ processed and saved.
 An ROI is a box you draw on an image so that only the part inside it is segmented. Each image or video frame has its own ROI, or none.
 
 - **Draw**: choose **ROI Box** in the Tools dropdown and drag a box on the image. To replace a box, start the drag outside it.
-- **Apply to others**: after you draw, the app asks whether to apply the box to all the other loaded images and frames. Yes replaces whatever ROI they had; where one of them already has a saved mask, that mask is trimmed to the box straight away. Afterwards each image or frame can still be given a different ROI of its own.
+- **Apply to others**: after you draw, the app asks whether to apply the box to all the other loaded images and frames. Yes replaces whatever ROI they had; where one of them already has a saved mask, that mask is trimmed to the box straight away. No keeps the box on this image or frame only. Cancel discards the box you just drew and puts back the ROI the image had before, if any. Afterwards each image or frame can still be given a different ROI of its own.
 - **Adjust**: with the ROI Box or the Select tool, drag an edge or a corner to resize the box, or drag inside it to move it. This changes the ROI of that image or frame only.
 - **Delete**: right-click the box and choose **Delete ROI**, or click it and press the Delete key. Only that image or frame loses its ROI.
 - **Clear all ROIs** (Edit menu, or right-click a box): removes the ROI from every loaded image and frame, and from their rows in `measurements.csv`. Saved masks are not changed.

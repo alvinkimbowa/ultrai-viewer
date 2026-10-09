@@ -32,7 +32,8 @@ class Canvas(QWidget):
     image_loaded = pyqtSignal(str)
     navigation_requested = pyqtSignal(int)
     mask_changed = pyqtSignal()
-    roi_drawn = pyqtSignal()
+    # Carries the box the image had before the drawn one replaced it, or None.
+    roi_drawn = pyqtSignal(object)
     roi_changed = pyqtSignal()
     delete_requested = pyqtSignal(str)
 
@@ -1028,8 +1029,9 @@ class Canvas(QWidget):
             self._roi_draft = None
             self.update()
             if abs(x1 - x0) >= 1 and abs(y1 - y0) >= 1:
+                previous = self.roi_box()
                 self.set_roi((x0, x1, y0, y1))
-                self.roi_drawn.emit()
+                self.roi_drawn.emit(previous)
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
