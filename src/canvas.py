@@ -47,8 +47,14 @@ class Canvas(QWidget):
         self.mask_pixmap = None
         self.mask_opacity = 0.5
         self.show_contour_only = True
+        # Each history entry is (mask, ROI box): the state after one edit.
         self._undo_stack = []
         self._redo_stack = []
+        # edit_count goes up with every edit recorded, history_resets with every
+        # fresh start of the history; both let the window order its own undo
+        # steps against the canvas's.
+        self.edit_count = 0
+        self.history_resets = 0
         self._mask_touched = False
 
         self.tool = "select"
@@ -292,8 +298,30 @@ class Canvas(QWidget):
         self.update()
         return True
 
-    def set_roi(self, box):
-        """Give the image on screen the ROI box (left, right, top, bottom), or None."""
+    def set_roi(self, box, record=False):
+        """Give the image on screen the ROI box (left, right, top, bottom), or None.
+
+        record makes the change a step that Undo takes back, for a change the
+        user made; without it the box becomes part of the state Undo returns to.
+        """
+        self._apply_roi(box)
+        if record:
+            self._push_history()
+        elif self._undo_stack:
+            self._undo_stack[-1] = (self._undo_stack[-1][0], self.roi_box())
+
+    def drop_last_history(self):
+        """Forget the latest recorded edit without bringing back what it replaced."""
+        if len(self._undo_stack) > 1:
+            self._undo_stack.pop()
+
+    def history_depth(self):
+        return len(self._undo_stack)
+
+    def can_redo(self):
+        return bool(self._redo_stack)
+
+    def _apply_roi(self, box):
         self._roi_drag = None
         self._roi_move = None
         if box is None or self.image is None:
@@ -1013,11 +1041,13 @@ class Canvas(QWidget):
         self._centre_drag = False
         if self._roi_drag is not None:
             self._roi_drag = None
+            self._push_history()
             self.roi_changed.emit()
         if self._roi_move is not None:
             moved = self._roi_move["moved"]
             self._roi_move = None
             if moved:
+                self._push_history()
                 self.roi_changed.emit()
             else:
                 # A click inside the ROI picks the mask when it lands on it.
@@ -1031,7 +1061,7 @@ class Canvas(QWidget):
             self.update()
             if abs(x1 - x0) >= 1 and abs(y1 - y0) >= 1:
                 previous = self.roi_box()
-                self.set_roi((x0, x1, y0, y1))
+                self.set_roi((x0, x1, y0, y1), record=True)
                 self.roi_drawn.emit(previous)
             return
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1273,30 +1303,38 @@ class Canvas(QWidget):
             return
         current = self._undo_stack.pop()
         self._redo_stack.append(current)
-        self.mask = np.copy(self._undo_stack[-1])
-        self._refresh_mask_pixmap()
-        self.update()
+        self._restore_history_entry(self._undo_stack[-1])
 
     def redo(self):
         if not self._redo_stack:
             return
         state = self._redo_stack.pop()
-        self._undo_stack.append(np.copy(state))
-        self.mask = np.copy(state)
-        self._refresh_mask_pixmap()
-        self.update()
+        self._undo_stack.append(state)
+        self._restore_history_entry(state)
+
+    def _restore_history_entry(self, entry):
+        mask, box = entry
+        self.mask = np.copy(mask)
+        if box != self.roi_box():
+            self._apply_roi(box)
+            self.roi_changed.emit()
+        else:
+            self._refresh_mask_pixmap()
+            self.update()
 
     def _reset_history(self):
         self._undo_stack = []
         self._redo_stack = []
+        self.history_resets += 1
         if self.mask is not None:
-            self._undo_stack.append(np.copy(self.mask))
+            self._undo_stack.append((np.copy(self.mask), self.roi_box()))
 
     def _push_history(self):
         if self.mask is None:
             return
-        self._undo_stack.append(np.copy(self.mask))
+        self._undo_stack.append((np.copy(self.mask), self.roi_box()))
         self._redo_stack = []
+        self.edit_count += 1
 
     def has_mask_data(self):
         return self.mask is not None and self._mask_touched

@@ -98,7 +98,8 @@ processed and saved.
 - Fill mask: unchecked shows only the outline; checked fills the outline into the mask.
 - ROI Box: draw the ROI (see ROI below).
 - Delete: right-click the mask, the ROI or an unfilled outline and choose Delete; or click the mask or the ROI with the Select tool and press the Delete key.
-- Ctrl+Z to undo, Ctrl+Y to redo.
+- Ctrl+Z to undo, Ctrl+Y to redo. Undo and Redo cover mask edits and ROI changes (drawing, moving, resizing, deleting a box) on the image on screen, in the order you made them. This history starts fresh when you move to another image or frame.
+- Undo also takes back **Apply ROI to all** and **Clear all ROIs**, even after you have moved to another image or frame: the earlier ROIs, the masks as they were before trimming and their measurements are put back. An image you edited after the apply is left as it is.
 
 ## Rotate Image
 

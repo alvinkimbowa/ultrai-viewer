@@ -263,6 +263,10 @@ class MainWindow(QMainWindow):
         self._original_shape = None
         self._shown_angle = 0.0
         self._rotation_preview = None
+        # Steps that changed several files at once (Apply ROI to all, Clear all
+        # ROIs), kept apart from the canvas's own history of the image on screen.
+        self._bulk_undo = []
+        self._bulk_redo = []
         self._calibration_changed = False
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
@@ -896,8 +900,120 @@ class MainWindow(QMainWindow):
 
     def _on_roi_drawn(self, previous):
         if self._offer_roi_to_others(can_discard=True) == QMessageBox.StandardButton.Cancel:
+            self.canvas.drop_last_history()
             self.canvas.set_roi(previous)
             self._save_current_roi()
+
+    def _undo(self):
+        """Take back the latest step: an edit on the canvas or a step across files."""
+        step = self._bulk_undo[-1] if self._bulk_undo else None
+        canvas_is_later = (
+            step is not None
+            and step["resets"] == self.canvas.history_resets
+            and self.canvas.history_depth() > step["depth"]
+        )
+        if step is None or canvas_is_later:
+            self.canvas.undo()
+            return
+        self._bulk_undo.pop()
+        self._swap_bulk(step, "prev")
+        step["edit_count"] = self.canvas.edit_count
+        self._bulk_redo.append(step)
+
+    def _redo(self):
+        if self.canvas.can_redo():
+            self.canvas.redo()
+            return
+        if not self._bulk_redo:
+            return
+        step = self._bulk_redo.pop()
+        if step["edit_count"] != self.canvas.edit_count:
+            # An edit made since the step was undone starts a different history.
+            self._bulk_redo.clear()
+            return
+        self._swap_bulk(step, "after")
+        self._record_bulk(step)
+
+    def _record_bulk(self, step):
+        step["resets"] = self.canvas.history_resets
+        step["depth"] = self.canvas.history_depth()
+        self._bulk_undo.append(step)
+
+    def _bulk_entry(self, folder, name, frame, mask_path=None):
+        """What one image or frame holds before a step across files changes it."""
+        entry = {
+            "folder": str(folder),
+            "base": self._base_dir_of(folder),
+            "name": name,
+            "frame": str(frame),
+            "mask_path": None if mask_path is None else Path(mask_path),
+        }
+        self._fill_bulk_entry(entry, "prev")
+        return entry
+
+    def _fill_bulk_entry(self, entry, side):
+        name, frame = entry["name"], entry["frame"]
+        row = self._measurement_log(entry["folder"]).get(name, frame)
+        entry[f"{side}_roi"] = self._roi_store(entry["base"]).get(name, frame)
+        entry[f"{side}_row"] = None if row is None else dict(row)
+        path = entry["mask_path"]
+        entry[f"{side}_bytes"] = (
+            path.read_bytes() if path is not None and path.is_file() else None
+        )
+
+    def _swap_bulk(self, step, side):
+        """Put the files of a step across files into their "prev" or "after" state.
+
+        An image or frame whose ROI or mask file is no longer what the step left
+        it as was edited since, and is left alone.
+        """
+        if self._mode == "video":
+            self._stash_video_mask_for_current_frame()
+        elif self._mode == "sequence":
+            self._save_sequence_mask_if_needed()
+        other = "after" if side == "prev" else "prev"
+        current = self._current_frame_key()
+        on_screen = False
+        skipped = 0
+        touched = {}
+        try:
+            for entry in step["entries"]:
+                name, frame = entry["name"], entry["frame"]
+                store = self._roi_store(entry["base"])
+                log = self._measurement_log(entry["folder"])
+                path = entry["mask_path"]
+                held = path.read_bytes() if path is not None and path.is_file() else None
+                if store.get(name, frame) != entry[f"{other}_roi"] or (
+                    path is not None and held != entry[f"{other}_bytes"]
+                ):
+                    skipped += 1
+                    continue
+                if entry[f"{side}_roi"] is None:
+                    store.remove(name, frame)
+                else:
+                    store.set(name, frame, entry[f"{side}_roi"])
+                if path is not None and held != entry[f"{side}_bytes"]:
+                    if entry[f"{side}_bytes"] is None:
+                        path.unlink()
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(entry[f"{side}_bytes"])
+                log.put(name, frame, entry[f"{side}_row"])
+                touched[id(store)] = store
+                touched[id(log)] = log
+                if current == (entry["folder"], name, frame):
+                    on_screen = True
+            for item in touched.values():
+                item.save()
+        except OSError as exc:
+            QMessageBox.warning(self, step["title"], str(exc))
+        if on_screen:
+            self._show_saved_result()
+        verb = "Undid" if side == "prev" else "Redid"
+        message = f"{verb}: {step['title']}"
+        if skipped:
+            message += f"; {skipped} edited since were left as they are"
+        self.statusBar().showMessage(message)
 
     def _offer_roi_to_others(self, can_discard=False):
         """Ask whether the ROI on screen should go to every other image and frame.
@@ -940,6 +1056,7 @@ class MainWindow(QMainWindow):
         progress.setMinimumDuration(400)
         done = 0
         applied = 0
+        entries = []
         try:
             for folder, frames in targets.items():
                 store = self._roi_store(folder)
@@ -961,9 +1078,11 @@ class MainWindow(QMainWindow):
                         else:
                             mask_path = self._video_mask_path(source_path, frame)
                         if mask_path is None or not Path(mask_path).is_file():
+                            entries.append(self._bulk_entry(folder, name, frame))
                             store.set(name, frame, box)
                             applied += 1
                             continue
+                        entries.append(self._bulk_entry(folder, name, frame, mask_path))
                         if frame == "":
                             image = self.canvas._read_image(source_path)
                         else:
@@ -1003,6 +1122,10 @@ class MainWindow(QMainWindow):
             progress.close()
             QMessageBox.warning(self, "Apply ROI", str(exc))
             return
+        for entry in entries:
+            self._fill_bulk_entry(entry, "after")
+        self._bulk_redo.clear()
+        self._record_bulk({"title": "Apply ROI to all", "entries": entries})
         progress.setValue(count)
         message = f"ROI applied to {applied} images and frames"
         if applied < count:
@@ -1048,7 +1171,7 @@ class MainWindow(QMainWindow):
         if kind == "mask":
             self._delete_current_mask()
         elif kind == "roi":
-            self.canvas.set_roi(None)
+            self.canvas.set_roi(None, record=True)
             if self._save_current_roi():
                 self.statusBar().showMessage("ROI deleted")
         elif kind == "apply_roi":
@@ -1083,17 +1206,29 @@ class MainWindow(QMainWindow):
         if choice != QMessageBox.StandardButton.Yes:
             return
         removed = 0
+        entries = []
         try:
             for folder, names in loaded.items():
                 store = self._roi_store(folder)
+                log = self._measurement_log(folder)
+                keys = {key for key in store.boxes() if key[0] in names}
+                keys.update(
+                    key
+                    for key in log.keys()
+                    if key[0] in names and log.limits(*key) is not None
+                )
+                entries.extend(self._bulk_entry(folder, *key) for key in sorted(keys))
                 removed += store.remove_files(names)
                 store.save()
-                log = self._measurement_log(folder)
                 log.clear_limits(names)
                 log.save()
         except OSError as exc:
             QMessageBox.warning(self, "Clear all ROIs", str(exc))
             return
+        for entry in entries:
+            self._fill_bulk_entry(entry, "after")
+        self._bulk_redo.clear()
+        self._record_bulk({"title": "Clear all ROIs", "entries": entries})
         self.canvas.set_roi(None)
         self.statusBar().showMessage(f"Removed {removed} ROIs")
 
@@ -1644,10 +1779,10 @@ class MainWindow(QMainWindow):
         self.rotate_btn.clicked.connect(self._rotate_dialog)
         self.rotate_action.triggered.connect(self._rotate_dialog)
         self.fill_mask_checkbox.toggled.connect(self.canvas.set_fill_mask)
-        self.undo_btn.clicked.connect(self.canvas.undo)
-        self.redo_btn.clicked.connect(self.canvas.redo)
-        self.undo_action.triggered.connect(self.canvas.undo)
-        self.redo_action.triggered.connect(self.canvas.redo)
+        self.undo_btn.clicked.connect(self._undo)
+        self.redo_btn.clicked.connect(self._redo)
+        self.undo_action.triggered.connect(self._undo)
+        self.redo_action.triggered.connect(self._redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.clear_files_btn.clicked.connect(self._clear_sequence)

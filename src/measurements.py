@@ -285,6 +285,15 @@ class MeasurementLog:
     def get(self, file_name, frame):
         return self._rows.get((str(file_name), str(frame)))
 
+    def put(self, file_name, frame, row):
+        """Store a row exactly as given, or remove the row when given None."""
+        key = (str(file_name), str(frame))
+        if row is None:
+            self.remove(file_name, frame)
+        elif self._rows.get(key) != row:
+            self._rows[key] = dict(row)
+            self._dirty = True
+
     def keys(self):
         """(file, frame) of every row."""
         return list(self._rows)
