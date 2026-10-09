@@ -877,7 +877,7 @@ class MainWindow(QMainWindow):
             button.setMinimumHeight(min_height)
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        layout.addWidget(QLabel("Files:"))
+        layout.addWidget(QLabel("Files"))
         files_row = QHBoxLayout()
         self.load_btn = QPushButton("Load files")
         configure_button(self.load_btn)
@@ -917,19 +917,19 @@ class MainWindow(QMainWindow):
         sep3.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep3)
 
-        layout.addWidget(QLabel("Image Analysis:"))
-        model_device_form = QFormLayout()
-        model_device_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
+        layout.addWidget(QLabel("Image Analysis"))
+        model_row = QHBoxLayout()
         self.model_picker = QComboBox()
         self.model_picker.addItem("No models loaded")
         self.model_picker.setEnabled(False)
-        model_device_form.addRow("Model:", self.model_picker)
+        model_row.addWidget(QLabel("Model:"))
+        model_row.addWidget(self.model_picker, stretch=1)
+        model_row.addSpacing(8)
         self.device_picker = QComboBox()
         self.device_picker.setEnabled(False)
-        model_device_form.addRow("Device:", self.device_picker)
-        layout.addLayout(model_device_form)
+        model_row.addWidget(QLabel("Device:"))
+        model_row.addWidget(self.device_picker)
+        layout.addLayout(model_row)
 
         segment_row = QHBoxLayout()
         self.segment_btn = QPushButton("Segment image")
@@ -961,7 +961,7 @@ class MainWindow(QMainWindow):
         sep4.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep4)
 
-        layout.addWidget(QLabel("Edit:"))
+        layout.addWidget(QLabel("Edit"))
         tools_row = QHBoxLayout()
         tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
@@ -1034,7 +1034,7 @@ class MainWindow(QMainWindow):
         sep_end.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep_end)
 
-        layout.addWidget(QLabel("Measurements:"))
+        layout.addWidget(QLabel("Measurements"))
         self.px_per_mm_x_spin = QDoubleSpinBox()
         self.px_per_mm_y_spin = QDoubleSpinBox()
         for spin, direction in (
