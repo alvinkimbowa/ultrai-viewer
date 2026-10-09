@@ -253,6 +253,7 @@ MEASUREMENT_COLUMNS = [
     "limit_right",
     "limit_top",
     "limit_bottom",
+    "rotation",
     "pixels_per_mm_x",
     "pixels_per_mm_y",
     "unit",
@@ -300,20 +301,24 @@ class MeasurementLog:
         knee_side="right",
         prefer_saved=False,
         limits=None,
+        rotation=0.0,
     ):
         """Measure a mask and store it as the row of its image or frame.
 
         centre_x of None means the suggested centre. With prefer_saved, a knee side
         and a user-placed centre already stored for the row win over the arguments.
         limits is the ROI box (left, right, top, bottom) the mask was confined to,
-        if any.
+        if any. rotation is the angle, in degrees clockwise, the image and mask
+        were turned by before being measured.
         """
         key = (str(file_name), str(frame))
         saved = self._rows.get(key)
         if prefer_saved and saved is not None:
             if saved.get("knee_side") in ("right", "left"):
                 knee_side = saved["knee_side"]
-            if saved.get("centre_set_by") == "user":
+            # A centre placed on a view at another rotation is not kept.
+            same_view = self.rotation(file_name, frame) == round(float(rotation), 1)
+            if saved.get("centre_set_by") == "user" and same_view:
                 try:
                     centre_x = float(saved["centre_x"])
                 except (TypeError, ValueError):
@@ -333,6 +338,7 @@ class MeasurementLog:
             "limit_right": "" if limits is None else str(limits[1]),
             "limit_top": "" if limits is None else str(limits[2]),
             "limit_bottom": "" if limits is None else str(limits[3]),
+            "rotation": f"{rotation:.1f}",
             "pixels_per_mm_x": f"{px_per_mm_x:.3f}" if px_per_mm_x else "",
             "pixels_per_mm_y": f"{px_per_mm_y:.3f}" if px_per_mm_y else "",
             "unit": result["unit"],
@@ -359,13 +365,26 @@ class MeasurementLog:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def matches_inputs(self, file_name, frame, centre_x, knee_side, limits):
-        """True when a row exists and records this centre, knee side and ROI box.
+    def rotation(self, file_name, frame):
+        """The angle a row was measured at; 0 for a row that records none."""
+        row = self.get(file_name, frame)
+        try:
+            return float(row["rotation"])
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    def matches_inputs(
+        self, file_name, frame, centre_x, knee_side, limits, rotation=0.0
+    ):
+        """True when a row exists and records this centre, knee side, ROI box and
+        rotation.
 
         centre_x of None means the suggested centre.
         """
         row = self.get(file_name, frame)
         if row is None or row.get("knee_side") != knee_side:
+            return False
+        if self.rotation(file_name, frame) != round(float(rotation), 1):
             return False
         if centre_x is None:
             if row.get("centre_set_by") != "auto":

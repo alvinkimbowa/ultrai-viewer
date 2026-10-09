@@ -100,6 +100,17 @@ processed and saved.
 - Delete: right-click the mask, the ROI or an unfilled outline and choose Delete; or click the mask or the ROI with the Select tool and press the Delete key.
 - Ctrl+Z to undo, Ctrl+Y to redo.
 
+## Rotate Image
+
+**Rotate image** (Edit section, or Edit menu) turns the image on screen, for example to straighten a tilted scan. The image file itself is never changed.
+
+- A box opens with a slider from −180° to 180° and a number box beside it for steps of 0.1°. The image and its mask turn as you move the slider. Positive angles turn the image clockwise.
+- **OK** keeps the angle, **Cancel** puts the image back as it was, **Reset** sets 0°.
+- The rotation belongs to that file: each image has its own, and a video has one for all its frames. It is kept in `rotations.csv` in the output folder, so the file opens rotated the next time.
+- Everything then works on the rotated view: segmentation, the ROI, the regions and all measurements, including Pixels per mm x and y. If x and y are different, calibrate on the rotated view.
+- Mask files are still saved to line up with the original, unrotated image file. A mask edited on a rotated view can shift by about a pixel at its edge when saved, and anything drawn in the black corners is not saved.
+- Changing a file's rotation removes its ROI, since the view changes size as the image turns and the box no longer covers the same part. Its saved measurements are worked out again at the new angle.
+
 ## Zoom and Scroll
 
 - Ctrl + scroll: zoom in/out.
@@ -114,6 +125,7 @@ Results are kept per model. Inside the output folder you select, each model has 
 ```
 <output folder>/
     rois.csv
+    rotations.csv
     nnunet200/
         measurements.csv
         image1.png
@@ -160,7 +172,7 @@ The Measurements section of the left panel shows numbers for the mask on screen.
 - **Thickness**: area divided by length.
 - **Echo intensity** and **Variation**: the average brightness inside the mask and how much it varies (standard deviation), in arbitrary units (AU).
 
-Every time a mask is saved, its measurements are saved to `measurements.csv` in the selected model's subfolder of the output folder, one row per image or video frame, holding both the whole-mask and the per-region numbers.
+Every time a mask is saved, its measurements are saved to `measurements.csv` in the selected model's subfolder of the output folder, one row per image or video frame, holding both the whole-mask and the per-region numbers. The `rotation` column records the angle the image was turned by when it was measured.
 
 ## Tips
 

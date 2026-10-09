@@ -36,6 +36,7 @@ from .canvas import Canvas, REGION_COLORS
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from .rois import RoiStore
 from .measurements import MeasurementLog, REGION_NAMES, measure
+from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
 from threading import Event
 from collections import OrderedDict
 from pathlib import Path
@@ -50,6 +51,24 @@ MIN_LIMITED_SIZE = 8
 
 
 NO_MODEL_LABEL = "No model"
+
+
+def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
+    """Save a mask as a 0/255 image that lines up with the image file as stored.
+
+    mask is the mask as viewed. For an image viewed turned by angle, it is turned
+    back onto the stored image, whose (height, width) is original_shape.
+    """
+    mask_path = Path(mask_path)
+    stored = np.asarray(mask) > 0
+    if angle:
+        stored = unrotate_mask(stored, angle, original_shape)
+    mask_uint8 = stored.astype(np.uint8) * 255
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    if mask_path.suffix.lower() in (".tif", ".tiff"):
+        tifffile.imwrite(str(mask_path), mask_uint8)
+    elif not cv2.imwrite(str(mask_path), mask_uint8):
+        raise OSError(f"Failed to save mask: {mask_path.name}")
 
 
 def box_to_segment(image, box):
@@ -238,6 +257,12 @@ class MainWindow(QMainWindow):
         # for a moment.
         self._measurement_logs = {}
         self._roi_stores = {}
+        self._rotation_stores = {}
+        # (height, width) of the image on screen as stored, before any rotation,
+        # and the angle it is shown at.
+        self._original_shape = None
+        self._shown_angle = 0.0
+        self._rotation_preview = None
         self._calibration_changed = False
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
@@ -333,6 +358,8 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         self.clear_rois_action = QAction("Clear all ROIs", self)
         edit_menu.addAction(self.clear_rois_action)
+        self.rotate_action = QAction("Rotate image", self)
+        edit_menu.addAction(self.rotate_action)
 
         tools_menu = menubar.addMenu("Tools")
         self.select_pan_action = QAction("Select", self)
@@ -548,6 +575,10 @@ class MainWindow(QMainWindow):
             row = log.get(file_name, frame)
             # A saved result keeps the ROI it was measured with; rois.csv only
             # supplies the ROI of a frame that has no saved result yet.
+            # A row measured at another rotation describes a view that is no
+            # longer the one on screen, so its ROI and centre point do not apply.
+            if row is not None and log.rotation(file_name, frame) != self._shown_angle:
+                row = None
             if row is not None:
                 self.canvas.set_roi(log.limits(file_name, frame))
             else:
@@ -643,6 +674,183 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _rotation_store(self, output_dir):
+        # Like rois.csv, rotations.csv is shared by all models.
+        key = self._base_dir_of(output_dir)
+        if key not in self._rotation_stores:
+            self._rotation_stores[key] = RotationStore(key)
+        return self._rotation_stores[key]
+
+    def _angle_of(self, output_dir, file_name):
+        """Angle, in degrees clockwise, a file is viewed and measured at."""
+        if not output_dir:
+            return 0.0
+        try:
+            return self._rotation_store(output_dir).get(file_name)
+        except OSError:
+            return 0.0
+
+    def _current_angle(self):
+        key = self._current_frame_key()
+        return 0.0 if key is None else self._angle_of(key[0], key[1])
+
+    def _read_saved_mask(self, mask_path, angle=0.0):
+        """A saved mask file as a bool array, turned the way its image is viewed."""
+        raw = self.canvas._read_mask(str(mask_path))
+        return rotate_mask(raw >= (128 if raw.max() > 1 else 0.5), angle)
+
+    def _show_image(self, image, source_name):
+        """Put an image as stored on the canvas, turned by its file's angle."""
+        self._original_shape = image.shape[:2]
+        self._shown_angle = self._current_angle()
+        self.canvas.load_image_array(rotate_image(image, self._shown_angle), source_name)
+
+    def _show_saved_mask(self):
+        """Put the saved mask of the image or frame on screen on the canvas."""
+        mask_path = self._shown_mask_path()
+        if mask_path is None:
+            self.canvas.clear_mask()
+        elif not self._shown_angle:
+            self.canvas.load_mask(str(mask_path))
+        else:
+            try:
+                mask = self._read_saved_mask(mask_path, self._shown_angle)
+            except Exception as exc:
+                QMessageBox.critical(self, "Load failed", str(exc))
+                return
+            self.canvas.set_mask(mask.astype(np.float32))
+
+    def _rotate_dialog(self):
+        """Let the user turn the image on screen, previewing while a slider moves."""
+        if not self._begin_rotation():
+            return
+        start = self._current_angle()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Rotate image")
+        dialog_layout = QVBoxLayout(dialog)
+        hint = QLabel(
+            "Move the slider to turn the image. Positive angles turn it clockwise. "
+            "The image file itself is not changed."
+        )
+        hint.setWordWrap(True)
+        dialog_layout.addWidget(hint)
+        row = QHBoxLayout()
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(-180, 180)
+        slider.setMinimumWidth(320)
+        angle_spin = QDoubleSpinBox()
+        angle_spin.setRange(-180.0, 180.0)
+        angle_spin.setDecimals(1)
+        angle_spin.setSingleStep(0.1)
+        angle_spin.setSuffix("°")
+        row.addWidget(slider, stretch=1)
+        row.addWidget(angle_spin)
+        dialog_layout.addLayout(row)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+            | QDialogButtonBox.StandardButton.Reset
+        )
+        dialog_layout.addWidget(buttons)
+
+        def on_slider(value):
+            # The slider moves in whole degrees; the box keeps a finer angle
+            # until the slider is moved to another degree.
+            if round(angle_spin.value()) != value:
+                angle_spin.setValue(float(value))
+
+        def on_spin(value):
+            slider.blockSignals(True)
+            slider.setValue(round(value))
+            slider.blockSignals(False)
+            self._preview_rotation(value)
+
+        slider.setValue(round(start))
+        angle_spin.setValue(start)
+        slider.valueChanged.connect(on_slider)
+        angle_spin.valueChanged.connect(on_spin)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(
+            lambda: angle_spin.setValue(0.0)
+        )
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        self._finish_rotation(angle_spin.value() if accepted else None)
+
+    def _begin_rotation(self):
+        """Save what is on screen and keep the stored image and mask for previews."""
+        if self._batch_thread and self._batch_thread.isRunning():
+            return False
+        if self.canvas.image is None or self._current_frame_key() is None:
+            QMessageBox.information(self, "No files", "Load files first.")
+            return False
+        self._stop_playback()
+        try:
+            if self._mode == "video":
+                self._stash_video_mask_for_current_frame()
+                image = self._decode_video_frame(self._video_frame_index)
+            else:
+                self._save_sequence_mask_if_needed()
+                image = self.canvas._read_image(self._sequence_paths[self._sequence_index])
+            mask_path = self._shown_mask_path()
+            mask = None if mask_path is None else self._read_saved_mask(mask_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Rotate image", str(exc))
+            return False
+        if image is None:
+            return False
+        self._rotation_preview = {
+            "image": image,
+            "mask": mask,
+            "source": self.canvas.image_path or "",
+        }
+        return True
+
+    def _preview_rotation(self, angle):
+        """Show the image and its saved mask turned by angle, without storing it."""
+        preview = self._rotation_preview
+        if preview is None:
+            return
+        self.canvas.load_image_array(
+            rotate_image(preview["image"], angle), preview["source"]
+        )
+        if preview["mask"] is not None:
+            self.canvas.set_mask(rotate_mask(preview["mask"], angle).astype(np.float32))
+
+    def _finish_rotation(self, angle):
+        """Keep an angle chosen in a preview, or with None go back to the stored one."""
+        self._rotation_preview = None
+        key = self._current_frame_key()
+        if key is None:
+            return
+        output_dir, file_name, _ = key
+        changed = angle is not None and round(float(angle), 1) != self._current_angle()
+        if changed:
+            try:
+                store = self._rotation_store(output_dir)
+                store.set(file_name, angle)
+                store.save()
+                # An ROI is a box on the view, and the view changes size as the
+                # image turns, so the ROIs of the file are removed.
+                rois = self._roi_store(output_dir)
+                rois.remove_files({file_name})
+                rois.save()
+                log = self._measurement_log(output_dir)
+                log.clear_limits({file_name})
+                log.save()
+            except OSError as exc:
+                QMessageBox.warning(self, "Rotate image", str(exc))
+        self._show_stored_image()
+        self._show_saved_mask()
+        self._restore_frame_inputs()
+        if not changed:
+            return
+        if self._mode == "video":
+            self._remeasure_video_frames()
+        elif self._canvas_has_mask() and self._shown_result_dir() == output_dir:
+            self._record_measurement(output_dir, file_name)
+        self.statusBar().showMessage(f"Rotation of {file_name}: {self._shown_angle:g}°")
+
     def _rois_for_segmenting(self, output_dir):
         """ROI of each image and frame for a background run, keyed (file, frame).
 
@@ -652,6 +860,8 @@ class MainWindow(QMainWindow):
         boxes = self._roi_store(output_dir).boxes()
         log = MeasurementLog(output_dir)
         for file_name, frame in log.keys():
+            if log.rotation(file_name, frame) != self._angle_of(output_dir, file_name):
+                continue
             recorded = log.limits(file_name, frame)
             if recorded is None:
                 boxes.pop((file_name, frame), None)
@@ -774,7 +984,13 @@ class MainWindow(QMainWindow):
                             elif image.ndim == 3 and image.shape[2] == 3:
                                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                         if self._trim_saved_mask(
-                            Path(mask_path), box, image, log, name, frame
+                            Path(mask_path),
+                            box,
+                            image,
+                            log,
+                            name,
+                            frame,
+                            self._angle_of(folder, name),
                         ):
                             store.set(name, frame, box)
                             applied += 1
@@ -793,13 +1009,16 @@ class MainWindow(QMainWindow):
             message += f"; {count - applied} left out because the ROI does not fit them"
         self.statusBar().showMessage(message)
 
-    def _trim_saved_mask(self, mask_path, box, image, log, file_name, frame):
+    def _trim_saved_mask(self, mask_path, box, image, log, file_name, frame, angle=0.0):
         """Blank a saved mask outside a box and bring its measurements up to date.
 
-        Returns False, changing nothing, when the box does not fit the mask.
+        The box is in the view of the file, which is turned by angle. Returns
+        False, changing nothing, when the box does not fit the mask.
         """
-        raw = self.canvas._read_mask(str(mask_path))
-        mask = raw >= (128 if raw.max() > 1 else 0.5)
+        stored_shape = self.canvas._read_mask(str(mask_path)).shape[:2]
+        mask = self._read_saved_mask(mask_path, angle)
+        if image is not None:
+            image = rotate_image(image, angle)
         fitted = box_to_segment(mask, box)
         if fitted is None:
             return False
@@ -810,11 +1029,7 @@ class MainWindow(QMainWindow):
             mask_path.unlink()
             log.remove(file_name, frame)
             return True
-        mask_uint8 = trimmed.astype(np.uint8) * 255
-        if mask_path.suffix.lower() in (".tif", ".tiff"):
-            tifffile.imwrite(str(mask_path), mask_uint8)
-        elif not cv2.imwrite(str(mask_path), mask_uint8):
-            raise OSError(f"Failed to save mask: {mask_path.name}")
+        write_mask_file(mask_path, trimmed, angle, stored_shape)
         log.set(
             file_name,
             frame,
@@ -825,6 +1040,7 @@ class MainWindow(QMainWindow):
             knee_side=self.knee_picker.currentData(),
             prefer_saved=True,
             limits=fitted,
+            rotation=angle,
         )
         return True
 
@@ -933,6 +1149,7 @@ class MainWindow(QMainWindow):
                 self.canvas.centre_x,
                 self.canvas.knee_side,
                 limits=self.canvas.roi_box(),
+                rotation=self._shown_angle,
             )
             log.save()
         except OSError as exc:
@@ -943,11 +1160,24 @@ class MainWindow(QMainWindow):
         if mask_path is None or not Path(mask_path).is_file():
             return False
         try:
-            raw = self.canvas._read_mask(str(mask_path))
+            stored = self._read_saved_mask(mask_path)
         except Exception:
             return False
-        saved = raw >= (128 if raw.max() > 1 else 0.5)
         shown = np.asarray(self.canvas.visible_mask()) >= 0.5
+        if self._shown_angle:
+            # Turning a mask is not exactly reversible, so the file counts as
+            # the same mask when it gives the mask on screen once turned, or
+            # when the mask on screen gives the file once turned back.
+            if stored.ndim != 2:
+                return False
+            if np.array_equal(rotate_mask(stored, self._shown_angle), shown):
+                return True
+            return bool(
+                np.array_equal(
+                    unrotate_mask(shown, self._shown_angle, stored.shape), stored
+                )
+            )
+        saved = stored
         if saved.shape != shown.shape:
             if saved.ndim != 2:
                 return False
@@ -958,6 +1188,15 @@ class MainWindow(QMainWindow):
             ).astype(bool)
         return bool(np.array_equal(saved, shown))
 
+    def _write_shown_mask(self, mask_path):
+        """Save the mask on screen so that it lines up with the stored image."""
+        write_mask_file(
+            mask_path,
+            np.asarray(self.canvas.visible_mask()) >= 0.5,
+            self._shown_angle,
+            self._original_shape,
+        )
+
     def _measurement_is_current(self, output_dir, file_name, frame=""):
         """True when the saved row was measured with the inputs on screen."""
         try:
@@ -967,6 +1206,7 @@ class MainWindow(QMainWindow):
                 self.canvas.centre_x,
                 self.canvas.knee_side,
                 self.canvas.roi_box(),
+                self._shown_angle,
             )
         except OSError:
             return False
@@ -1012,16 +1252,25 @@ class MainWindow(QMainWindow):
                 mask = self._load_saved_video_mask_for_frame(self._video_path, frame)
                 if mask is None or not mask.any():
                     continue
+                angle = self._angle_of(self._video_output_dir, name)
+                mask = rotate_mask(mask, angle)
+                if image is not None:
+                    image = rotate_image(image, angle)
                 log.set(
                     name,
                     frame,
                     image,
-                    mask >= 0.5,
+                    mask,
                     self.px_per_mm_x_spin.value(),
                     self.px_per_mm_y_spin.value(),
                     knee_side=self.knee_picker.currentData(),
                     prefer_saved=True,
-                    limits=log.limits(name, frame),
+                    limits=(
+                        log.limits(name, frame)
+                        if log.rotation(name, frame) == angle
+                        else None
+                    ),
+                    rotation=angle,
                 )
             log.save()
         except OSError as exc:
@@ -1236,9 +1485,18 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(10)
 
+        view_buttons_row = QHBoxLayout()
         self.fit_btn = QPushButton("Fit to Window")
         configure_button(self.fit_btn)
-        layout.addWidget(self.fit_btn)
+        view_buttons_row.addWidget(self.fit_btn)
+        self.rotate_btn = QPushButton("Rotate image")
+        self.rotate_btn.setToolTip(
+            "Turn the image on screen. The image file is not changed, and the "
+            "rotation is remembered for this file."
+        )
+        configure_button(self.rotate_btn)
+        view_buttons_row.addWidget(self.rotate_btn)
+        layout.addLayout(view_buttons_row)
 
         layout.addSpacing(5)
 
@@ -1383,6 +1641,8 @@ class MainWindow(QMainWindow):
         self.brush_radius.valueChanged.connect(self._on_brush_radius_changed)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
+        self.rotate_btn.clicked.connect(self._rotate_dialog)
+        self.rotate_action.triggered.connect(self._rotate_dialog)
         self.fill_mask_checkbox.toggled.connect(self.canvas.set_fill_mask)
         self.undo_btn.clicked.connect(self.canvas.undo)
         self.redo_btn.clicked.connect(self.canvas.redo)
@@ -1747,6 +2007,7 @@ class MainWindow(QMainWindow):
             ),
             knee_side=self.knee_picker.currentData(),
             rois=self._rois_for_segmenting(self._sequence_output_dir),
+            rotations=self._rotation_store(self._sequence_output_dir).angles(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1842,6 +2103,7 @@ class MainWindow(QMainWindow):
             ),
             knee_side=self.knee_picker.currentData(),
             rois=self._rois_for_segmenting(self._video_output_dir),
+            rotations=self._rotation_store(self._video_output_dir).angles(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1951,12 +2213,8 @@ class MainWindow(QMainWindow):
             self._batch_dialog.mark_complete()
         self._close_batch_dialog()
         if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
-            saved_mask = self._load_saved_video_mask_for_frame(
-                self._video_path,
-                self._video_frame_index,
-            )
-            if saved_mask is not None:
-                self.canvas.set_mask(saved_mask)
+            if self._shown_mask_path() is not None:
+                self._show_saved_mask()
 
     def _on_batch_canceled(self):
         self.statusBar().showMessage("Batch segmentation canceled")
@@ -2093,12 +2351,20 @@ class MainWindow(QMainWindow):
         frame on screen back on the canvas, as held by the results folder in use."""
         if self.canvas.image is None or self._current_frame_key() is None:
             return
-        mask_path = self._shown_mask_path()
-        if mask_path is not None:
-            self.canvas.load_mask(str(mask_path))
-        else:
-            self.canvas.clear_mask()
+        if self._current_angle() != self._shown_angle:
+            # The folder switched to keeps this file at another rotation.
+            self._show_stored_image()
+        self._show_saved_mask()
         self._restore_folder_inputs()
+
+    def _show_stored_image(self):
+        """Put the image or frame on screen back on the canvas from its file."""
+        if self._mode == "video":
+            frame = self._decode_video_frame(self._video_frame_index)
+            if frame is not None:
+                self._show_image(frame, self._video_path or "")
+        elif self._mode == "sequence":
+            self._show_image_file(self._sequence_paths[self._sequence_index])
 
     def _update_output_dir_tooltip(self):
         self.output_btn.setToolTip(
@@ -2328,18 +2594,22 @@ class MainWindow(QMainWindow):
             return
         self._set_video_frame_index(last_index)
 
+    def _show_image_file(self, path):
+        try:
+            image = self.canvas._read_image(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load failed", str(exc))
+            return
+        self._show_image(image, path)
+
     def _load_sequence_image(self):
         if self._mode != "sequence":
             return
         if self._sequence_index < 0 or self._sequence_index >= len(self._sequence_paths):
             return
         path = self._sequence_paths[self._sequence_index]
-        self.canvas.load_image(path)
-        mask_path = self._shown_mask_path()
-        if mask_path is not None:
-            self.canvas.load_mask(str(mask_path))
-        else:
-            self.canvas.clear_mask()
+        self._show_image_file(path)
+        self._show_saved_mask()
         self._restore_frame_inputs()
         self._update_navigation_buttons()
         self._set_slider_value(self._sequence_index)
@@ -2431,12 +2701,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Frame error", f"Could not decode frame {frame_index}.")
             return
         self._video_frame_index = frame_index
-        self.canvas.load_image_array(frame, self._video_path or "")
-        mask_path = self._shown_mask_path()
-        if mask_path is not None:
-            self.canvas.load_mask(str(mask_path))
-        else:
-            self.canvas.clear_mask()
+        self._show_image(frame, self._video_path or "")
+        self._show_saved_mask()
         self._restore_frame_inputs()
         self._set_slider_value(frame_index)
         self._update_navigation_buttons()
@@ -2500,13 +2766,10 @@ class MainWindow(QMainWindow):
                     return
             mask_same = not force and self._saved_mask_matches(mask_path)
             if not mask_same:
-                mask = np.asarray(self.canvas.visible_mask(), dtype=np.float32)
-                mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-                mask_path.parent.mkdir(parents=True, exist_ok=True)
-                if not cv2.imwrite(str(mask_path), mask_uint8):
-                    QMessageBox.warning(
-                        self, "Save error", f"Failed to save mask: {mask_path.name}"
-                    )
+                try:
+                    self._write_shown_mask(mask_path)
+                except OSError as exc:
+                    QMessageBox.warning(self, "Save error", str(exc))
                     return
             if not mask_same or not self._measurement_is_current(
                 self._video_output_dir, name, self._video_frame_index
@@ -2694,8 +2957,7 @@ class MainWindow(QMainWindow):
         output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
         try:
             if not mask_same:
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                self.canvas.save_mask(str(output_path))
+                self._write_shown_mask(output_path)
                 self.statusBar().showMessage(f"Saved mask: {output_path.name}")
             if (
                 not mask_same
@@ -2738,8 +3000,7 @@ class MainWindow(QMainWindow):
             image_path = Path(self._sequence_paths[self._sequence_index])
             output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
             try:
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                self.canvas.save_mask(str(output_path))
+                self._write_shown_mask(output_path)
                 self.statusBar().showMessage(f"Saved mask: {output_path.name}")
                 self._record_measurement(self._sequence_output_dir, image_path.name)
             except Exception as exc:
@@ -3351,8 +3612,10 @@ class BatchInferenceWorker(QObject):
         px_per_mm=(0.0, 0.0),
         knee_side="right",
         rois=None,
+        rotations=None,
     ):
         super().__init__()
+        self._rotations = rotations or {}
         self._model = model
         self._image_paths = list(image_paths)
         self._output_dir = output_dir
@@ -3392,7 +3655,10 @@ class BatchInferenceWorker(QObject):
                 self.progress.emit(idx, total)
                 continue
             try:
+                angle = self._rotations.get(Path(image_path).name, 0.0)
                 image = self._load_image(image_path)
+                stored_shape = image.shape[:2]
+                image = rotate_image(image, angle)
                 box = box_to_segment(
                     image, self._rois.get((Path(image_path).name, ""))
                 )
@@ -3402,7 +3668,12 @@ class BatchInferenceWorker(QObject):
                 )
                 if prediction is not None:
                     mask = place_prediction(prediction, image, box)
-                    self._save_mask(mask, image_path)
+                    write_mask_file(
+                        Path(self._output_dir) / f"{Path(image_path).stem}.png",
+                        mask >= 0.5,
+                        angle,
+                        stored_shape,
+                    )
                     self._measurement_log.set(
                         Path(image_path).name,
                         "",
@@ -3412,6 +3683,7 @@ class BatchInferenceWorker(QObject):
                         knee_side=self._knee_side,
                         prefer_saved=True,
                         limits=box,
+                        rotation=angle,
                     )
             except Exception as exc:
                 if str(exc).lower().startswith("inference canceled"):
@@ -3449,13 +3721,6 @@ class BatchInferenceWorker(QObject):
             raise ValueError(f"Unsupported image format: {file_path}")
         return image
 
-    def _save_mask(self, mask, image_path):
-        mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-        output_path = Path(self._output_dir) / f"{Path(image_path).stem}.png"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(output_path), mask_uint8):
-            raise RuntimeError(f"Failed to save mask: {output_path}")
-
 
 class VideoBatchInferenceWorker(QObject):
     finished = pyqtSignal(int, int)
@@ -3476,8 +3741,10 @@ class VideoBatchInferenceWorker(QObject):
         px_per_mm=(0.0, 0.0),
         knee_side="right",
         rois=None,
+        rotations=None,
     ):
         super().__init__()
+        self._rotations = rotations or {}
         self._model = model
         self._video_paths = list(video_paths)
         self._output_dir = Path(output_dir)
@@ -3547,6 +3814,9 @@ class VideoBatchInferenceWorker(QObject):
                             image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         else:
                             image = frame
+                        angle = self._rotations.get(video_name, 0.0)
+                        stored_shape = image.shape[:2]
+                        image = rotate_image(image, angle)
                         box = box_to_segment(
                             image, self._rois.get((video_name, str(frame_index)))
                         )
@@ -3558,9 +3828,7 @@ class VideoBatchInferenceWorker(QObject):
                             self.canceled.emit()
                             return
                         mask = place_prediction(prediction, image, box)
-                        mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-                        if not cv2.imwrite(str(output_path), mask_uint8):
-                            raise RuntimeError(f"Failed to save mask: {output_path}")
+                        write_mask_file(output_path, mask >= 0.5, angle, stored_shape)
                         measurement_log.set(
                             video_name,
                             frame_index,
@@ -3570,6 +3838,7 @@ class VideoBatchInferenceWorker(QObject):
                             knee_side=self._knee_side,
                             prefer_saved=True,
                             limits=box,
+                            rotation=angle,
                         )
                         processed += 1
                         self.progress.emit(processed, total_frames)
