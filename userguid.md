@@ -71,7 +71,7 @@ available while videos are loaded.
 4) Click **Segment all files**.
 5) Wait for the progress dialog to finish.
 
-Results are saved automatically in the output folder as PNG files. You can preview
+Results are saved automatically as PNG files in the selected model's subfolder of the output folder. You can preview
 results by navigating through the loaded images using the left/right arrow keys.
 If saved masks already exist, the app asks whether to overwrite them or preserve
 them and segment only missing images.
@@ -85,7 +85,7 @@ them and segment only missing images.
 
 If saved masks already exist, the app asks whether to overwrite them or preserve
 them and segment only missing frames. Masks are saved as PNG files under
-`<output folder>/<video name>/frame_000000.png`. Canceling retains frames already
+`<output folder>/<model>/<video name>/frame_000000.png`. Canceling retains frames already
 processed and saved.
 
 ## Editing Tools
@@ -109,11 +109,27 @@ processed and saved.
 
 ## Saving
 
-- Save masks (Ctrl+S): saves the current mask as PNG in the output folder.
+Results are kept per model. Inside the output folder you select, each model has a subfolder named after it, holding that model's masks and its `measurements.csv`:
+
+```
+<output folder>/
+    rois.csv
+    nnunet200/
+        measurements.csv
+        image1.png
+        <video name>/frame_000000.png
+    monounet202/
+        ...
+```
+
+- Changing the **Model** changes where results are saved and switches the mask on screen to the one saved for that model (or to no mask, if it has none for this image or frame). Anything you changed is first saved under the model you are leaving.
+- **No model** in the Model list shows and saves masks directly in the output folder, with no subfolder. The Segment buttons need a model.
+- Results that sit directly in the output folder (saved before models had subfolders) are shown when the selected model has no mask of its own for that image or frame. They are not rewritten: if you edit one, the edited mask is saved in the model's subfolder and that copy is shown from then on. **Delete mask** does delete the one being shown.
+- Save masks (Ctrl+S): saves the current mask as PNG in the selected model's subfolder.
 - Leaving an image or frame saves its mask and measurements only if something changed (the mask, ROI, centre point or knee side). Just looking at it writes nothing, except that a mask with no measurements yet gets them.
 - Changing Pixels per mm updates the saved measurements of the image on screen, or of every saved frame of the video on screen. Other files keep theirs until they are edited or saved.
 - Select output folder: switches to a different output folder without reloading the files.
-- Delete mask: removes the mask from the screen and deletes its saved file from the output folder. Ctrl+Z brings the mask back on screen.
+- Delete mask: removes the mask from the screen and deletes its saved file. Ctrl+Z brings the mask back on screen.
 - Close file: closes the image or video on screen and keeps the others loaded.
 
 ## ROI
@@ -121,13 +137,14 @@ processed and saved.
 An ROI is a box you draw on an image so that only the part inside it is segmented. Each image or video frame has its own ROI, or none.
 
 - **Draw**: choose **ROI Box** in the Tools dropdown and drag a box on the image. To replace a box, start the drag outside it.
-- **Apply to others**: after you draw, the app asks whether to apply the box to all the other loaded images and frames. Yes replaces whatever ROI they had; where one of them already has a saved mask, that mask is trimmed to the box straight away. No keeps the box on this image or frame only. Cancel discards the box you just drew and puts back the ROI the image had before, if any. Afterwards each image or frame can still be given a different ROI of its own.
+- **Apply to others**: after you draw, the app asks whether to apply the box to all the other loaded images and frames. Yes replaces whatever ROI they had; where one of them already has a saved mask under the selected model, that mask is trimmed to the box straight away. No keeps the box on this image or frame only. Cancel discards the box you just drew and puts back the ROI the image had before, if any. Afterwards each image or frame can still be given a different ROI of its own.
 - **Adjust**: with the ROI Box or the Select tool, drag an edge or a corner to resize the box, or drag inside it to move it. This changes the ROI of that image or frame only.
 - **Delete**: right-click the box and choose **Delete ROI**, or click it and press the Delete key. Only that image or frame loses its ROI.
-- **Clear all ROIs** (Edit menu, or right-click a box): removes the ROI from every loaded image and frame, and from their rows in `measurements.csv`. Saved masks are not changed.
+- **Clear all ROIs** (Edit menu, or right-click a box): removes the ROI from every loaded image and frame, and from their rows in the selected model's `measurements.csv`. Saved masks are not changed.
 - Segment image, Segment video and Segment all files use each image's or frame's own ROI, and the whole image where there is none.
 - A mask that already exists is hidden outside the box. Only the part inside is saved and measured. The hidden part comes back if you enlarge or delete the box before leaving that image or frame.
-- ROIs are kept in `rois.csv` in the output folder, so they are there the next time you open the same files.
+- ROIs are kept in `rois.csv` in the output folder, shared by all models, so they are there the next time you open the same files.
+- Once a model has a saved mask for an image or frame, the ROI recorded with it in that model's `measurements.csv` is the one shown and used under that model. Changing the ROI under one model does not change what another model has saved; `rois.csv` supplies the ROI only where the selected model has nothing saved yet.
 
 ## Measurements
 
@@ -142,7 +159,7 @@ The Measurements section of the left panel shows numbers for the mask on screen.
 - **Thickness**: area divided by length.
 - **Echo intensity** and **Variation**: the average brightness inside the mask and how much it varies (standard deviation), in arbitrary units (AU).
 
-Every time a mask is saved, its measurements are saved to `measurements.csv` in the output folder, one row per image or video frame, holding both the whole-mask and the per-region numbers.
+Every time a mask is saved, its measurements are saved to `measurements.csv` in the selected model's subfolder of the output folder, one row per image or video frame, holding both the whole-mask and the per-region numbers.
 
 ## Tips
 

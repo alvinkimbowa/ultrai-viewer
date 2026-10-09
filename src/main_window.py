@@ -49,6 +49,9 @@ MASK_EXTENSIONS = (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg")
 MIN_LIMITED_SIZE = 8
 
 
+NO_MODEL_LABEL = "No model"
+
+
 def box_to_segment(image, box):
     """Clamp an ROI box (left, right, top, bottom) to an image.
 
@@ -209,7 +212,7 @@ class MainWindow(QMainWindow):
         self._inference_dialog = None
         self._sequence_paths = []
         self._sequence_index = -1
-        self._sequence_output_dir = None
+        self._sequence_base_dir = None
         self._mode = "none"
         self._video_path = None
         self._video_paths = []
@@ -218,7 +221,7 @@ class MainWindow(QMainWindow):
         self._video_frame_count = 0
         self._video_fps = 0.0
         self._video_frame_index = -1
-        self._video_output_dir = None
+        self._video_base_dir = None
         self._video_frame_cache = OrderedDict()
         self._video_decode_pos = -1
         self._video_cache_limit = 9
@@ -342,6 +345,40 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.paint_action)
         self.eraser_action = QAction("Eraser", self)
         tools_menu.addAction(self.eraser_action)
+
+    def _results_dir(self, base_dir):
+        """Folder the results of the selected model are kept in.
+
+        A subfolder of the selected output folder named after the model, or the
+        output folder itself when no model is selected.
+        """
+        if not base_dir:
+            return None
+        model = self._model.current_model()
+        return str(Path(base_dir) / model) if model else str(base_dir)
+
+    @property
+    def _sequence_output_dir(self):
+        return self._results_dir(self._sequence_base_dir)
+
+    @_sequence_output_dir.setter
+    def _sequence_output_dir(self, selected_dir):
+        self._sequence_base_dir = selected_dir
+
+    @property
+    def _video_output_dir(self):
+        return self._results_dir(self._video_base_dir)
+
+    @_video_output_dir.setter
+    def _video_output_dir(self, selected_dir):
+        self._video_base_dir = selected_dir
+
+    def _base_dir_of(self, results_dir):
+        """The selected output folder a results folder belongs to."""
+        for base_dir in (self._sequence_base_dir, self._video_base_dir):
+            if base_dir and str(results_dir) == self._results_dir(base_dir):
+                return str(base_dir)
+        return str(results_dir)
 
     def _settings(self):
         return QSettings("UltAI", "UltAI Viewer")
@@ -507,11 +544,16 @@ class MainWindow(QMainWindow):
             return
         output_dir, file_name, frame = key
         try:
-            self.canvas.set_roi(self._roi_store(output_dir).get(file_name, frame))
-            log = self._measurement_log(output_dir)
+            log = self._measurement_log(self._shown_result_dir())
+            row = log.get(file_name, frame)
+            # A saved result keeps the ROI it was measured with; rois.csv only
+            # supplies the ROI of a frame that has no saved result yet.
+            if row is not None:
+                self.canvas.set_roi(log.limits(file_name, frame))
+            else:
+                self.canvas.set_roi(self._roi_store(output_dir).get(file_name, frame))
         except OSError:
             return
-        row = log.get(file_name, frame)
         if row is None:
             return
         knee_index = self.knee_picker.findData(row.get("knee_side"))
@@ -523,6 +565,51 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 pass
 
+    def _shown_result_dir(self):
+        """Folder holding the saved result of the image or frame on screen.
+
+        The selected model's results folder, or the selected output folder itself
+        when only that holds a mask for it (results saved before models had
+        folders of their own).
+        """
+        if self._mode == "video":
+            results_dir, base_dir = self._video_output_dir, self._video_base_dir
+        else:
+            results_dir, base_dir = self._sequence_output_dir, self._sequence_base_dir
+        shown = self._shown_mask_path()
+        if shown is not None and base_dir and results_dir != str(base_dir):
+            if Path(results_dir) not in Path(shown).parents:
+                return str(base_dir)
+        return results_dir
+
+    def _shown_mask_path(self):
+        """Saved mask file of the image or frame on screen, or None."""
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            for base_dir in (self._video_output_dir, self._video_base_dir):
+                if base_dir:
+                    path = (
+                        Path(base_dir)
+                        / Path(self._video_path).stem
+                        / f"frame_{int(self._video_frame_index):06d}.png"
+                    )
+                    if path.is_file():
+                        return path
+            return None
+        if self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            image_path = Path(self._sequence_paths[self._sequence_index])
+            for base_dir in (self._sequence_output_dir, self._sequence_base_dir):
+                if not base_dir:
+                    continue
+                for ext in MASK_EXTENSIONS:
+                    path = Path(base_dir) / f"{image_path.stem}{ext}"
+                    # With the images' own folder as output folder, an image has
+                    # the file name its mask would have.
+                    if path.is_file() and path.resolve() != image_path.resolve():
+                        return path
+        return None
+
     def _restore_folder_inputs(self):
         """Show the ROI, knee side and centre point the output folder holds for the
         frame on screen, in place of those of the folder it was switched from."""
@@ -530,9 +617,11 @@ class MainWindow(QMainWindow):
         self._restore_frame_inputs()
 
     def _roi_store(self, output_dir):
-        key = str(output_dir)
+        # rois.csv is shared by all models, so it sits in the selected output
+        # folder rather than in the results folder of one model.
+        key = self._base_dir_of(output_dir)
         if key not in self._roi_stores:
-            self._roi_stores[key] = RoiStore(output_dir)
+            self._roi_stores[key] = RoiStore(key)
         return self._roi_stores[key]
 
     def _save_current_roi(self):
@@ -553,6 +642,22 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Could not save the ROI: {exc}")
             return False
         return True
+
+    def _rois_for_segmenting(self, output_dir):
+        """ROI of each image and frame for a background run, keyed (file, frame).
+
+        The boxes of rois.csv, except that a frame with a saved result in the
+        results folder keeps the ROI recorded with that result.
+        """
+        boxes = self._roi_store(output_dir).boxes()
+        log = MeasurementLog(output_dir)
+        for file_name, frame in log.keys():
+            recorded = log.limits(file_name, frame)
+            if recorded is None:
+                boxes.pop((file_name, frame), None)
+            else:
+                boxes[(file_name, frame)] = recorded
+        return boxes
 
     def _other_frames(self):
         """Every loaded image and video frame other than the one on screen.
@@ -1378,7 +1483,8 @@ class MainWindow(QMainWindow):
                 return []
             image_path = Path(self._sequence_paths[self._sequence_index])
             candidates = [
-                Path(self._sequence_output_dir) / f"{image_path.stem}{ext}" for ext in MASK_EXTENSIONS
+                Path(self._shown_result_dir()) / f"{image_path.stem}{ext}"
+                for ext in MASK_EXTENSIONS
             ]
             # When the output folder is also the input folder, the image itself has
             # the file name its mask would have.
@@ -1388,14 +1494,15 @@ class MainWindow(QMainWindow):
                 if path.is_file() and path.resolve() != image_path.resolve()
             ]
         if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
-            mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
-            if mask_path is not None and mask_path.is_file():
+            mask_path = self._shown_mask_path()
+            if mask_path is not None:
                 return [mask_path]
         return []
 
     def _delete_current_mask(self):
         self._commit_pending_outline()
         mask_paths = self._saved_mask_paths_for_current()
+        result_dir = self._shown_result_dir()
         if not mask_paths and not self._canvas_has_mask():
             return
         if self._mode == "video":
@@ -1422,13 +1529,13 @@ class MainWindow(QMainWindow):
             return
         if self._mode == "video":
             self._forget_measurement(
-                self._video_output_dir,
+                result_dir,
                 Path(self._video_path).name,
                 self._video_frame_index,
             )
         elif self._mode == "sequence" and self._sequence_output_dir:
             self._forget_measurement(
-                self._sequence_output_dir,
+                result_dir,
                 Path(self._sequence_paths[self._sequence_index]).name,
             )
         if mask_paths:
@@ -1590,7 +1697,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "No model",
-                "No ONNX model found in assets/.",
+                "Select a model in the Model list first.",
             )
             return
         if self._inference_thread and self._inference_thread.isRunning():
@@ -1628,7 +1735,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
             ),
             knee_side=self.knee_picker.currentData(),
-            rois=self._roi_store(self._sequence_output_dir).boxes(),
+            rois=self._rois_for_segmenting(self._sequence_output_dir),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1673,7 +1780,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No output folder", "Select an output folder first.")
             return
         if not self._model.has_model():
-            QMessageBox.warning(self, "No model", "No ONNX model found in assets/.")
+            QMessageBox.warning(self, "No model", "Select a model in the Model list first.")
             return
         if self._inference_thread and self._inference_thread.isRunning():
             self.statusBar().showMessage("Segmentation already running...")
@@ -1723,7 +1830,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
             ),
             knee_side=self.knee_picker.currentData(),
-            rois=self._roi_store(self._video_output_dir).boxes(),
+            rois=self._rois_for_segmenting(self._video_output_dir),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1937,9 +2044,9 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(
             self,
             "Select output folder",
-            self._sequence_output_dir or self._last_image_output_dir or self._last_image_input_dir,
+            self._sequence_base_dir or self._last_image_output_dir or self._last_image_input_dir,
         )
-        if not directory or directory == self._sequence_output_dir:
+        if not directory or directory == self._sequence_base_dir:
             return
         # The mask on screen belongs to the previous folder, so it is written there
         # and the canvas then shows whatever the chosen folder holds for this image.
@@ -1948,22 +2055,16 @@ class MainWindow(QMainWindow):
         self._last_image_output_dir = directory
         self._save_persisted_paths()
         self._update_output_dir_tooltip()
-        if 0 <= self._sequence_index < len(self._sequence_paths):
-            mask_path = self._find_sequence_mask_path(self._sequence_paths[self._sequence_index])
-            if mask_path:
-                self.canvas.load_mask(mask_path)
-            else:
-                self.canvas.clear_mask()
-            self._restore_folder_inputs()
+        self._show_saved_result()
         self.statusBar().showMessage(f"Output folder: {directory}")
 
     def _change_video_output_dir(self):
         directory = QFileDialog.getExistingDirectory(
             self,
             "Select output folder",
-            self._video_output_dir or self._last_video_output_dir or self._last_video_input_dir,
+            self._video_base_dir or self._last_video_output_dir or self._last_video_input_dir,
         )
-        if not directory or directory == self._video_output_dir:
+        if not directory or directory == self._video_base_dir:
             return
         self._stop_playback()
         # Stashing writes the on-screen mask to the folder in effect, so it has to
@@ -1973,20 +2074,24 @@ class MainWindow(QMainWindow):
         self._last_video_output_dir = directory
         self._save_persisted_paths()
         self._update_output_dir_tooltip()
-        if self._video_path and self._video_frame_index >= 0:
-            saved_mask = self._load_saved_video_mask_for_frame(
-                self._video_path, self._video_frame_index
-            )
-            if saved_mask is not None:
-                self.canvas.set_mask(saved_mask)
-            else:
-                self.canvas.clear_mask()
-            self._restore_folder_inputs()
+        self._show_saved_result()
         self.statusBar().showMessage(f"Output folder: {directory}")
+
+    def _show_saved_result(self):
+        """Put the saved mask, ROI, knee side and centre point of the image or
+        frame on screen back on the canvas, as held by the results folder in use."""
+        if self.canvas.image is None or self._current_frame_key() is None:
+            return
+        mask_path = self._shown_mask_path()
+        if mask_path is not None:
+            self.canvas.load_mask(str(mask_path))
+        else:
+            self.canvas.clear_mask()
+        self._restore_folder_inputs()
 
     def _update_output_dir_tooltip(self):
         self.output_btn.setToolTip(
-            self._sequence_output_dir or self._video_output_dir or "No output folder selected"
+            self._sequence_base_dir or self._video_base_dir or "No output folder selected"
         )
 
     def _clear_sequence_state(self, clear_canvas):
@@ -2219,9 +2324,9 @@ class MainWindow(QMainWindow):
             return
         path = self._sequence_paths[self._sequence_index]
         self.canvas.load_image(path)
-        mask_path = self._find_sequence_mask_path(path)
-        if mask_path:
-            self.canvas.load_mask(mask_path)
+        mask_path = self._shown_mask_path()
+        if mask_path is not None:
+            self.canvas.load_mask(str(mask_path))
         else:
             self.canvas.clear_mask()
         self._restore_frame_inputs()
@@ -2316,9 +2421,9 @@ class MainWindow(QMainWindow):
             return
         self._video_frame_index = frame_index
         self.canvas.load_image_array(frame, self._video_path or "")
-        cached_mask = self._load_saved_video_mask_for_frame(self._video_path, frame_index)
-        if cached_mask is not None:
-            self.canvas.set_mask(np.copy(cached_mask))
+        mask_path = self._shown_mask_path()
+        if mask_path is not None:
+            self.canvas.load_mask(str(mask_path))
         else:
             self.canvas.clear_mask()
         self._restore_frame_inputs()
@@ -2369,6 +2474,19 @@ class MainWindow(QMainWindow):
 
     def _stash_video_frame(self, mask_path, name, force):
         if self._canvas_has_mask():
+            shown_dir = self._shown_result_dir()
+            if not force and shown_dir != self._video_output_dir:
+                # The mask shown comes from the selected output folder itself. It
+                # is copied into the model's results folder only once it differs
+                # from what that folder holds.
+                if self._saved_mask_matches(self._shown_mask_path()) and (
+                    self._measurement_log(shown_dir).get(name, self._video_frame_index)
+                    is None
+                    or self._measurement_is_current(
+                        shown_dir, name, self._video_frame_index
+                    )
+                ):
+                    return
             mask_same = not force and self._saved_mask_matches(mask_path)
             if not mask_same:
                 mask = np.asarray(self.canvas.visible_mask(), dtype=np.float32)
@@ -2546,6 +2664,16 @@ class MainWindow(QMainWindow):
         if not self._canvas_has_mask():
             self._remove_emptied_sequence_mask(image_path)
             return
+        shown_dir = self._shown_result_dir()
+        if shown_dir != self._sequence_output_dir and not calibration_changed:
+            # The mask shown comes from the selected output folder itself. It is
+            # copied into the model's results folder only once it differs from
+            # what that folder holds.
+            if self._saved_mask_matches(self._shown_mask_path()) and (
+                self._measurement_log(shown_dir).get(image_path.name, "") is None
+                or self._measurement_is_current(shown_dir, image_path.name)
+            ):
+                return
         saved_path = self._find_sequence_mask_path(image_path)
         # With the images' own folder as output folder, a PNG image is found as
         # its own mask.
@@ -2555,6 +2683,7 @@ class MainWindow(QMainWindow):
         output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
         try:
             if not mask_same:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
                 self.canvas.save_mask(str(output_path))
                 self.statusBar().showMessage(f"Saved mask: {output_path.name}")
             if (
@@ -2576,6 +2705,8 @@ class MainWindow(QMainWindow):
             return
         if not self.canvas.image_path or Path(self.canvas.image_path) != image_path:
             return
+        if self._shown_result_dir() != self._sequence_output_dir:
+            return
         try:
             for mask_path in self._saved_mask_paths_for_current():
                 mask_path.unlink()
@@ -2596,6 +2727,7 @@ class MainWindow(QMainWindow):
             image_path = Path(self._sequence_paths[self._sequence_index])
             output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
             try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
                 self.canvas.save_mask(str(output_path))
                 self.statusBar().showMessage(f"Saved mask: {output_path.name}")
                 self._record_measurement(self._sequence_output_dir, image_path.name)
@@ -2653,7 +2785,7 @@ class MainWindow(QMainWindow):
             self._last_video_output_dir = output_dir
             self._save_persisted_paths()
             self._update_output_dir_tooltip()
-        video_output_root = Path(output_dir) / Path(self._video_path).stem
+        video_output_root = self._video_output_root_for_path(self._video_path)
         annotated_count = 0
         if video_output_root.exists() and video_output_root.is_dir():
             for mask_path in sorted(video_output_root.glob("frame_*.png")):
@@ -2701,7 +2833,7 @@ class MainWindow(QMainWindow):
                 remembered = self._last_video_output_dir
             else:
                 remembered = self._last_image_output_dir
-            directory = self._sequence_output_dir or self._video_output_dir or remembered
+            directory = self._sequence_base_dir or self._video_base_dir or remembered
             return directory if directory and Path(directory).is_dir() else ""
 
         # The suggested folder follows the kind of file selected until the user
@@ -2877,6 +3009,7 @@ class MainWindow(QMainWindow):
             return
         self.model_picker.clear()
         self.model_picker.addItems(models)
+        self.model_picker.addItem(NO_MODEL_LABEL)
         current = self._model.current_model()
         if current and current in models:
             self.model_picker.setCurrentText(current)
@@ -2915,11 +3048,19 @@ class MainWindow(QMainWindow):
         name = self.model_picker.currentText().strip()
         if not name or name == "No models loaded":
             return
+        # Results are kept per model: what is on screen is saved under the model
+        # being left before the canvas shows what the chosen model has saved.
+        self._stop_playback()
+        if self._mode == "video":
+            self._stash_video_mask_for_current_frame()
+        elif self._mode == "sequence":
+            self._save_sequence_mask_if_needed()
         try:
-            self._model.set_model(name)
+            self._model.set_model("" if name == NO_MODEL_LABEL else name)
             self.statusBar().showMessage(f"Model selected: {name}")
         except Exception as exc:
             QMessageBox.warning(self, "Model error", str(exc))
+        self._show_saved_result()
 
     def _on_device_changed(self, index):
         if not self.device_picker.isEnabled():
@@ -2959,7 +3100,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "No model",
-                "No ONNX model found in assets/.",
+                "Select a model in the Model list first.",
             )
             return
         if self._inference_thread and self._inference_thread.isRunning():
@@ -3300,6 +3441,7 @@ class BatchInferenceWorker(QObject):
     def _save_mask(self, mask, image_path):
         mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
         output_path = Path(self._output_dir) / f"{Path(image_path).stem}.png"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         if not cv2.imwrite(str(output_path), mask_uint8):
             raise RuntimeError(f"Failed to save mask: {output_path}")
 

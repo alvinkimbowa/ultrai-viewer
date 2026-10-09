@@ -271,6 +271,10 @@ class MeasurementLog:
     def get(self, file_name, frame):
         return self._rows.get((str(file_name), str(frame)))
 
+    def keys(self):
+        """(file, frame) of every row."""
+        return list(self._rows)
+
     def set(
         self,
         file_name,
