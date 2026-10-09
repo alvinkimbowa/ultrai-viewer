@@ -235,6 +235,7 @@ class MainWindow(QMainWindow):
         # for a moment.
         self._measurement_logs = {}
         self._roi_stores = {}
+        self._calibration_changed = False
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.setInterval(250)
@@ -365,6 +366,8 @@ class MainWindow(QMainWindow):
         settings = self._settings()
         settings.setValue("measurements/px_per_mm_x", self.px_per_mm_x_spin.value())
         settings.setValue("measurements/px_per_mm_y", self.px_per_mm_y_spin.value())
+        if self._current_frame_key() is not None:
+            self._calibration_changed = True
         self._update_measurements()
 
     def _build_calibration_dialog(self):
@@ -519,6 +522,12 @@ class MainWindow(QMainWindow):
                 self.canvas.set_centre_x(float(row["centre_x"]))
             except (TypeError, ValueError):
                 pass
+
+    def _restore_folder_inputs(self):
+        """Show the ROI, knee side and centre point the output folder holds for the
+        frame on screen, in place of those of the folder it was switched from."""
+        self.canvas.set_centre_x(None)
+        self._restore_frame_inputs()
 
     def _roi_store(self, output_dir):
         key = str(output_dir)
@@ -806,6 +815,98 @@ class MainWindow(QMainWindow):
             log.save()
         except OSError as exc:
             self.statusBar().showMessage(f"Could not save measurements: {exc}")
+
+    def _saved_mask_matches(self, mask_path):
+        """True when a saved mask file holds the same mask as the one on screen."""
+        if mask_path is None or not Path(mask_path).is_file():
+            return False
+        try:
+            raw = self.canvas._read_mask(str(mask_path))
+        except Exception:
+            return False
+        saved = raw >= (128 if raw.max() > 1 else 0.5)
+        shown = np.asarray(self.canvas.visible_mask()) >= 0.5
+        if saved.shape != shown.shape:
+            if saved.ndim != 2:
+                return False
+            saved = cv2.resize(
+                saved.astype(np.uint8),
+                (shown.shape[1], shown.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        return bool(np.array_equal(saved, shown))
+
+    def _measurement_is_current(self, output_dir, file_name, frame=""):
+        """True when the saved row was measured with the inputs on screen."""
+        try:
+            return self._measurement_log(output_dir).matches_inputs(
+                file_name,
+                frame,
+                self.canvas.centre_x,
+                self.canvas.knee_side,
+                self.canvas.roi_box(),
+            )
+        except OSError:
+            return False
+
+    def _remeasure_video_frames(self):
+        """Measure every saved frame mask of the video on screen again.
+
+        Each frame keeps the knee side, centre point and ROI its row records.
+        """
+        root = self._video_output_root_for_path(self._video_path)
+        if root is None or not root.is_dir():
+            return
+        frames = sorted(
+            int(path.stem.split("_")[-1])
+            for path in root.glob("frame_*.png")
+            if path.stem.split("_")[-1].isdigit()
+        )
+        if not frames:
+            return
+        name = Path(self._video_path).name
+        progress = QProgressDialog("Updating measurements...", None, 0, len(frames), self)
+        progress.setWindowTitle("Measurements")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)
+        capture = cv2.VideoCapture(self._video_path)
+        position = 0
+        try:
+            log = self._measurement_log(self._video_output_dir)
+            for done, frame in enumerate(frames):
+                if done % 25 == 0:
+                    progress.setValue(done)
+                # Frames are read in order because seeking to a frame number is
+                # not exact in every video format.
+                while position < frame:
+                    capture.grab()
+                    position += 1
+                success, image = capture.read()
+                position += 1
+                if not success:
+                    image = None
+                elif image.ndim == 3 and image.shape[2] == 3:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                mask = self._load_saved_video_mask_for_frame(self._video_path, frame)
+                if mask is None or not mask.any():
+                    continue
+                log.set(
+                    name,
+                    frame,
+                    image,
+                    mask >= 0.5,
+                    self.px_per_mm_x_spin.value(),
+                    self.px_per_mm_y_spin.value(),
+                    knee_side=self.knee_picker.currentData(),
+                    prefer_saved=True,
+                    limits=log.limits(name, frame),
+                )
+            log.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not save measurements: {exc}")
+        finally:
+            capture.release()
+            progress.setValue(len(frames))
 
     def _forget_measurement(self, output_dir, file_name, frame=""):
         try:
@@ -1847,6 +1948,7 @@ class MainWindow(QMainWindow):
                 self.canvas.load_mask(mask_path)
             else:
                 self.canvas.clear_mask()
+            self._restore_folder_inputs()
         self.statusBar().showMessage(f"Output folder: {directory}")
 
     def _change_video_output_dir(self):
@@ -1873,6 +1975,7 @@ class MainWindow(QMainWindow):
                 self.canvas.set_mask(saved_mask)
             else:
                 self.canvas.clear_mask()
+            self._restore_folder_inputs()
         self.statusBar().showMessage(f"Output folder: {directory}")
 
     def _update_output_dir_tooltip(self):
@@ -2235,7 +2338,14 @@ class MainWindow(QMainWindow):
             return
         self.canvas.commit_pending_outline_to_mask()
 
-    def _stash_video_mask_for_current_frame(self):
+    def _stash_video_mask_for_current_frame(self, force=False):
+        """Save the mask and measurements of the frame on screen if they changed.
+
+        A mask equal to its saved file is not written again, and its measurements
+        row is left alone while it records the knee side, centre point and ROI on
+        screen. force writes both regardless. After a change of pixels per mm,
+        every saved frame of the video is measured again.
+        """
         if self._mode != "video":
             return
         if self._video_frame_index < 0 or not self._video_path:
@@ -2244,18 +2354,31 @@ class MainWindow(QMainWindow):
         mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
         if mask_path is None:
             return
-        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        name = Path(self._video_path).name
+        calibration_changed = self._calibration_changed
+        self._calibration_changed = False
+        self._stash_video_frame(mask_path, name, force)
+        if calibration_changed:
+            self._remeasure_video_frames()
+
+    def _stash_video_frame(self, mask_path, name, force):
         if self._canvas_has_mask():
-            mask = np.asarray(self.canvas.visible_mask(), dtype=np.float32)
-            mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
-            if not cv2.imwrite(str(mask_path), mask_uint8):
-                QMessageBox.warning(self, "Save error", f"Failed to save mask: {mask_path.name}")
-                return
-            self._record_measurement(
-                self._video_output_dir,
-                Path(self._video_path).name,
-                self._video_frame_index,
-            )
+            mask_same = not force and self._saved_mask_matches(mask_path)
+            if not mask_same:
+                mask = np.asarray(self.canvas.visible_mask(), dtype=np.float32)
+                mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(mask_path), mask_uint8):
+                    QMessageBox.warning(
+                        self, "Save error", f"Failed to save mask: {mask_path.name}"
+                    )
+                    return
+            if not mask_same or not self._measurement_is_current(
+                self._video_output_dir, name, self._video_frame_index
+            ):
+                self._record_measurement(
+                    self._video_output_dir, name, self._video_frame_index
+                )
             return
         if self._mask_hidden_by_roi():
             return
@@ -2398,6 +2521,12 @@ class MainWindow(QMainWindow):
             self.play_btn.setText("||")
 
     def _save_sequence_mask_if_needed(self):
+        """Save the mask and measurements of the image on screen if they changed.
+
+        A mask equal to its saved file is not written again, and its measurements
+        row is left alone while it records the knee side, centre point and ROI on
+        screen and pixels per mm was not changed with this image on screen.
+        """
         if self._mode != "sequence":
             return
         if not self._sequence_output_dir:
@@ -2406,14 +2535,30 @@ class MainWindow(QMainWindow):
             return
         self._commit_pending_outline()
         image_path = Path(self._sequence_paths[self._sequence_index])
+        calibration_changed = self._calibration_changed
+        self._calibration_changed = False
         if not self._canvas_has_mask():
             self._remove_emptied_sequence_mask(image_path)
             return
+        saved_path = self._find_sequence_mask_path(image_path)
+        # With the images' own folder as output folder, a PNG image is found as
+        # its own mask.
+        if saved_path and Path(saved_path).resolve() == image_path.resolve():
+            saved_path = None
+        mask_same = self._saved_mask_matches(saved_path)
         output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
         try:
-            self.canvas.save_mask(str(output_path))
-            self.statusBar().showMessage(f"Saved mask: {output_path.name}")
-            self._record_measurement(self._sequence_output_dir, image_path.name)
+            if not mask_same:
+                self.canvas.save_mask(str(output_path))
+                self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+            if (
+                not mask_same
+                or calibration_changed
+                or not self._measurement_is_current(
+                    self._sequence_output_dir, image_path.name
+                )
+            ):
+                self._record_measurement(self._sequence_output_dir, image_path.name)
         except Exception as exc:
             QMessageBox.warning(self, "Save error", str(exc))
 
@@ -2488,7 +2633,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No video", "Load a video first.")
             return
         self._commit_pending_outline()
-        self._stash_video_mask_for_current_frame()
+        self._stash_video_mask_for_current_frame(force=True)
         output_dir = (self._video_output_dir or "").strip()
         if not output_dir:
             output_dir = QFileDialog.getExistingDirectory(

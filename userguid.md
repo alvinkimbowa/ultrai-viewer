@@ -110,6 +110,8 @@ processed and saved.
 ## Saving
 
 - Save masks (Ctrl+S): saves the current mask as PNG in the output folder.
+- Leaving an image or frame saves its mask and measurements only if something changed (the mask, ROI, centre point or knee side). Just looking at it writes nothing, except that a mask with no measurements yet gets them.
+- Changing Pixels per mm updates the saved measurements of the image on screen, or of every saved frame of the video on screen. Other files keep theirs until they are edited or saved.
 - Select output folder: switches to a different output folder without reloading the files.
 - Delete mask: removes the mask from the screen and deletes its saved file from the output folder. Ctrl+Z brings the mask back on screen.
 - Close file: closes the image or video on screen and keeps the others loaded.

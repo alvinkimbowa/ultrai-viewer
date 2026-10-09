@@ -329,6 +329,37 @@ class MeasurementLog:
             self._rows[key] = row
             self._dirty = True
 
+    def limits(self, file_name, frame):
+        """The ROI box (left, right, top, bottom) recorded in a row, or None."""
+        row = self.get(file_name, frame)
+        if row is None:
+            return None
+        try:
+            return tuple(
+                int(row[column])
+                for column in ("limit_left", "limit_right", "limit_top", "limit_bottom")
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def matches_inputs(self, file_name, frame, centre_x, knee_side, limits):
+        """True when a row exists and records this centre, knee side and ROI box.
+
+        centre_x of None means the suggested centre.
+        """
+        row = self.get(file_name, frame)
+        if row is None or row.get("knee_side") != knee_side:
+            return False
+        if centre_x is None:
+            if row.get("centre_set_by") != "auto":
+                return False
+        elif row.get("centre_set_by") != "user" or row.get("centre_x") != (
+            f"{centre_x:.1f}"
+        ):
+            return False
+        recorded = self.limits(file_name, frame)
+        return recorded == (None if limits is None else tuple(limits))
+
     def clear_limits(self, file_names):
         """Blank the recorded ROI box in every row of the named files."""
         for (file_name, _), row in self._rows.items():
