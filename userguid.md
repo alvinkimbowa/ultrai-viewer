@@ -96,6 +96,8 @@ processed and saved.
 - Eraser: remove mask.
 - Tool Radius: controls edit thickness.
 - Fill mask: unchecked shows only the outline; checked fills the outline into the mask.
+- ROI Box: draw the ROI (see ROI below).
+- Delete: right-click the mask, the ROI or an unfilled outline and choose Delete; or click the mask or the ROI with the Select tool and press the Delete key.
 - Ctrl+Z to undo, Ctrl+Y to redo.
 
 ## Zoom and Scroll
@@ -112,14 +114,18 @@ processed and saved.
 - Delete mask: removes the mask from the screen and deletes its saved file from the output folder. Ctrl+Z brings the mask back on screen.
 - Close file: closes the image or video on screen and keeps the others loaded.
 
-## Select ROI
+## ROI
 
-Tick **Select ROI** (left panel, next to Device) to show two vertical and two horizontal green lines on the image. With the Select tool, drag them to box in the part of the image you want.
+An ROI is a box you draw on an image so that only the part inside it is segmented. Each image or video frame has its own ROI, or none.
 
-- Segmentation then runs only on the part of the image inside the lines.
-- A mask that already exists is hidden outside the lines. Only the part inside the lines is saved and measured. Moving the lines back out shows the hidden part again, as long as you have not left that image or frame.
-- Each image or frame keeps its own ROI. Once you move the lines or tick/untick the box on an image or frame, that choice belongs to it and comes back whenever you return to it.
-- An image or frame with no ROI of its own takes whatever is in force when you arrive at it, so a choice carries forward until you reach one that has its own.
+- **Draw**: choose **ROI Box** in the Tools dropdown and drag a box on the image. To replace a box, start the drag outside it.
+- **Apply to others**: after you draw, the app asks whether to apply the box to all the other loaded images and frames. Yes replaces whatever ROI they had; where one of them already has a saved mask, that mask is trimmed to the box straight away. Afterwards each image or frame can still be given a different ROI of its own.
+- **Adjust**: with the ROI Box or the Select tool, drag an edge or a corner to resize the box, or drag inside it to move it. This changes the ROI of that image or frame only.
+- **Delete**: right-click the box and choose **Delete ROI**, or click it and press the Delete key. Only that image or frame loses its ROI.
+- **Clear all ROIs** (Edit menu, or right-click a box): removes the ROI from every loaded image and frame, and from their rows in `measurements.csv`. Saved masks are not changed.
+- Segment image, Segment video and Segment all files use each image's or frame's own ROI, and the whole image where there is none.
+- A mask that already exists is hidden outside the box. Only the part inside is saved and measured. The hidden part comes back if you enlarge or delete the box before leaving that image or frame.
+- ROIs are kept in `rois.csv` in the output folder, so they are there the next time you open the same files.
 
 ## Measurements
 

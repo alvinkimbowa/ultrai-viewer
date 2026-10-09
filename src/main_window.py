@@ -34,6 +34,7 @@ from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 
 from .canvas import Canvas, REGION_COLORS
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
+from .rois import RoiStore
 from .measurements import MeasurementLog, REGION_NAMES, measure
 from threading import Event
 from collections import OrderedDict
@@ -49,7 +50,7 @@ MIN_LIMITED_SIZE = 8
 
 
 def box_to_segment(image, box):
-    """Clamp a limit box (left, right, top, bottom) to an image.
+    """Clamp an ROI box (left, right, top, bottom) to an image.
 
     Returns None when there is no box or it leaves too little to segment.
     """
@@ -61,22 +62,6 @@ def box_to_segment(image, box):
     if right - left < MIN_LIMITED_SIZE or bottom - top < MIN_LIMITED_SIZE:
         return None
     return left, right, top, bottom
-
-
-def own_roi(default_box, frame_rois, measurement_log, file_name, frame):
-    """The ROI box to use for one image or frame, or None for no ROI.
-
-    An ROI chosen for that frame in this session comes first, then the one saved
-    with its measurements; a frame with neither takes the one in force when the
-    run started. Either of the first two can also say "off".
-    """
-    for roi in (
-        frame_rois.get((file_name, str(frame))),
-        measurement_log.saved_roi(file_name, frame),
-    ):
-        if roi is not None:
-            return roi or None
-    return default_box
 
 
 def crop_to_box(image, box):
@@ -249,10 +234,7 @@ class MainWindow(QMainWindow):
         # collected and the measurements refresh once the mask has been still
         # for a moment.
         self._measurement_logs = {}
-        # ROI chosen by hand in this session for an image or frame, by
-        # _current_frame_key(): (switched on?, line positions).
-        self._frame_rois = {}
-        self._restoring_frame_roi = False
+        self._roi_stores = {}
         self._measurement_timer = QTimer(self)
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.setInterval(250)
@@ -280,15 +262,9 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pass
         self.calibrate_btn.clicked.connect(self._start_calibration)
-        saved_limits = str(settings.value("limits/lines", "", str) or "").split(",")
-        if len(saved_limits) == 4:
-            try:
-                x1, x2, y1, y2 = (float(v) for v in saved_limits)
-                self.canvas.set_limit_lines({"v": [x1, x2], "h": [y1, y2]})
-            except ValueError:
-                pass
-        self.limit_checkbox.toggled.connect(self._on_limits_toggled)
-        self.canvas.limit_lines_moved.connect(self._remember_frame_roi)
+        self.canvas.roi_drawn.connect(self._on_roi_drawn)
+        self.canvas.roi_changed.connect(self._save_current_roi)
+        self.canvas.delete_requested.connect(self._on_delete_requested)
         self.view_picker.setCurrentIndex(
             0 if settings.value("measurements/view", "region", str) == "full" else 1
         )
@@ -350,6 +326,9 @@ class MainWindow(QMainWindow):
         self.redo_action = QAction("Redo", self)
         self.redo_action.setShortcut(QKeySequence("Ctrl+Y"))
         edit_menu.addAction(self.redo_action)
+        edit_menu.addSeparator()
+        self.clear_rois_action = QAction("Clear all ROIs", self)
+        edit_menu.addAction(self.clear_rois_action)
 
         tools_menu = menubar.addMenu("Tools")
         self.select_pan_action = QAction("Select", self)
@@ -493,23 +472,6 @@ class MainWindow(QMainWindow):
                     label.setVisible(visible)
         self._update_measurements()
 
-    def _on_limits_toggled(self, enabled):
-        self.canvas.set_limits_enabled(enabled)
-        if self._restoring_frame_roi:
-            return
-        self._remember_frame_roi()
-        if enabled:
-            self.statusBar().showMessage(
-                "Select ROI on: drag the green lines with the Select tool"
-            )
-
-    def _save_limit_lines(self):
-        lines = self.canvas.limit_lines()
-        if lines is not None:
-            self._settings().setValue(
-                "limits/lines", ",".join(f"{p:.1f}" for p in lines["v"] + lines["h"])
-            )
-
     def _on_knee_side_changed(self):
         knee_side = self.knee_picker.currentData()
         self._settings().setValue("measurements/knee_side", knee_side)
@@ -531,44 +493,21 @@ class MainWindow(QMainWindow):
             return None
         return str(output_dir), file_name, str(frame)
 
-    def _remember_frame_roi(self):
-        """Note the ROI now on screen as the one chosen for this image or frame."""
-        key = self._current_frame_key()
-        if key is not None:
-            self._frame_rois[key] = (
-                self.canvas.limits_enabled,
-                self.canvas.limit_lines(),
-            )
-        self._save_limit_lines()
-
     def _restore_frame_inputs(self):
-        """Bring back the knee side, centre point and ROI of the frame on screen.
+        """Bring back the ROI, knee side and centre point of the frame on screen.
 
-        A frame with nothing of its own keeps the knee side and ROI already in
-        force and uses the suggested centre.
+        A frame with no saved knee side keeps the one already chosen, and one with
+        no centre point of its own uses the suggested centre.
         """
         key = self._current_frame_key()
         if key is None:
             return
         output_dir, file_name, frame = key
         try:
+            self.canvas.set_roi(self._roi_store(output_dir).get(file_name, frame))
             log = self._measurement_log(output_dir)
         except OSError:
             return
-        roi = self._frame_rois.get(key)
-        if roi is None:
-            saved = log.saved_roi(file_name, frame)
-            if saved is False:
-                roi = (False, None)
-            elif saved is not None:
-                roi = (True, {"v": list(saved[:2]), "h": list(saved[2:])})
-        if roi is not None:
-            enabled, lines = roi
-            if lines is not None:
-                self.canvas.set_limit_lines(lines)
-            self._restoring_frame_roi = True
-            self.limit_checkbox.setChecked(enabled)
-            self._restoring_frame_roi = False
         row = log.get(file_name, frame)
         if row is None:
             return
@@ -581,23 +520,235 @@ class MainWindow(QMainWindow):
             except (TypeError, ValueError):
                 pass
 
-    def _frame_roi_boxes(self, output_dir):
-        """ROIs chosen in this session for files of an output folder.
+    def _roi_store(self, output_dir):
+        key = str(output_dir)
+        if key not in self._roi_stores:
+            self._roi_stores[key] = RoiStore(output_dir)
+        return self._roi_stores[key]
 
-        Maps (file name, frame) to a box (left, right, top, bottom), or to False
-        where ROI was switched off.
+    def _save_current_roi(self):
+        """Store the ROI on screen, or its absence, for this image or frame."""
+        key = self._current_frame_key()
+        if key is None:
+            return False
+        output_dir, file_name, frame = key
+        box = self.canvas.roi_box()
+        try:
+            store = self._roi_store(output_dir)
+            if box is None:
+                store.remove(file_name, frame)
+            else:
+                store.set(file_name, frame, box)
+            store.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not save the ROI: {exc}")
+            return False
+        return True
+
+    def _other_frames(self):
+        """Every loaded image and video frame other than the one on screen.
+
+        Returns (source path, file name, frame) tuples per output folder.
         """
-        boxes = {}
-        for (folder, file_name, frame), (enabled, lines) in self._frame_rois.items():
-            if folder != str(output_dir):
-                continue
-            if not enabled or lines is None:
-                boxes[(file_name, frame)] = False
-                continue
-            left, right = sorted(int(round(x)) for x in lines["v"])
-            top, bottom = sorted(int(round(y)) for y in lines["h"])
-            boxes[(file_name, frame)] = (left, right, top, bottom)
-        return boxes
+        current = self._current_frame_key()
+        found = {}
+        if self._sequence_output_dir and self._sequence_paths:
+            folder = str(self._sequence_output_dir)
+            for image_path in self._sequence_paths:
+                name = Path(image_path).name
+                if (folder, name, "") != current:
+                    found.setdefault(folder, []).append((image_path, name, ""))
+        if self._video_output_dir and self._video_paths:
+            folder = str(self._video_output_dir)
+            for video_path in self._video_paths:
+                capture = cv2.VideoCapture(video_path)
+                frame_count = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+                capture.release()
+                name = Path(video_path).name
+                for frame in range(frame_count):
+                    if (folder, name, str(frame)) != current:
+                        found.setdefault(folder, []).append((video_path, name, frame))
+        return found
+
+    def _on_roi_drawn(self):
+        if not self._save_current_roi():
+            return
+        targets = self._other_frames()
+        count = sum(len(frames) for frames in targets.values())
+        if count == 0:
+            return
+        others = (
+            "the 1 other image or frame"
+            if count == 1
+            else f"all {count} other images and frames"
+        )
+        choice = QMessageBox.question(
+            self,
+            "Apply ROI",
+            f"Apply this ROI to {others}?\n\n"
+            "It replaces any ROI they have, and where one of them already has a "
+            "saved mask, the mask is trimmed to the ROI.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice == QMessageBox.StandardButton.Yes:
+            self._apply_roi_to(targets, self.canvas.roi_box(), count)
+
+    def _apply_roi_to(self, targets, box, count):
+        """Give a box to the frames listed by _other_frames, trimming saved masks."""
+        progress = QProgressDialog("Applying ROI...", None, 0, count, self)
+        progress.setWindowTitle("Apply ROI")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)
+        done = 0
+        applied = 0
+        try:
+            for folder, frames in targets.items():
+                store = self._roi_store(folder)
+                log = self._measurement_log(folder)
+                capture = None
+                capture_path = None
+                position = 0
+                try:
+                    for source_path, name, frame in frames:
+                        done += 1
+                        if done % 25 == 0:
+                            progress.setValue(done)
+                        if frame == "":
+                            mask_path = self._find_sequence_mask_path(source_path)
+                            if mask_path and Path(mask_path).resolve() == Path(
+                                source_path
+                            ).resolve():
+                                mask_path = None
+                        else:
+                            mask_path = self._video_mask_path(source_path, frame)
+                        if mask_path is None or not Path(mask_path).is_file():
+                            store.set(name, frame, box)
+                            applied += 1
+                            continue
+                        if frame == "":
+                            image = self.canvas._read_image(source_path)
+                        else:
+                            if capture_path != source_path:
+                                if capture is not None:
+                                    capture.release()
+                                capture = cv2.VideoCapture(source_path)
+                                capture_path, position = source_path, 0
+                            # Frames are read in order because seeking to a frame
+                            # number is not exact in every video format.
+                            while position < frame:
+                                capture.grab()
+                                position += 1
+                            success, image = capture.read()
+                            position += 1
+                            if not success:
+                                image = None
+                            elif image.ndim == 3 and image.shape[2] == 3:
+                                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        if self._trim_saved_mask(
+                            Path(mask_path), box, image, log, name, frame
+                        ):
+                            store.set(name, frame, box)
+                            applied += 1
+                finally:
+                    if capture is not None:
+                        capture.release()
+                    store.save()
+                    log.save()
+        except Exception as exc:
+            progress.close()
+            QMessageBox.warning(self, "Apply ROI", str(exc))
+            return
+        progress.setValue(count)
+        message = f"ROI applied to {applied} images and frames"
+        if applied < count:
+            message += f"; {count - applied} left out because the ROI does not fit them"
+        self.statusBar().showMessage(message)
+
+    def _trim_saved_mask(self, mask_path, box, image, log, file_name, frame):
+        """Blank a saved mask outside a box and bring its measurements up to date.
+
+        Returns False, changing nothing, when the box does not fit the mask.
+        """
+        raw = self.canvas._read_mask(str(mask_path))
+        mask = raw >= (128 if raw.max() > 1 else 0.5)
+        fitted = box_to_segment(mask, box)
+        if fitted is None:
+            return False
+        left, right, top, bottom = fitted
+        trimmed = np.zeros_like(mask)
+        trimmed[top:bottom, left:right] = mask[top:bottom, left:right]
+        if not trimmed.any():
+            mask_path.unlink()
+            log.remove(file_name, frame)
+            return True
+        mask_uint8 = trimmed.astype(np.uint8) * 255
+        if mask_path.suffix.lower() in (".tif", ".tiff"):
+            tifffile.imwrite(str(mask_path), mask_uint8)
+        elif not cv2.imwrite(str(mask_path), mask_uint8):
+            raise OSError(f"Failed to save mask: {mask_path.name}")
+        log.set(
+            file_name,
+            frame,
+            image,
+            trimmed,
+            self.px_per_mm_x_spin.value(),
+            self.px_per_mm_y_spin.value(),
+            knee_side=self.knee_picker.currentData(),
+            prefer_saved=True,
+            limits=fitted,
+        )
+        return True
+
+    def _on_delete_requested(self, kind):
+        if kind == "mask":
+            self._delete_current_mask()
+        elif kind == "roi":
+            self.canvas.set_roi(None)
+            if self._save_current_roi():
+                self.statusBar().showMessage("ROI deleted")
+        elif kind == "all_rois":
+            self._clear_all_rois()
+
+    def _clear_all_rois(self):
+        """Remove the ROI of every loaded image and video, after asking."""
+        if self._batch_thread and self._batch_thread.isRunning():
+            return
+        loaded = {}
+        for folder, paths in (
+            (self._sequence_output_dir, self._sequence_paths),
+            (self._video_output_dir, self._video_paths),
+        ):
+            if folder and paths:
+                loaded.setdefault(str(folder), set()).update(
+                    Path(path).name for path in paths
+                )
+        if not loaded and self.canvas.roi_box() is None:
+            return
+        choice = QMessageBox.question(
+            self,
+            "Clear all ROIs",
+            "Remove the ROI from every loaded image and frame?\n\n"
+            "Saved masks stay as they are.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        removed = 0
+        try:
+            for folder, names in loaded.items():
+                store = self._roi_store(folder)
+                removed += store.remove_files(names)
+                store.save()
+                log = self._measurement_log(folder)
+                log.clear_limits(names)
+                log.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Clear all ROIs", str(exc))
+            return
+        self.canvas.set_roi(None)
+        self.statusBar().showMessage(f"Removed {removed} ROIs")
 
     def _update_measurements(self):
         mask = self.canvas.visible_mask()
@@ -649,9 +800,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
                 self.canvas.centre_x,
                 self.canvas.knee_side,
-                limits=self.canvas.limit_box(),
-                roi_off=self._frame_rois.get(self._current_frame_key(), (True,))[0]
-                is False,
+                limits=self.canvas.roi_box(),
             )
             log.save()
         except OSError as exc:
@@ -778,16 +927,7 @@ class MainWindow(QMainWindow):
         model_device_form.addRow("Model:", self.model_picker)
         self.device_picker = QComboBox()
         self.device_picker.setEnabled(False)
-        self.limit_checkbox = QCheckBox("Select ROI")
-        self.limit_checkbox.setToolTip(
-            "Show two vertical and two horizontal lines and segment only inside "
-            "them. With the Select tool, drag the lines to move them. Mask "
-            "outside the lines is hidden, and is not saved or measured."
-        )
-        device_row = QHBoxLayout()
-        device_row.addWidget(self.device_picker, stretch=1)
-        device_row.addWidget(self.limit_checkbox)
-        model_device_form.addRow("Device:", device_row)
+        model_device_form.addRow("Device:", self.device_picker)
         layout.addLayout(model_device_form)
 
         segment_row = QHBoxLayout()
@@ -825,7 +965,19 @@ class MainWindow(QMainWindow):
         tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
         self.tool_picker.addItems(
-            ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser"]
+            [
+                "Select",
+                "Freehand Line",
+                "Segmented Line",
+                "Paint Brush",
+                "Eraser",
+                "ROI Box",
+            ]
+        )
+        self.tool_picker.setToolTip(
+            "ROI Box: drag a box on the image to segment only inside it. Drag its "
+            "edges or corners to resize it, or inside it to move it. Right-click, "
+            "or click and press Delete, to remove the ROI or the mask."
         )
         self.tool_picker.setCurrentIndex(0)
         tools_row.addWidget(self.tool_picker)
@@ -1000,6 +1152,7 @@ class MainWindow(QMainWindow):
         self.save_mask_action.triggered.connect(self._save_current_mask)
         self.delete_mask_btn.clicked.connect(self._delete_current_mask)
         self.delete_mask_action.triggered.connect(self._delete_current_mask)
+        self.clear_rois_action.triggered.connect(self._clear_all_rois)
         self.close_btn.clicked.connect(self._close_current_file)
         self.close_file_action.triggered.connect(self._close_current_file)
         self.tool_picker.currentIndexChanged.connect(self._on_tool_changed)
@@ -1135,7 +1288,7 @@ class MainWindow(QMainWindow):
     def _delete_current_mask(self):
         self._commit_pending_outline()
         mask_paths = self._saved_mask_paths_for_current()
-        if not mask_paths and not self._canvas_has_roi():
+        if not mask_paths and not self._canvas_has_mask():
             return
         if self._mode == "video":
             target = f"frame {self._video_frame_index + 1} of {Path(self._video_path).name}"
@@ -1244,6 +1397,7 @@ class MainWindow(QMainWindow):
             2: "polyline",
             3: "brush",
             4: "eraser",
+            5: "roi",
         }
         tool = tool_map.get(index, "select")
         self.canvas.set_tool(tool)
@@ -1284,7 +1438,7 @@ class MainWindow(QMainWindow):
             self._video_frame_index,
         )
         has_existing_segmentation = bool(
-            (existing_path and existing_path.exists()) or self._canvas_has_roi()
+            (existing_path and existing_path.exists()) or self._canvas_has_mask()
         )
         if has_existing_segmentation:
             scope = (
@@ -1366,8 +1520,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
             ),
             knee_side=self.knee_picker.currentData(),
-            limits=self.canvas.limit_box(),
-            frame_rois=self._frame_roi_boxes(self._sequence_output_dir),
+            rois=self._roi_store(self._sequence_output_dir).boxes(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -1462,8 +1615,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
             ),
             knee_side=self.knee_picker.currentData(),
-            limits=self.canvas.limit_box(),
-            frame_rois=self._frame_roi_boxes(self._video_output_dir),
+            rois=self._roi_store(self._video_output_dir).boxes(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -2064,18 +2216,18 @@ class MainWindow(QMainWindow):
         self._update_navigation_buttons()
         self._update_title_with_image(self._video_path or "")
 
-    def _canvas_has_roi(self):
+    def _canvas_has_mask(self):
         mask = self.canvas.visible_mask()
         if mask is None:
             return False
         return bool(np.any(np.asarray(mask) >= 0.5))
 
-    def _mask_hidden_by_limits(self):
-        """True when the canvas holds mask that the limit lines keep out of view."""
+    def _mask_hidden_by_roi(self):
+        """True when the canvas holds mask that the ROI keeps out of view."""
         mask = self.canvas.mask
-        if mask is None or self.canvas.limit_box() is None:
+        if mask is None or self.canvas.roi_box() is None:
             return False
-        return bool(np.any(np.asarray(mask) >= 0.5)) and not self._canvas_has_roi()
+        return bool(np.any(np.asarray(mask) >= 0.5)) and not self._canvas_has_mask()
 
     def _commit_pending_outline(self):
         if self.canvas is None:
@@ -2092,7 +2244,7 @@ class MainWindow(QMainWindow):
         if mask_path is None:
             return
         mask_path.parent.mkdir(parents=True, exist_ok=True)
-        if self._canvas_has_roi():
+        if self._canvas_has_mask():
             mask = np.asarray(self.canvas.visible_mask(), dtype=np.float32)
             mask_uint8 = (mask >= 0.5).astype(np.uint8) * 255
             if not cv2.imwrite(str(mask_path), mask_uint8):
@@ -2104,7 +2256,7 @@ class MainWindow(QMainWindow):
                 self._video_frame_index,
             )
             return
-        if self._mask_hidden_by_limits():
+        if self._mask_hidden_by_roi():
             return
         if mask_path.exists():
             try:
@@ -2253,7 +2405,7 @@ class MainWindow(QMainWindow):
             return
         self._commit_pending_outline()
         image_path = Path(self._sequence_paths[self._sequence_index])
-        if not self._canvas_has_roi():
+        if not self._canvas_has_mask():
             self._remove_emptied_sequence_mask(image_path)
             return
         output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
@@ -2268,7 +2420,7 @@ class MainWindow(QMainWindow):
         """Delete the saved mask of an image whose mask was erased down to nothing."""
         # An empty canvas only means "erased" when a mask was loaded or drawn for
         # the image on screen; a saved mask that was never shown must be kept.
-        if not self.canvas.has_mask_data() or self._mask_hidden_by_limits():
+        if not self.canvas.has_mask_data() or self._mask_hidden_by_roi():
             return
         if not self.canvas.image_path or Path(self.canvas.image_path) != image_path:
             return
@@ -2285,7 +2437,7 @@ class MainWindow(QMainWindow):
             self._save_video_masks()
             return
         self._commit_pending_outline()
-        if not self._canvas_has_roi():
+        if not self._canvas_has_mask():
             QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")
             return
         if self._sequence_output_dir and self._sequence_index >= 0:
@@ -2305,7 +2457,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No video", "Load a video first.")
             return
         self._commit_pending_outline()
-        if not self._canvas_has_roi():
+        if not self._canvas_has_mask():
             QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")
             return
         default_dir = str(Path(self._video_path).parent) if self._video_path else ""
@@ -2669,7 +2821,7 @@ class MainWindow(QMainWindow):
         self._show_inference_dialog()
 
         self._inference_thread = QThread(self)
-        self._inference_box = box_to_segment(self.canvas.image, self.canvas.limit_box())
+        self._inference_box = box_to_segment(self.canvas.image, self.canvas.roi_box())
         self._inference_worker = InferenceWorker(
             self._model, crop_to_box(self.canvas.image, self._inference_box)
         )
@@ -2745,7 +2897,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._stop_playback()
-        self._save_limit_lines()
         if self.canvas.is_calibrating():
             self._end_calibration()
         self._save_sequence_mask_if_needed()
@@ -2895,8 +3046,7 @@ class BatchInferenceWorker(QObject):
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
         knee_side="right",
-        limits=None,
-        frame_rois=None,
+        rois=None,
     ):
         super().__init__()
         self._model = model
@@ -2905,8 +3055,7 @@ class BatchInferenceWorker(QObject):
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
         self._knee_side = knee_side
-        self._limits = limits
-        self._frame_rois = frame_rois or {}
+        self._rois = rois or {}
         self._measurement_log = None
         self._cancel_event = Event()
 
@@ -2941,14 +3090,7 @@ class BatchInferenceWorker(QObject):
             try:
                 image = self._load_image(image_path)
                 box = box_to_segment(
-                    image,
-                    own_roi(
-                        self._limits,
-                        self._frame_rois,
-                        self._measurement_log,
-                        Path(image_path).name,
-                        "",
-                    ),
+                    image, self._rois.get((Path(image_path).name, ""))
                 )
                 prediction = self._model.run_inference(
                     crop_to_box(image, box),
@@ -3028,8 +3170,7 @@ class VideoBatchInferenceWorker(QObject):
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
         knee_side="right",
-        limits=None,
-        frame_rois=None,
+        rois=None,
     ):
         super().__init__()
         self._model = model
@@ -3038,8 +3179,7 @@ class VideoBatchInferenceWorker(QObject):
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
         self._knee_side = knee_side
-        self._limits = limits
-        self._frame_rois = frame_rois or {}
+        self._rois = rois or {}
         self._cancel_event = Event()
 
     def cancel(self):
@@ -3103,14 +3243,7 @@ class VideoBatchInferenceWorker(QObject):
                         else:
                             image = frame
                         box = box_to_segment(
-                            image,
-                            own_roi(
-                                self._limits,
-                                self._frame_rois,
-                                measurement_log,
-                                video_name,
-                                frame_index,
-                            ),
+                            image, self._rois.get((video_name, str(frame_index)))
                         )
                         prediction = self._model.run_inference(
                             crop_to_box(image, box),

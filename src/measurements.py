@@ -224,7 +224,6 @@ MEASUREMENT_COLUMNS = [
     "knee_side",
     "centre_x",
     "centre_set_by",
-    "roi_state",
     "limit_left",
     "limit_right",
     "limit_top",
@@ -260,25 +259,6 @@ class MeasurementLog:
     def get(self, file_name, frame):
         return self._rows.get((str(file_name), str(frame)))
 
-    def saved_roi(self, file_name, frame):
-        """The ROI stored for a row.
-
-        A box (left, right, top, bottom) when the row was saved with ROI on, False
-        when ROI was switched off for it, None when it has no ROI of its own.
-        """
-        row = self.get(file_name, frame)
-        if row is None:
-            return None
-        if row.get("roi_state") == "off":
-            return False
-        try:
-            return tuple(
-                int(row[column])
-                for column in ("limit_left", "limit_right", "limit_top", "limit_bottom")
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
-
     def set(
         self,
         file_name,
@@ -291,14 +271,13 @@ class MeasurementLog:
         knee_side="right",
         prefer_saved=False,
         limits=None,
-        roi_off=False,
     ):
         """Measure a mask and store it as the row of its image or frame.
 
         centre_x of None means the suggested centre. With prefer_saved, a knee side
         and a user-placed centre already stored for the row win over the arguments.
-        limits is the box (left, right, top, bottom) the mask was confined to, if any;
-        roi_off records that ROI was switched off for this row in particular.
+        limits is the ROI box (left, right, top, bottom) the mask was confined to,
+        if any.
         """
         key = (str(file_name), str(frame))
         saved = self._rows.get(key)
@@ -319,7 +298,6 @@ class MeasurementLog:
                 "" if result["centre_x"] is None else f"{result['centre_x']:.1f}"
             ),
             "centre_set_by": "auto" if centre_x is None else "user",
-            "roi_state": "on" if limits is not None else ("off" if roi_off else ""),
             "limit_left": "" if limits is None else str(limits[0]),
             "limit_right": "" if limits is None else str(limits[1]),
             "limit_top": "" if limits is None else str(limits[2]),
@@ -336,6 +314,16 @@ class MeasurementLog:
         if saved != row:
             self._rows[key] = row
             self._dirty = True
+
+    def clear_limits(self, file_names):
+        """Blank the recorded ROI box in every row of the named files."""
+        for (file_name, _), row in self._rows.items():
+            if file_name not in file_names:
+                continue
+            for column in ("limit_left", "limit_right", "limit_top", "limit_bottom"):
+                if row.get(column):
+                    row[column] = ""
+                    self._dirty = True
 
     def remove(self, file_name, frame):
         if self._rows.pop((str(file_name), str(frame)), None) is not None:

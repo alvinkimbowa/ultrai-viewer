@@ -6,7 +6,7 @@ import os
 import numpy as np
 import cv2
 import tifffile
-from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox, QScrollBar, QStyle
+from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox, QScrollBar, QStyle, QMenu
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF
 from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
 
@@ -32,7 +32,9 @@ class Canvas(QWidget):
     image_loaded = pyqtSignal(str)
     navigation_requested = pyqtSignal(int)
     mask_changed = pyqtSignal()
-    limit_lines_moved = pyqtSignal()
+    roi_drawn = pyqtSignal()
+    roi_changed = pyqtSignal()
+    delete_requested = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -69,15 +71,20 @@ class Canvas(QWidget):
         self._centre_drag = False
         self._region_overlay = None
 
-        # Two vertical and two horizontal lines, in image pixels, that box in the
-        # part of the image to segment: "v" holds the x positions of the vertical
-        # pair, "h" the y positions of the horizontal pair. While they are on, the
-        # mask outside the box is hidden, not saved and not measured, but stays in
-        # self.mask. The positions outlive images so the same limits apply to the
-        # next one.
-        self.limits_enabled = False
-        self._limit_lines = None
-        self._limit_drag = None
+        # The ROI of the image on screen, or None: "v" holds the x positions of its
+        # two vertical edges and "h" the y positions of its two horizontal edges, in
+        # image pixels. The mask outside it is hidden, not saved and not measured,
+        # but stays in self.mask.
+        self._roi = None
+        self._roi_drag = None
+        # While the whole ROI is being dragged: where the press landed, the edge
+        # positions at that moment, and whether the pointer has moved far enough
+        # for the press to count as a drag instead of a click.
+        self._roi_move = None
+        # Opposite corners (x, y) of a box being drawn with the ROI tool.
+        self._roi_draft = None
+        # What a click with the Select tool picked for deletion: "roi", "mask" or None.
+        self.selection = None
 
         self._calibrating = False
         self._calibration_lines = None
@@ -99,6 +106,7 @@ class Canvas(QWidget):
         self.v_scrollbar.raise_()
 
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def load_image_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -157,7 +165,11 @@ class Canvas(QWidget):
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
         self.centre_x = None
-        self._fit_limit_lines()
+        self._roi = None
+        self._roi_drag = None
+        self._roi_move = None
+        self._roi_draft = None
+        self.selection = None
         self._refresh_mask_pixmap()
         self._last_outline = []
         self._mask_touched = False
@@ -184,6 +196,8 @@ class Canvas(QWidget):
     def clear_mask(self):
         if self.mask is None:
             return
+        if self.selection == "mask":
+            self.selection = None
         if self.image is None:
             self.mask = None
             self.mask_pixmap = None
@@ -239,6 +253,12 @@ class Canvas(QWidget):
         self._drawing = False
         self._poly_points = []
         self._freehand_points = []
+        self._roi_draft = None
+        self.selection = None
+        if tool_name == "roi":
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.unsetCursor()
         self.update()
 
     def set_brush_radius(self, radius):
@@ -270,56 +290,37 @@ class Canvas(QWidget):
         self.update()
         return True
 
-    def _fit_limit_lines(self):
-        """Keep the limit lines inside the image, placing any that are missing."""
-        if self.image is None:
-            return
-        height, width = self.image.shape[:2]
-        if self._limit_lines is None:
-            if not self.limits_enabled:
-                return
-            self._limit_lines = {}
-        for axis, extent in (("v", width), ("h", height)):
-            pair = self._limit_lines.get(axis) or [0.1 * extent, 0.9 * extent]
-            self._limit_lines[axis] = [max(0.0, min(float(extent), p)) for p in pair]
-
-    def set_limits_enabled(self, enabled):
-        self.limits_enabled = bool(enabled)
-        self._fit_limit_lines()
-        self._limit_drag = None
-        self._refresh_mask_pixmap()
-        self.update()
-
-    def limit_lines(self):
-        if self._limit_lines is None:
-            return None
-        return {axis: list(pair) for axis, pair in self._limit_lines.items()}
-
-    def set_limit_lines(self, lines):
-        if lines is None:
-            self._limit_lines = None
+    def set_roi(self, box):
+        """Give the image on screen the ROI box (left, right, top, bottom), or None."""
+        self._roi_drag = None
+        self._roi_move = None
+        if box is None or self.image is None:
+            self._roi = None
+            if self.selection == "roi":
+                self.selection = None
         else:
-            self._limit_lines = {
-                axis: [float(p) for p in pair] for axis, pair in lines.items()
+            height, width = self.image.shape[:2]
+            left, right, top, bottom = box
+            self._roi = {
+                "v": [max(0.0, min(float(width), float(x))) for x in (left, right)],
+                "h": [max(0.0, min(float(height), float(y))) for y in (top, bottom)],
             }
-            self._fit_limit_lines()
         self._refresh_mask_pixmap()
         self.update()
 
-    def limit_box(self):
-        """Pixel box (left, right, top, bottom) inside the limit lines, or None when off."""
-        if not self.limits_enabled or self._limit_lines is None or self.image is None:
+    def roi_box(self):
+        """Pixel box (left, right, top, bottom) of the ROI, or None when there is none."""
+        if self._roi is None or self.image is None:
             return None
-        self._fit_limit_lines()
-        left, right = sorted(int(round(x)) for x in self._limit_lines["v"])
-        top, bottom = sorted(int(round(y)) for y in self._limit_lines["h"])
+        left, right = sorted(int(round(x)) for x in self._roi["v"])
+        top, bottom = sorted(int(round(y)) for y in self._roi["h"])
         return left, right, top, bottom
 
     def visible_mask(self):
-        """The mask as shown, saved and measured: empty outside the limit lines."""
+        """The mask as shown, saved and measured: empty outside the ROI."""
         if self.mask is None:
             return None
-        box = self.limit_box()
+        box = self.roi_box()
         if box is None:
             return self.mask
         left, right, top, bottom = box
@@ -327,20 +328,129 @@ class Canvas(QWidget):
         visible[top:bottom, left:right] = self.mask[top:bottom, left:right]
         return visible
 
-    def _limit_line_at(self, pos):
-        if not self.limits_enabled or self._limit_lines is None:
-            return None
+    def _roi_screen_rect(self):
         scale, offset_x, offset_y = self._current_view()
-        best = None
-        for axis, screen_value, offset in (
-            ("v", pos.x(), offset_x),
-            ("h", pos.y(), offset_y),
+        left = int(offset_x + min(self._roi["v"]) * scale)
+        right = int(offset_x + max(self._roi["v"]) * scale)
+        top = int(offset_y + min(self._roi["h"]) * scale)
+        bottom = int(offset_y + max(self._roi["h"]) * scale)
+        return left, right, top, bottom
+
+    def _roi_grips_at(self, pos):
+        """The ROI edges under a widget position as (axis, index) pairs.
+
+        One edge along a side, two (a vertical and a horizontal one) at a corner,
+        none elsewhere.
+        """
+        if self._roi is None:
+            return []
+        scale, offset_x, offset_y = self._current_view()
+        left, right, top, bottom = self._roi_screen_rect()
+        reach = 6
+        grips = []
+        for axis, across, along, offset, low, high in (
+            ("v", pos.x(), pos.y(), offset_x, top, bottom),
+            ("h", pos.y(), pos.x(), offset_y, left, right),
         ):
-            for index, value in enumerate(self._limit_lines.get(axis, [])):
-                distance = abs(screen_value - (offset + value * scale))
-                if distance <= 6 and (best is None or distance < best[0]):
-                    best = (distance, axis, index)
-        return None if best is None else (best[1], best[2])
+            if not low - reach <= along <= high + reach:
+                continue
+            distances = [
+                abs(across - (offset + value * scale)) for value in self._roi[axis]
+            ]
+            index = int(np.argmin(distances))
+            if distances[index] <= reach:
+                grips.append((axis, index))
+        return grips
+
+    def _set_grip_cursor(self, grips):
+        if len(grips) < 2:
+            self._set_line_cursor(grips[0] if grips else None)
+            return
+        (_, v_index), (_, h_index) = grips
+        at_left = self._roi["v"][v_index] == min(self._roi["v"])
+        at_top = self._roi["h"][h_index] == min(self._roi["h"])
+        if at_left == at_top:
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+
+    def _inside_roi(self, pos):
+        if self._roi is None:
+            return False
+        left, right, top, bottom = self._roi_screen_rect()
+        return left <= pos.x() <= right and top <= pos.y() <= bottom
+
+    def _move_roi(self, pos):
+        """Slide the whole ROI with the pointer, keeping its size and staying in the image."""
+        move = self._roi_move
+        if not move["moved"]:
+            if (pos - move["press"]).manhattanLength() < 4:
+                return
+            move["moved"] = True
+            self.selection = "roi"
+        height, width = self.image.shape[:2]
+        scale = self._current_view()[0]
+        for axis, delta, extent in (
+            ("v", (pos.x() - move["press"].x()) / scale, width),
+            ("h", (pos.y() - move["press"].y()) / scale, height),
+        ):
+            low, high = min(move[axis]), max(move[axis])
+            delta = max(-low, min(float(extent) - high, delta))
+            self._roi[axis] = [value + delta for value in move[axis]]
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def _image_position(self, pos):
+        """A widget position as image (x, y), pulled inside the image."""
+        scale, offset_x, offset_y = self._current_view()
+        height, width = self.image.shape[:2]
+        return (
+            max(0.0, min(float(width), (pos.x() - offset_x) / scale)),
+            max(0.0, min(float(height), (pos.y() - offset_y) / scale)),
+        )
+
+    def _mask_at(self, pos):
+        """True when the mask as shown covers the image pixel under a widget position."""
+        mask = self.visible_mask()
+        point = self._screen_to_image(pos)
+        if mask is None or point is None:
+            return False
+        height, width = mask.shape[:2]
+        if not (0 <= point.x() < width and 0 <= point.y() < height):
+            return False
+        return bool(mask[point.y(), point.x()] > 0)
+
+    def _outline_at(self, pos):
+        """True when a widget position is on or inside the outline not yet filled in."""
+        if len(self._last_outline) < 2:
+            return False
+        x, y = self._image_position(pos)
+        points = np.array(
+            [[p.x(), p.y()] for p in self._last_outline], dtype=np.float32
+        ).reshape((-1, 1, 2))
+        scale = self._current_view()[0]
+        return cv2.pointPolygonTest(points, (x, y), True) >= -6.0 / scale
+
+    def deletable_at(self, pos):
+        """What a right-click at a widget position can delete, nearest thing first."""
+        kinds = []
+        if self.image is None:
+            return kinds
+        if self._outline_at(pos):
+            kinds.append("outline")
+        if self._mask_at(pos):
+            kinds.append("mask")
+        if self._roi is not None:
+            if self._inside_roi(pos) or self._roi_grips_at(pos):
+                kinds.append("roi")
+        return kinds
+
+    def request_delete(self, kind):
+        if kind == "outline":
+            self._last_outline = []
+            self.update()
+        else:
+            self.delete_requested.emit(kind)
 
     def set_region_view(self, enabled):
         self.region_view = bool(enabled)
@@ -762,7 +872,39 @@ class Canvas(QWidget):
                 pos = event.position().toPoint()
                 self._centre_drag = self._centre_marker_hit(pos)
                 if not self._centre_drag:
-                    self._limit_drag = self._limit_line_at(pos)
+                    self._roi_drag = self._roi_grips_at(pos) or None
+                    if self._roi_drag is not None:
+                        self.selection = "roi"
+                    elif self._inside_roi(pos):
+                        self._roi_move = {
+                            "press": pos,
+                            "v": list(self._roi["v"]),
+                            "h": list(self._roi["h"]),
+                            "moved": False,
+                        }
+                    elif self._mask_at(pos):
+                        self.selection = "mask"
+                    else:
+                        self.selection = None
+                    self.update()
+            elif self.tool == "roi":
+                # On the box already there the ROI tool adjusts it; anywhere else
+                # it starts a box that replaces it.
+                pos = event.position().toPoint()
+                self._roi_drag = self._roi_grips_at(pos) or None
+                if self._roi_drag is not None:
+                    self.selection = "roi"
+                elif self._inside_roi(pos):
+                    self._roi_move = {
+                        "press": pos,
+                        "v": list(self._roi["v"]),
+                        "h": list(self._roi["h"]),
+                        "moved": False,
+                    }
+                else:
+                    corner = self._image_position(pos)
+                    self._roi_draft = [corner, corner]
+                self.update()
             elif self.tool == "freehand":
                 self._drawing = True
                 self._freehand_points = [point]
@@ -806,21 +948,40 @@ class Canvas(QWidget):
                 scale, offset_x, _ = self._current_view()
                 width = self.image.shape[1]
                 self.set_centre_x(max(0.0, min(float(width), (pos.x() - offset_x) / scale)))
-            elif self._limit_drag is not None:
-                axis, index = self._limit_drag
-                scale, offset_x, offset_y = self._current_view()
-                height, width = self.image.shape[:2]
-                if axis == "v":
-                    value = max(0.0, min(float(width), (pos.x() - offset_x) / scale))
-                else:
-                    value = max(0.0, min(float(height), (pos.y() - offset_y) / scale))
-                self._limit_lines[axis][index] = value
+            elif self._roi_drag is not None:
+                x, y = self._image_position(pos)
+                for axis, index in self._roi_drag:
+                    self._roi[axis][index] = x if axis == "v" else y
                 self._refresh_mask_pixmap()
                 self.update()
+            elif self._roi_move is not None:
+                self._move_roi(pos)
             elif self._centre_marker_hit(pos):
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif not self._roi_grips_at(pos) and self._inside_roi(pos):
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
             else:
-                self._set_line_cursor(self._limit_line_at(pos))
+                self._set_grip_cursor(self._roi_grips_at(pos))
+            return
+        if self.tool == "roi":
+            pos = event.position().toPoint()
+            if self._roi_draft is not None:
+                self._roi_draft[1] = self._image_position(pos)
+                self.update()
+            elif self._roi_drag is not None:
+                x, y = self._image_position(pos)
+                for axis, index in self._roi_drag:
+                    self._roi[axis][index] = x if axis == "v" else y
+                self._refresh_mask_pixmap()
+                self.update()
+            elif self._roi_move is not None:
+                self._move_roi(pos)
+            elif self._roi_grips_at(pos):
+                self._set_grip_cursor(self._roi_grips_at(pos))
+            elif self._inside_roi(pos):
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            else:
+                self.setCursor(Qt.CursorShape.CrossCursor)
             return
         if not self._drawing:
             if self.tool in ("brush", "eraser"):
@@ -848,9 +1009,28 @@ class Canvas(QWidget):
             self._calibration_drag = None
             return
         self._centre_drag = False
-        if self._limit_drag is not None:
-            self._limit_drag = None
-            self.limit_lines_moved.emit()
+        if self._roi_drag is not None:
+            self._roi_drag = None
+            self.roi_changed.emit()
+        if self._roi_move is not None:
+            moved = self._roi_move["moved"]
+            self._roi_move = None
+            if moved:
+                self.roi_changed.emit()
+            else:
+                # A click inside the ROI picks the mask when it lands on it.
+                pos = event.position().toPoint()
+                on_mask = self.tool == "select" and self._mask_at(pos)
+                self.selection = "mask" if on_mask else "roi"
+                self.update()
+        if self._roi_draft is not None:
+            (x0, y0), (x1, y1) = self._roi_draft
+            self._roi_draft = None
+            self.update()
+            if abs(x1 - x0) >= 1 and abs(y1 - y0) >= 1:
+                self.set_roi((x0, x1, y0, y1))
+                self.roi_drawn.emit()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
                 if self.fill_mask and len(self._freehand_points) > 2:
@@ -878,6 +1058,29 @@ class Canvas(QWidget):
         self._cursor_pos = None
         self.update()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Delete and self.selection is not None:
+            self.request_delete(self.selection)
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        # A right-click with the Segmented Line tool finishes the line instead.
+        if self.tool == "polyline" or self._calibrating:
+            return
+        kinds = self.deletable_at(event.pos())
+        if not kinds:
+            return
+        titles = {"outline": "Delete outline", "mask": "Delete mask", "roi": "Delete ROI"}
+        menu = QMenu(self)
+        for kind in kinds:
+            menu.addAction(titles[kind]).setData(kind)
+        if "roi" in kinds:
+            menu.addAction("Clear all ROIs").setData("all_rois")
+        chosen = menu.exec(event.globalPos())
+        if chosen is not None:
+            self.request_delete(chosen.data())
+
     def mouseDoubleClickEvent(self, event):
         if self.tool == "polyline":
             self._finish_polyline()
@@ -902,7 +1105,8 @@ class Canvas(QWidget):
             painter.drawPixmap(target, self.mask_pixmap)
 
         self._paint_region_overlay(painter, scale, offset_x, offset_y)
-        self._paint_limits(painter, scale, offset_x, offset_y, draw_w, draw_h)
+        self._paint_roi(painter, scale, offset_x, offset_y, draw_w, draw_h)
+        self._paint_selected_mask(painter, scale, offset_x, offset_y)
 
         if self.tool == "polyline" and self._poly_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
@@ -948,25 +1152,59 @@ class Canvas(QWidget):
                 screen_x = int(offset_x + x * scale)
                 painter.drawLine(screen_x, offset_y, screen_x, offset_y + draw_h)
 
-    def _paint_limits(self, painter, scale, offset_x, offset_y, draw_w, draw_h):
-        if not self.limits_enabled or self._limit_lines is None:
+    def _paint_roi(self, painter, scale, offset_x, offset_y, draw_w, draw_h):
+        if self._roi is not None:
+            left, right, top, bottom = self._roi_screen_rect()
+            shade = QColor(0, 0, 0, 120)
+            painter.fillRect(QRect(offset_x, offset_y, left - offset_x, draw_h), shade)
+            painter.fillRect(
+                QRect(right, offset_y, offset_x + draw_w - right, draw_h), shade
+            )
+            painter.fillRect(QRect(left, offset_y, right - left, top - offset_y), shade)
+            painter.fillRect(
+                QRect(left, bottom, right - left, offset_y + draw_h - bottom), shade
+            )
+            if self.selection == "roi":
+                pen = QPen(QColor(255, 255, 255), 3, Qt.PenStyle.SolidLine)
+            else:
+                pen = QPen(QColor(120, 255, 120), 2, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(QRect(left, top, right - left, bottom - top))
+            for x in (left, right):
+                for y in (top, bottom):
+                    painter.fillRect(QRect(x - 3, y - 3, 7, 7), pen.color())
+        if self._roi_draft is not None:
+            (x0, y0), (x1, y1) = self._roi_draft
+            painter.setPen(QPen(QColor(120, 255, 120), 2, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(
+                QRect(
+                    QPoint(int(offset_x + x0 * scale), int(offset_y + y0 * scale)),
+                    QPoint(int(offset_x + x1 * scale), int(offset_y + y1 * scale)),
+                ).normalized()
+            )
+
+    def _paint_selected_mask(self, painter, scale, offset_x, offset_y):
+        if self.selection != "mask":
             return
-        left = int(offset_x + min(self._limit_lines["v"]) * scale)
-        right = int(offset_x + max(self._limit_lines["v"]) * scale)
-        top = int(offset_y + min(self._limit_lines["h"]) * scale)
-        bottom = int(offset_y + max(self._limit_lines["h"]) * scale)
-        shade = QColor(0, 0, 0, 120)
-        painter.fillRect(QRect(offset_x, offset_y, left - offset_x, draw_h), shade)
-        painter.fillRect(QRect(right, offset_y, offset_x + draw_w - right, draw_h), shade)
-        painter.fillRect(QRect(left, offset_y, right - left, top - offset_y), shade)
-        painter.fillRect(
-            QRect(left, bottom, right - left, offset_y + draw_h - bottom), shade
+        mask = self.visible_mask()
+        if mask is None:
+            return
+        contours, _ = cv2.findContours(
+            (mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
-        painter.setPen(QPen(QColor(120, 255, 120), 2, Qt.PenStyle.DashLine))
-        for x in (left, right):
-            painter.drawLine(x, offset_y, x, offset_y + draw_h)
-        for y in (top, bottom):
-            painter.drawLine(offset_x, y, offset_x + draw_w, y)
+        painter.setPen(QPen(QColor(255, 255, 255), 2, Qt.PenStyle.DashLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for contour in contours:
+            painter.drawPolygon(
+                QPolygonF(
+                    [
+                        QPointF(offset_x + (x + 0.5) * scale, offset_y + (y + 0.5) * scale)
+                        for x, y in contour[:, 0, :]
+                    ]
+                )
+            )
 
     def _paint_region_overlay(self, painter, scale, offset_x, offset_y):
         overlay = self._region_overlay
