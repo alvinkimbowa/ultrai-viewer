@@ -35,7 +35,12 @@ from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from .canvas import Canvas, REGION_COLORS
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from .rois import RoiStore
-from .measurements import MeasurementLog, REGION_NAMES, measure
+from .measurements import (
+    MEASUREMENTS_FILE_NAME,
+    MeasurementLog,
+    REGION_NAMES,
+    measure,
+)
 from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
 from threading import Event
 from collections import OrderedDict
@@ -51,6 +56,7 @@ MIN_LIMITED_SIZE = 8
 
 
 NO_MODEL_LABEL = "No model"
+PREDICTIONS_SUFFIX = "_predictions"
 
 
 def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
@@ -378,15 +384,32 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self.eraser_action)
 
     def _results_dir(self, base_dir):
-        """Folder the results of the selected model are kept in.
+        """Folder the masks of the selected model are kept in.
 
-        A subfolder of the selected output folder named after the model, or the
+        The subfolder "<model>_predictions" of the selected output folder, or the
         output folder itself when no model is selected.
         """
         if not base_dir:
             return None
         model = self._model.current_model()
-        return str(Path(base_dir) / model) if model else str(base_dir)
+        if not model:
+            return str(base_dir)
+        return str(Path(base_dir) / f"{model}{PREDICTIONS_SUFFIX}")
+
+    def _measurement_file(self, results_dir):
+        """(folder, file name) of the measurements file that goes with a results
+        folder.
+
+        The masks of a model sit in "<model>_predictions"; its measurements sit
+        beside that folder as "measurements_<model>.csv". Masks kept directly in
+        the selected output folder go with its "measurements.csv".
+        """
+        folder = Path(results_dir)
+        selected = (self._sequence_base_dir, self._video_base_dir)
+        if str(results_dir) in selected or not folder.name.endswith(PREDICTIONS_SUFFIX):
+            return folder, MEASUREMENTS_FILE_NAME
+        model = folder.name[: -len(PREDICTIONS_SUFFIX)]
+        return folder.parent, f"measurements_{model}.csv"
 
     @property
     def _sequence_output_dir(self):
@@ -862,7 +885,7 @@ class MainWindow(QMainWindow):
         results folder keeps the ROI recorded with that result.
         """
         boxes = self._roi_store(output_dir).boxes()
-        log = MeasurementLog(output_dir)
+        log = MeasurementLog(*self._measurement_file(output_dir))
         for file_name, frame in log.keys():
             if log.rotation(file_name, frame) != self._angle_of(output_dir, file_name):
                 continue
@@ -1267,7 +1290,9 @@ class MainWindow(QMainWindow):
         # segmentation run has written to the same files.
         key = str(output_dir)
         if key not in self._measurement_logs:
-            self._measurement_logs[key] = MeasurementLog(output_dir)
+            self._measurement_logs[key] = MeasurementLog(
+                *self._measurement_file(output_dir)
+            )
         return self._measurement_logs[key]
 
     def _record_measurement(self, output_dir, file_name, frame=""):
@@ -2143,6 +2168,7 @@ class MainWindow(QMainWindow):
             knee_side=self.knee_picker.currentData(),
             rois=self._rois_for_segmenting(self._sequence_output_dir),
             rotations=self._rotation_store(self._sequence_output_dir).angles(),
+            measurements=self._measurement_file(self._sequence_output_dir),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -2239,6 +2265,7 @@ class MainWindow(QMainWindow):
             knee_side=self.knee_picker.currentData(),
             rois=self._rois_for_segmenting(self._video_output_dir),
             rotations=self._rotation_store(self._video_output_dir).angles(),
+            measurements=self._measurement_file(self._video_output_dir),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -3748,9 +3775,12 @@ class BatchInferenceWorker(QObject):
         knee_side="right",
         rois=None,
         rotations=None,
+        measurements=None,
     ):
         super().__init__()
         self._rotations = rotations or {}
+        # (folder, file name) of the measurements file the results go into.
+        self._measurements = measurements or (output_dir, MEASUREMENTS_FILE_NAME)
         self._model = model
         self._image_paths = list(image_paths)
         self._output_dir = output_dir
@@ -3767,7 +3797,7 @@ class BatchInferenceWorker(QObject):
     @pyqtSlot()
     def run(self):
         try:
-            self._measurement_log = MeasurementLog(self._output_dir)
+            self._measurement_log = MeasurementLog(*self._measurements)
             self._segment_images()
             self._measurement_log.save()
         except OSError as exc:
@@ -3877,9 +3907,12 @@ class VideoBatchInferenceWorker(QObject):
         knee_side="right",
         rois=None,
         rotations=None,
+        measurements=None,
     ):
         super().__init__()
         self._rotations = rotations or {}
+        # (folder, file name) of the measurements file the results go into.
+        self._measurements = measurements or (output_dir, MEASUREMENTS_FILE_NAME)
         self._model = model
         self._video_paths = list(video_paths)
         self._output_dir = Path(output_dir)
@@ -3911,7 +3944,7 @@ class VideoBatchInferenceWorker(QObject):
             processed = 0
             skipped = 0
             video_count = len(self._video_paths)
-            measurement_log = MeasurementLog(self._output_dir)
+            measurement_log = MeasurementLog(*self._measurements)
             for video_number, video_path in enumerate(self._video_paths, start=1):
                 video_name = Path(video_path).name
                 capture = cv2.VideoCapture(video_path)

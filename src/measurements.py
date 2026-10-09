@@ -265,13 +265,13 @@ MEASUREMENT_COLUMNS = [
 
 
 class MeasurementLog:
-    """The measurements.csv of one output folder, one row per image or video frame.
+    """A measurements file of one output folder, one row per image or video frame.
 
     `frame` is the frame number for a video and "" for an image.
     """
 
-    def __init__(self, output_dir):
-        self.path = Path(output_dir) / MEASUREMENTS_FILE_NAME
+    def __init__(self, output_dir, file_name=MEASUREMENTS_FILE_NAME):
+        self.path = Path(output_dir) / file_name
         self._rows = {}
         self._dirty = False
         if self.path.exists():
