@@ -1079,6 +1079,7 @@ class Canvas(QWidget):
         for kind in kinds:
             menu.addAction(titles[kind]).setData(kind)
         if "roi" in kinds:
+            menu.addAction("Apply ROI to all").setData("apply_roi")
             menu.addAction("Clear all ROIs").setData("all_rois")
         chosen = menu.exec(event.globalPos())
         if chosen is not None:

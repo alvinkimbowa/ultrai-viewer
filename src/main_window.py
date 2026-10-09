@@ -685,34 +685,42 @@ class MainWindow(QMainWindow):
         return found
 
     def _on_roi_drawn(self, previous):
-        if not self._save_current_roi():
-            return
+        if self._offer_roi_to_others(can_discard=True) == QMessageBox.StandardButton.Cancel:
+            self.canvas.set_roi(previous)
+            self._save_current_roi()
+
+    def _offer_roi_to_others(self, can_discard=False):
+        """Ask whether the ROI on screen should go to every other image and frame.
+
+        Returns the button chosen, or None when nothing was asked. can_discard adds
+        a Cancel button for throwing away a box that was just drawn.
+        """
+        if self.canvas.roi_box() is None or not self._save_current_roi():
+            return None
         targets = self._other_frames()
         count = sum(len(frames) for frames in targets.values())
         if count == 0:
-            return
+            return None
         others = (
             "the 1 other image or frame"
             if count == 1
             else f"all {count} other images and frames"
         )
-        choice = QMessageBox.question(
-            self,
-            "Apply ROI",
+        text = (
             f"Apply this ROI to {others}?\n\n"
             "It replaces any ROI they have, and where one of them already has a "
-            "saved mask, the mask is trimmed to the ROI.\n\n"
-            "Cancel discards the box you just drew.",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No,
+            "saved mask, the mask is trimmed to the ROI."
+        )
+        buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        if can_discard:
+            text += "\n\nCancel discards the box you just drew."
+            buttons |= QMessageBox.StandardButton.Cancel
+        choice = QMessageBox.question(
+            self, "Apply ROI", text, buttons, QMessageBox.StandardButton.No
         )
         if choice == QMessageBox.StandardButton.Yes:
             self._apply_roi_to(targets, self.canvas.roi_box(), count)
-        elif choice == QMessageBox.StandardButton.Cancel:
-            self.canvas.set_roi(previous)
-            self._save_current_roi()
+        return choice
 
     def _apply_roi_to(self, targets, box, count):
         """Give a box to the frames listed by _other_frames, trimming saved masks."""
@@ -827,6 +835,9 @@ class MainWindow(QMainWindow):
             self.canvas.set_roi(None)
             if self._save_current_roi():
                 self.statusBar().showMessage("ROI deleted")
+        elif kind == "apply_roi":
+            if self._offer_roi_to_others() is None:
+                self.statusBar().showMessage("No other images or frames are loaded")
         elif kind == "all_rois":
             self._clear_all_rois()
 
