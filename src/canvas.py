@@ -11,6 +11,7 @@ from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF
 from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
 
 from .measurements import (
+    bottom_surface_paths,
     cartilage_edges,
     region_columns,
     suggest_centre_x,
@@ -470,8 +471,7 @@ class Canvas(QWidget):
 
     def _build_region_overlay(self, binary):
         """Work out what is drawn over the mask: the bone line, and the regions."""
-        columns, _, bottom = cartilage_edges(binary)
-        if len(columns) == 0:
+        if not binary.any():
             return None
         width = binary.shape[1]
         if self.region_view:
@@ -483,19 +483,20 @@ class Canvas(QWidget):
         else:
             spans = {"whole": (0, width)}
             centre = None
-        # One polyline per unbroken run of columns, so gaps in the mask stay gaps.
+        # The line drawn is the path the length is measured along, cut where it
+        # passes from one region into the next.
         bone_lines = []
-        for name, (start, stop) in spans.items():
-            inside = (columns >= start) & (columns < stop)
-            region_columns_x = columns[inside]
-            region_bottom = bottom[inside]
-            if len(region_columns_x) == 0:
-                continue
-            breaks = np.nonzero(np.diff(region_columns_x) > 1)[0] + 1
-            for xs, ys in zip(
-                np.split(region_columns_x, breaks), np.split(region_bottom, breaks)
-            ):
-                bone_lines.append((name, xs + 0.5, ys + 1.0))
+        for pixels, _ in bottom_surface_paths(binary):
+            for name, (start, stop) in spans.items():
+                inside = np.nonzero((pixels[:, 0] >= start) & (pixels[:, 0] < stop))[0]
+                if len(inside) == 0:
+                    continue
+                breaks = np.nonzero(np.diff(inside) > 1)[0] + 1
+                for run in np.split(inside, breaks):
+                    # One pixel further, so the colours of two regions meet.
+                    last = min(run[-1] + 1, len(pixels) - 1)
+                    run = pixels[run[0] : last + 1]
+                    bone_lines.append((name, run[:, 0] + 0.5, run[:, 1] + 0.5))
         return {"spans": spans, "centre": centre, "bone_lines": bone_lines}
 
     def _centre_marker_hit(self, pos):
