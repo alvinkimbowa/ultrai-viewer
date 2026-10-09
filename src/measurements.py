@@ -108,11 +108,7 @@ def suggest_centre_x(mask):
     columns, top, _ = cartilage_edges(mask)
     if len(columns) == 0:
         return None
-    # The rounded ends of a mask also turn downwards, so the outer tenth of the
-    # columns on each side is left out of the search.
-    margin = len(columns) // 10
-    inner = slice(margin, len(columns) - margin)
-    deepest = columns[inner][top[inner] == top[inner].max()]
+    deepest = columns[top == top.max()]
     return float(deepest[len(deepest) // 2])
 
 
@@ -129,13 +125,16 @@ INTERCONDYLAR_WIDTH_FRACTION = 0.25
 REGION_NAMES = ("lateral", "intercondylar", "medial")
 
 
-def region_columns(image_width, centre_x, knee_side):
+def region_columns(image_width, centre_x, knee_side, limits=None):
     """Column range (start, stop) of each region for a knee side of "right" or "left".
 
-    The intercondylar region is a fixed share of the image width centred on
-    centre_x. On a right knee the lateral condyle is on the left of the image.
+    The intercondylar region is centred on centre_x and is a fixed share of the
+    width of the ROI box `limits` (left, right, top, bottom), or of the image width
+    when there is no ROI. On a right knee the lateral condyle is on the left of the
+    image.
     """
-    half_width = INTERCONDYLAR_WIDTH_FRACTION * image_width / 2.0
+    base_width = image_width if limits is None else limits[1] - limits[0]
+    half_width = INTERCONDYLAR_WIDTH_FRACTION * base_width / 2.0
     start = int(round(min(max(centre_x - half_width, 0), image_width)))
     stop = int(round(min(max(centre_x + half_width, 0), image_width)))
     left_name, right_name = (
@@ -177,14 +176,24 @@ def _measure_columns(gray, binary, line, start, stop, scale_x, scale_y):
     return values
 
 
-def measure(image, mask, px_per_mm_x, px_per_mm_y, centre_x=None, knee_side="right"):
+def measure(
+    image,
+    mask,
+    px_per_mm_x,
+    px_per_mm_y,
+    centre_x=None,
+    knee_side="right",
+    limits=None,
+):
     """Measure a mask as a whole and split into lateral, intercondylar and medial.
 
     Returns {"unit", "centre_x", "regions"}; "regions" maps "whole" and each region
     name to its area, cartilage-bone interface length, thickness (area / length),
     and the mean and standard deviation of the grey levels inside it. Lengths are in
     mm when both resolutions are known and in pixels otherwise. centre_x of None
-    uses the suggested centre. Values that cannot be computed are NaN.
+    uses the suggested centre. limits is the ROI box (left, right, top, bottom) the
+    mask is confined to, if any; the intercondylar region is sized from it. Values
+    that cannot be computed are NaN.
     """
     in_mm = bool(px_per_mm_x and px_per_mm_y)
     scale_x = 1.0 / px_per_mm_x if in_mm else 1.0
@@ -209,7 +218,10 @@ def measure(image, mask, px_per_mm_x, px_per_mm_y, centre_x=None, knee_side="rig
     if centre_x is None:
         centre_x = suggest_centre_x(binary)
     result["centre_x"] = centre_x
-    spans = {"whole": (0, width), **region_columns(width, centre_x, knee_side)}
+    spans = {
+        "whole": (0, width),
+        **region_columns(width, centre_x, knee_side, limits),
+    }
     for name, (start, stop) in spans.items():
         result["regions"][name] = _measure_columns(
             gray, binary, line, start, stop, scale_x, scale_y
@@ -289,7 +301,9 @@ class MeasurementLog:
                     centre_x = float(saved["centre_x"])
                 except (TypeError, ValueError):
                     pass
-        result = measure(image, mask, px_per_mm_x, px_per_mm_y, centre_x, knee_side)
+        result = measure(
+            image, mask, px_per_mm_x, px_per_mm_y, centre_x, knee_side, limits
+        )
         row = {
             "file": key[0],
             "frame": key[1],

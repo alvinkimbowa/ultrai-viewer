@@ -477,7 +477,7 @@ class Canvas(QWidget):
             centre_x = self.centre_x
             if centre_x is None:
                 centre_x = suggest_centre_x(binary)
-            spans = region_columns(width, centre_x, self.knee_side)
+            spans = region_columns(width, centre_x, self.knee_side, self.roi_box())
             centre = surface_point(binary, centre_x)
         else:
             spans = {"whole": (0, width)}

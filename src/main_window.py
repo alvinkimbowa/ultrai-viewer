@@ -759,6 +759,7 @@ class MainWindow(QMainWindow):
             self.px_per_mm_y_spin.value(),
             self.canvas.centre_x,
             self.canvas.knee_side,
+            self.canvas.roi_box(),
         )
         unit = result["unit"]
         row_titles = {
