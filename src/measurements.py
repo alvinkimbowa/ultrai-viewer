@@ -189,22 +189,37 @@ def measure(
     }
     if mask is None:
         return result
+
+    # 1. Extract the largest connected component from the mask
     binary = largest_piece(mask)
+
+    # Return empty results if the mask is empty
     if not binary.any():
-        return result
-    gray = None
-    if image is not None and image.shape[:2] == binary.shape[:2]:
-        gray = to_grayscale(image)
+        return result    
+    
+    # 2. Extract the top and bottom cartilage surfaces
     top_side, bottom_side = outline_sides(binary)
     path = bottom_side, step_lengths(bottom_side, scale_x, scale_y)
+    
+    # 3. Suggest the centre of the intercondylar notch if not manually provided
     width = binary.shape[1]
     if centre_x is None:
         centre_x = suggest_centre_x(*top_surface(top_side))
     result["centre_x"] = centre_x
+
+    # 4. Compute the measures for the whole mask and each region
+    # Prepare image for echo intensity measurements
+    gray = None
+    if image is not None and image.shape[:2] == binary.shape[:2]:
+        gray = to_grayscale(image)
+
+    # Define cartilage regions based on the suggested centre and knee side
     spans = {
         "whole": (0, width),
         **region_columns(width, centre_x, knee_side, limits),
     }
+
+    # Compute measurements for each region
     for name, (start, stop) in spans.items():
         result["regions"][name] = _measure_columns(
             gray, binary, path, start, stop, scale_x, scale_y
