@@ -14,6 +14,21 @@ def binarize_mask(mask):
     return (mask > 0).astype(np.uint8)
 
 
+def largest_piece(mask):
+    """The mask with only its largest connected piece kept, as a bool array.
+
+    Pixels that touch at a corner count as connected. Of pieces of equal size,
+    the one met first going down the image from the top-left is kept.
+    """
+    binary = np.asarray(mask) > 0
+    count, labels = cv2.connectedComponents(binary.astype(np.uint8), connectivity=8)
+    if count <= 2:
+        return binary
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    return labels == int(np.argmax(sizes))
+
+
 def cartilage_edges(mask):
     """Columns the mask covers, with the top and bottom mask row of each.
 
@@ -168,6 +183,7 @@ def measure(
 ):
     """Measure a mask as a whole and split into lateral, intercondylar and medial.
 
+    Only the largest connected piece of the mask is measured.
     Returns {"unit", "centre_x", "regions"}; "regions" maps "whole" and each region
     name to its area, cartilage-bone interface length, thickness (area / length),
     and the mean and standard deviation of the grey levels inside it. Lengths are in
@@ -188,7 +204,7 @@ def measure(
     }
     if mask is None:
         return result
-    binary = np.asarray(mask) > 0
+    binary = largest_piece(mask)
     if not binary.any():
         return result
     gray = None

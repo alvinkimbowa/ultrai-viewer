@@ -167,12 +167,14 @@ An ROI is a box you draw on an image so that only the part inside it is segmente
 
 The Measurements section of the left panel shows numbers for the mask on screen. They update by themselves when the mask changes.
 
+If the mask is in separate pieces, only the largest piece is measured: every number, the dotted line and the centre point come from that piece. The smaller pieces stay in the mask and in its saved file, but are not counted.
+
 - **Pixels per mm (x, y)**: the image scale. Type the values, or click **Calibrate**, drag the two horizontal and two vertical lines onto a known distance, and enter the real distance between each pair. Without both values, results are shown in pixels.
 - **View**: **Full cartilage** measures the mask as one piece. **Per region** splits it into lateral, notch (the intercondylar region) and medial, each in its own colour.
 - **Knee**: Right or Left. It decides which side of the image is lateral and which is medial, and stays as set for the following images or frames until you change it.
 - **Centre point**: in Per region view a yellow diamond marks the middle of the intercondylar notch on the top surface of the cartilage. The app suggests a position; with the Select tool, drag it left or right to correct it. **Reset centre point** returns to the suggestion. The notch region is centred on the diamond and is 25% of the width of the ROI, or 25% of the image width when the image has no ROI.
 - **Area**: size of the mask.
-- **Length**: length of the cartilage-bone line, shown as a dotted line. The line is the bottom side of the mask's outline, from the leftmost to the rightmost point of the mask, and the length is the distance along it between those two ends, following every bend and spike of the mask's edge. A mask in separate pieces is measured piece by piece and added up. In Per region view, each region gets the part of the line that lies inside it.
+- **Length**: length of the cartilage-bone line, shown as a dotted line. The line is the bottom side of the mask's outline, from the leftmost to the rightmost point of the mask, and the length is the distance along it between those two ends, following every bend and spike of the mask's edge. In Per region view, each region gets the part of the line that lies inside it.
 - **Thickness**: area divided by length.
 - **Echo intensity** and **Variation**: the average brightness inside the mask and how much it varies (standard deviation), in arbitrary units (AU).
 

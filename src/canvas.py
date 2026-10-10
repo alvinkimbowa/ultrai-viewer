@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
 from .measurements import (
     bottom_surface_paths,
     cartilage_edges,
+    largest_piece,
     region_columns,
     suggest_centre_x,
     surface_point,
@@ -493,9 +494,13 @@ class Canvas(QWidget):
         self.update()
 
     def _build_region_overlay(self, binary):
-        """Work out what is drawn over the mask: the bone line, and the regions."""
+        """Work out what is drawn over the mask: the bone line, and the regions.
+
+        Both follow the largest connected piece of the mask, the one measured.
+        """
         if not binary.any():
             return None
+        binary = largest_piece(binary)
         width = binary.shape[1]
         if self.region_view:
             centre_x = self.centre_x
@@ -1262,7 +1267,7 @@ class Canvas(QWidget):
             font.setBold(True)
             painter.setFont(font)
             metrics = painter.fontMetrics()
-            columns, top, _ = cartilage_edges(self.visible_mask() > 0)
+            columns, top, _ = cartilage_edges(largest_piece(self.visible_mask()))
             for name, (start, stop) in overlay["spans"].items():
                 inside = (columns >= start) & (columns < stop)
                 if not inside.any():
