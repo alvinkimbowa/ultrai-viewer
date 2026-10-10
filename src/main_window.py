@@ -44,6 +44,7 @@ from .measurements import (
 from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
 from threading import Event
 from collections import OrderedDict
+import os
 from pathlib import Path
 import numpy as np
 import cv2
@@ -57,6 +58,39 @@ MIN_LIMITED_SIZE = 8
 
 NO_MODEL_LABEL = "No model"
 PREDICTIONS_SUFFIX = "_predictions"
+
+
+def find_mask_files(folder, image_path, images=()):
+    """Mask files in `folder` that belong to an image, the best match first.
+
+    A mask belongs to an image when its file name starts with the image's name
+    without its ending: "scan.png", "scan.tif.png" and "scan_mask.png" all belong
+    to "scan.tif". The character after that start must not be a letter or a digit,
+    which keeps "scan_15.png" from being taken as the mask of "scan_1.tif". The
+    exact name "scan.png" comes first, then the shortest name.
+
+    `images` are the loaded image files; they are never taken as masks, since
+    the output folder can be the folder the images are in.
+    """
+    image_path = Path(image_path)
+    stem = image_path.stem
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    skip = {os.path.abspath(path) for path in images}
+    skip.add(os.path.abspath(image_path))
+    found = []
+    for name in names:
+        if not name.startswith(stem) or not name.lower().endswith(MASK_EXTENSIONS):
+            continue
+        if name[len(stem) : len(stem) + 1].isalnum():
+            continue
+        path = Path(folder) / name
+        if os.path.abspath(path) in skip or not path.is_file():
+            continue
+        found.append(path)
+    return sorted(found, key=lambda path: (path.stem != stem, len(path.name), path.name))
 
 
 def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
@@ -660,12 +694,9 @@ class MainWindow(QMainWindow):
             for base_dir in (self._sequence_output_dir, self._sequence_base_dir):
                 if not base_dir:
                     continue
-                for ext in MASK_EXTENSIONS:
-                    path = Path(base_dir) / f"{image_path.stem}{ext}"
-                    # With the images' own folder as output folder, an image has
-                    # the file name its mask would have.
-                    if path.is_file() and path.resolve() != image_path.resolve():
-                        return path
+                found = find_mask_files(base_dir, image_path, self._sequence_paths)
+                if found:
+                    return found[0]
         return None
 
     def _restore_folder_inputs(self):
@@ -1913,17 +1944,9 @@ class MainWindow(QMainWindow):
             if not self._sequence_output_dir:
                 return []
             image_path = Path(self._sequence_paths[self._sequence_index])
-            candidates = [
-                Path(self._shown_result_dir()) / f"{image_path.stem}{ext}"
-                for ext in MASK_EXTENSIONS
-            ]
-            # When the output folder is also the input folder, the image itself has
-            # the file name its mask would have.
-            return [
-                path
-                for path in candidates
-                if path.is_file() and path.resolve() != image_path.resolve()
-            ]
+            return find_mask_files(
+                self._shown_result_dir(), image_path, self._sequence_paths
+            )
         if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
             mask_path = self._shown_mask_path()
             if mask_path is not None:
@@ -3237,13 +3260,8 @@ class MainWindow(QMainWindow):
     def _find_sequence_mask_path(self, image_path):
         if not self._sequence_output_dir:
             return None
-        stem = Path(image_path).stem
-        output_dir = Path(self._sequence_output_dir)
-        for ext in MASK_EXTENSIONS:
-            candidate = output_dir / f"{stem}{ext}"
-            if candidate.exists():
-                return str(candidate)
-        return None
+        found = find_mask_files(self._sequence_output_dir, image_path, self._sequence_paths)
+        return str(found[0]) if found else None
 
     def _show_load_dialog(self):
         dialog = QDialog(self)
@@ -3861,13 +3879,8 @@ class BatchInferenceWorker(QObject):
         self.finished.emit(processed, skipped)
 
     def _existing_mask_path(self, image_path):
-        stem = Path(image_path).stem
-        output_dir = Path(self._output_dir)
-        for extension in MASK_EXTENSIONS:
-            candidate = output_dir / f"{stem}{extension}"
-            if candidate.exists():
-                return candidate
-        return None
+        found = find_mask_files(self._output_dir, image_path, self._image_paths)
+        return found[0] if found else None
 
     def _load_image(self, file_path):
         lower_path = file_path.lower()
