@@ -2201,6 +2201,7 @@ class MainWindow(QMainWindow):
         self._batch_thread.started.connect(self._batch_worker.run)
         self._batch_worker.progress.connect(self._on_batch_progress)
         self._batch_worker.image_started.connect(self._on_batch_image_started)
+        self._batch_worker.image_segmented.connect(self._on_batch_image_segmented)
         self._batch_worker.finished.connect(self._on_batch_finished)
         self._batch_worker.canceled.connect(self._on_batch_canceled)
         self._batch_worker.error.connect(self._on_batch_error)
@@ -2299,6 +2300,7 @@ class MainWindow(QMainWindow):
         self._batch_worker.video_started.connect(self._on_video_started)
         self._batch_worker.frame_started.connect(self._on_video_frame_started)
         self._batch_worker.frame_progress.connect(self._on_video_frame_progress)
+        self._batch_worker.frame_segmented.connect(self._on_video_frame_segmented)
         self._batch_worker.video_finished.connect(self._on_video_finished)
         self._batch_worker.finished.connect(self._on_video_batch_finished)
         self._batch_worker.canceled.connect(self._on_batch_canceled)
@@ -2362,6 +2364,24 @@ class MainWindow(QMainWindow):
         if self._batch_dialog:
             name = Path(image_path).name
             self._batch_dialog.setLabelText(f"Segmenting {name} ({index}/{total})")
+
+    def _on_batch_image_segmented(self, image_path):
+        # The image on screen would otherwise keep its earlier state until the
+        # run ends, and that state would be saved over the result on leaving it.
+        if (
+            self._mode == "sequence"
+            and 0 <= self._sequence_index < len(self._sequence_paths)
+            and self._sequence_paths[self._sequence_index] == image_path
+        ):
+            self._show_saved_mask()
+
+    def _on_video_frame_segmented(self, video_path, frame_index):
+        if (
+            self._mode == "video"
+            and self._video_path == video_path
+            and self._video_frame_index == frame_index
+        ):
+            self._show_saved_mask()
 
     def _on_batch_finished(self, processed, skipped):
         message = f"Batch segmentation complete: {processed} image(s) segmented"
@@ -3804,6 +3824,8 @@ class BatchInferenceWorker(QObject):
     error = pyqtSignal(str)
     progress = pyqtSignal(int, int)
     image_started = pyqtSignal(str, int, int)
+    # Path of an image whose mask has just been saved.
+    image_segmented = pyqtSignal(str)
 
     def __init__(
         self,
@@ -3902,6 +3924,7 @@ class BatchInferenceWorker(QObject):
                         rotation=angle,
                     )
                     self._measured.append(Path(image_path).name)
+                    self.image_segmented.emit(image_path)
             except Exception as exc:
                 if str(exc).lower().startswith("inference canceled"):
                     return self.canceled, ()
@@ -3942,6 +3965,8 @@ class VideoBatchInferenceWorker(QObject):
     video_finished = pyqtSignal(int, int)
     frame_started = pyqtSignal(str, int, int, int, int)
     frame_progress = pyqtSignal(int, int)
+    # Video path and frame number of a frame whose mask has just been saved.
+    frame_segmented = pyqtSignal(str, int)
 
     def __init__(
         self,
@@ -4055,6 +4080,7 @@ class VideoBatchInferenceWorker(QObject):
                             rotation=angle,
                         )
                         processed += 1
+                        self.frame_segmented.emit(video_path, frame_index)
                         self.progress.emit(processed, total_frames)
                         self.frame_progress.emit(frame_index + 1, frame_count)
                 finally:
