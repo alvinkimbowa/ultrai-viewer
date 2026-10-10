@@ -319,7 +319,7 @@ class MainWindow(QMainWindow):
             (self.px_per_mm_x_spin, "measurements/px_per_mm_x"),
             (self.px_per_mm_y_spin, "measurements/px_per_mm_y"),
         ):
-            spin.setValue(float(settings.value(key, 0.0, float) or 0.0))
+            spin.setValue(float(settings.value(key, 1.0, float) or 1.0))
             spin.valueChanged.connect(self._on_px_per_mm_changed)
         self._build_calibration_dialog()
         self.h_lines_mm_spin.setValue(
