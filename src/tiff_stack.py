@@ -39,16 +39,36 @@ def tiff_frame_count(path):
         return 1
 
 
+def _read_with_opencv(path, index):
+    """One image of a TIFF file read by OpenCV, colours put in RGB order."""
+    success, frames = cv2.imreadmulti(
+        str(path), start=index, count=1, flags=cv2.IMREAD_UNCHANGED
+    )
+    if not success or not frames:
+        raise ValueError(f"Unsupported image format: {path}")
+    frame = frames[0]
+    if frame.ndim == 3 and frame.shape[2] == 3:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    elif frame.ndim == 3 and frame.shape[2] == 4:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
+    return frame
+
+
 def read_tiff_frame(path, index):
     """One image of a TIFF file, as stored (colour images are RGB)."""
-    with tifffile.TiffFile(path) as tif:
-        series = tif.series[0]
-        count, frame_shape = _frame_layout(series)
-        if count <= 1:
-            return series.asarray()
-        if len(series.pages) == count:
-            return tif.asarray(key=index, series=0)
-        return series.asarray().reshape((count, *frame_shape))[index]
+    try:
+        with tifffile.TiffFile(path) as tif:
+            series = tif.series[0]
+            count, frame_shape = _frame_layout(series)
+            if count <= 1:
+                return series.asarray()
+            if len(series.pages) == count:
+                return tif.asarray(key=index, series=0)
+            return series.asarray().reshape((count, *frame_shape))[index]
+    except Exception:
+        # tifffile cannot decode some compressions (LZW among them) without an
+        # extra package; OpenCV reads those.
+        return _read_with_opencv(path, index)
 
 
 class TiffStackCapture:

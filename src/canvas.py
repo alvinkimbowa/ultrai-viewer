@@ -646,7 +646,7 @@ class Canvas(QWidget):
     def _read_mask(self, file_path):
         lower_path = file_path.lower()
         if lower_path.endswith((".tif", ".tiff")):
-            mask = tifffile.imread(file_path)
+            mask = read_tiff_frame(file_path, 0)
         else:
             mask = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if mask is None:
