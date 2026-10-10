@@ -8,8 +8,6 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from scipy.sparse import csr_matrix
-from scipy.sparse.csgraph import dijkstra
 
 
 def binarize_mask(mask):
@@ -55,44 +53,11 @@ def _bottom_side(points):
     return points[order]
 
 
-def _shortest_path(points, scale_x, scale_y):
-    """Shortest route from the first to the last of a set of pixels.
-
-    The route steps between pixels of the set that touch, corners included, and a
-    step is as long as the pixel is wide (scale_x), tall (scale_y) or diagonal.
-    Returns the (x, y) pixels of the route in order and the length of each step.
-    """
-    index = {}
-    for x, y in points:
-        index.setdefault((int(x), int(y)), len(index))
-    start = index[(int(points[0][0]), int(points[0][1]))]
-    end = index[(int(points[-1][0]), int(points[-1][1]))]
-    pixels = np.array(list(index), dtype=int)
-    if start == end:
-        return pixels[[start]], np.zeros(0)
-    rows, cols, weights = [], [], []
-    for (x, y), i in index.items():
-        for dx, dy in ((1, -1), (1, 0), (1, 1), (0, 1)):
-            j = index.get((x + dx, y + dy))
-            if j is not None:
-                rows.append(i)
-                cols.append(j)
-                weights.append(np.hypot(dx * scale_x, dy * scale_y))
-    graph = csr_matrix((weights, (rows, cols)), shape=(len(index), len(index)))
-    _, before = dijkstra(graph, directed=False, indices=start, return_predecessors=True)
-    route = [end]
-    while route[-1] != start:
-        route.append(int(before[route[-1]]))
-    route = pixels[route[::-1]]
-    moves = np.diff(route, axis=0)
-    return route, np.hypot(moves[:, 0] * scale_x, moves[:, 1] * scale_y)
-
-
 def bottom_surface_paths(mask, scale_x=1.0, scale_y=1.0):
     """The cartilage-bone interface of a mask: the bottom side of its outline.
 
-    One path per connected piece of the mask, each the shortest route along the
-    bottom side of that piece's outline from its left end to its right end.
+    One path per connected piece of the mask: the bottom side of that piece's
+    outline from its left end to its right end, pixel by pixel as traced.
     Returns a list of (pixels, steps): the (x, y) pixels of a path in order and
     the length of each step between them, in the units of the two scales.
     """
@@ -101,7 +66,9 @@ def bottom_surface_paths(mask, scale_x=1.0, scale_y=1.0):
     paths = []
     for contour in contours:
         points = contour[:, 0, :].astype(np.int64)
-        paths.append(_shortest_path(_bottom_side(points), scale_x, scale_y))
+        pixels = _bottom_side(points)
+        moves = np.diff(pixels, axis=0)
+        paths.append((pixels, np.hypot(moves[:, 0] * scale_x, moves[:, 1] * scale_y)))
     return paths
 
 
