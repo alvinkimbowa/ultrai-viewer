@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QLabel,
     QSlider,
+    QAbstractSpinBox,
     QSpinBox,
     QDoubleSpinBox,
     QComboBox,
@@ -1812,6 +1813,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+        self._sidebar_panel = panel
         return panel
 
     def _wire_actions(self):
@@ -1857,6 +1859,15 @@ class MainWindow(QMainWindow):
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            # The wheel must not change a sidebar control's value. Ignoring the
+            # event passes it on, so the sidebar itself still scrolls.
+            if isinstance(
+                obj, (QComboBox, QSlider, QAbstractSpinBox)
+            ) and self._sidebar_panel.isAncestorOf(obj):
+                event.ignore()
+                return True
+            return False
         if event.type() == QEvent.Type.KeyPress:
             if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
                 if event.modifiers() != Qt.KeyboardModifier.NoModifier:
