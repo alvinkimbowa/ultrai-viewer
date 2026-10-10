@@ -29,92 +29,77 @@ def largest_piece(mask):
     return labels == int(np.argmax(sizes))
 
 
-def cartilage_edges(mask):
-    """Columns the mask covers, with the top and bottom mask row of each.
+def outline_sides(mask):
+    """The outline of a single-piece mask, split into its top and bottom sides.
 
-    The probe is at the top of the image, so the top row is the cartilage surface
-    and the bottom row is the cartilage-bone interface.
-    """
-    binary = np.asarray(mask) > 0
-    height = binary.shape[0]
-    columns = np.nonzero(binary.any(axis=0))[0]
-    top = binary.argmax(axis=0)[columns]
-    bottom = (height - 1 - binary[::-1].argmax(axis=0))[columns]
-    return columns, top, bottom
-
-
-def _bottom_side(points):
-    """The stretch of a closed outline that runs along the bottom of its shape.
-
-    points are the (x, y) pixels of the outline in tracing order. The stretch goes
-    from the left end to the right end of the shape; where an end is a vertical
-    edge, the end is its lowest pixel.
-    """
-    xs, ys = points[:, 0], points[:, 1]
-    left = np.nonzero(xs == xs.min())[0]
-    right = np.nonzero(xs == xs.max())[0]
-    start = int(left[ys[left].argmax()])
-    end = int(right[ys[right].argmax()])
-    # The sign of the enclosed area gives the tracing direction: positive runs
-    # left end -> top -> right end -> bottom on screen, where y points down.
-    area = np.sum(xs * np.roll(ys, -1) - np.roll(xs, -1) * ys)
-    count = len(points)
-    if area > 0:
-        steps = (start - end) % count
-        order = (end + np.arange(steps + 1)) % count
-        return points[order][::-1]
-    steps = (end - start) % count
-    order = (start + np.arange(steps + 1)) % count
-    return points[order]
-
-
-def bottom_surface_paths(mask, scale_x=1.0, scale_y=1.0):
-    """The cartilage-bone interface of a mask: the bottom side of its outline.
-
-    One path per connected piece of the mask: the bottom side of that piece's
-    outline from its left end to its right end, pixel by pixel as traced.
-    Returns a list of (pixels, steps): the (x, y) pixels of a path in order and
-    the length of each step between them, in the units of the two scales.
+    The probe is at the top of the image, so the top side is the cartilage surface
+    and the bottom side is the cartilage-bone interface. Each side is the (x, y)
+    pixels of the outline from the leftmost to the rightmost column of the mask,
+    pixel by pixel as traced. Where an end of the mask is a vertical edge, the top
+    side ends at its highest pixel and the bottom side at its lowest, so the edge
+    itself belongs to neither side.
     """
     binary = (np.asarray(mask) > 0).astype(np.uint8)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    paths = []
-    for contour in contours:
-        points = contour[:, 0, :].astype(np.int64)
-        pixels = _bottom_side(points)
-        moves = np.diff(pixels, axis=0)
-        paths.append((pixels, np.hypot(moves[:, 0] * scale_x, moves[:, 1] * scale_y)))
-    return paths
+    points = contours[0][:, 0, :].astype(np.int64)
+    xs, ys = points[:, 0], points[:, 1]
+    left = np.nonzero(xs == xs.min())[0]
+    right = np.nonzero(xs == xs.max())[0]
+    count = len(points)
+
+    def stretch(first, last):
+        """The outline points met going forward round the loop from first to last."""
+        return points[(first + np.arange((last - first) % count + 1)) % count]
+
+    top_left, top_right = int(left[ys[left].argmin()]), int(right[ys[right].argmin()])
+    bottom_left, bottom_right = int(left[ys[left].argmax()]), int(right[ys[right].argmax()])
+    # The sign of the enclosed area gives the tracing direction: positive runs
+    # left end -> top -> right end -> bottom on screen, where y points down.
+    area = np.sum(xs * np.roll(ys, -1) - np.roll(xs, -1) * ys)
+    if area > 0:
+        return stretch(top_left, top_right), stretch(bottom_right, bottom_left)[::-1]
+    return stretch(top_right, top_left)[::-1], stretch(bottom_left, bottom_right)
 
 
-def path_length(paths, start, stop):
-    """Length of the parts of paths that lie in columns start to stop.
+def top_surface(top_side):
+    """Columns the top side of an outline covers, with its row in each.
+
+    The row is the highest point of the top side in that column.
+    """
+    first = top_side[:, 0].min()
+    columns = np.arange(first, top_side[:, 0].max() + 1)
+    rows = np.full(len(columns), np.iinfo(np.int64).max)
+    np.minimum.at(rows, top_side[:, 0] - first, top_side[:, 1])
+    return columns, rows
+
+
+def step_lengths(pixels, scale_x=1.0, scale_y=1.0):
+    """Length of each step between consecutive (x, y) pixels of a path, in the
+    units of the two scales."""
+    moves = np.diff(pixels, axis=0)
+    return np.hypot(moves[:, 0] * scale_x, moves[:, 1] * scale_y)
+
+
+def path_length(path, start, stop):
+    """Length of the part of a path that lies in columns start to stop.
 
     A step between two columns counts half towards each.
     """
-    total = 0.0
-    for pixels, steps in paths:
-        inside = ((pixels[:, 0] >= start) & (pixels[:, 0] < stop)).astype(float)
-        total += float(np.sum(steps * (inside[:-1] + inside[1:]) / 2.0))
-    return total
+    pixels, steps = path
+    inside = ((pixels[:, 0] >= start) & (pixels[:, 0] < stop)).astype(float)
+    return float(np.sum(steps * (inside[:-1] + inside[1:]) / 2.0))
 
 
-def suggest_centre_x(mask):
-    """Column where the cartilage's top surface dips deepest into the image."""
-    columns, top, _ = cartilage_edges(mask)
-    if len(columns) == 0:
-        return None
-    deepest = columns[top == top.max()]
+def suggest_centre_x(columns, rows):
+    """Column where a top surface, as given by top_surface, dips deepest."""
+    deepest = columns[rows == rows.max()]
     return float(deepest[len(deepest) // 2])
 
 
-def surface_point(mask, centre_x):
-    """The point on the top surface at centre_x, or at the nearest covered column."""
-    columns, top, _ = cartilage_edges(mask)
-    if len(columns) == 0:
-        return None
+def surface_point(columns, rows, centre_x):
+    """The point of a top surface at centre_x, or at the nearest covered column."""
     index = int(np.abs(columns - centre_x).argmin())
-    return float(centre_x), float(top[index])
+    return float(centre_x), float(rows[index])
 
 
 INTERCONDYLAR_WIDTH_FRACTION = 0.25
@@ -156,13 +141,13 @@ def to_grayscale(image):
 MEASURES = ("area", "length", "thickness", "echo_mean", "echo_sd")
 
 
-def _measure_columns(gray, binary, paths, start, stop, scale_x, scale_y):
+def _measure_columns(gray, binary, path, start, stop, scale_x, scale_y):
     values = dict.fromkeys(MEASURES, np.nan)
     region = binary[:, start:stop]
     if not region.any():
         return values
     values["area"] = float(region.sum()) * scale_x * scale_y
-    values["length"] = path_length(paths, start, stop)
+    values["length"] = path_length(path, start, stop)
     if values["length"] > 0:
         values["thickness"] = values["area"] / values["length"]
     if gray is not None:
@@ -210,10 +195,11 @@ def measure(
     gray = None
     if image is not None and image.shape[:2] == binary.shape[:2]:
         gray = to_grayscale(image)
-    paths = bottom_surface_paths(binary, scale_x, scale_y)
+    top_side, bottom_side = outline_sides(binary)
+    path = bottom_side, step_lengths(bottom_side, scale_x, scale_y)
     width = binary.shape[1]
     if centre_x is None:
-        centre_x = suggest_centre_x(binary)
+        centre_x = suggest_centre_x(*top_surface(top_side))
     result["centre_x"] = centre_x
     spans = {
         "whole": (0, width),
@@ -221,7 +207,7 @@ def measure(
     }
     for name, (start, stop) in spans.items():
         result["regions"][name] = _measure_columns(
-            gray, binary, paths, start, stop, scale_x, scale_y
+            gray, binary, path, start, stop, scale_x, scale_y
         )
     return result
 

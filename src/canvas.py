@@ -12,12 +12,12 @@ from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF
 from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
 
 from .measurements import (
-    bottom_surface_paths,
-    cartilage_edges,
     largest_piece,
+    outline_sides,
     region_columns,
     suggest_centre_x,
     surface_point,
+    top_surface,
 )
 
 
@@ -502,30 +502,31 @@ class Canvas(QWidget):
             return None
         binary = largest_piece(binary)
         width = binary.shape[1]
+        top_side, pixels = outline_sides(binary)
+        top = top_surface(top_side)
         if self.region_view:
             centre_x = self.centre_x
             if centre_x is None:
-                centre_x = suggest_centre_x(binary)
+                centre_x = suggest_centre_x(*top)
             spans = region_columns(width, centre_x, self.knee_side, self.roi_box())
-            centre = surface_point(binary, centre_x)
+            centre = surface_point(*top, centre_x)
         else:
             spans = {"whole": (0, width)}
             centre = None
         # The line drawn is the path the length is measured along, cut where it
         # passes from one region into the next.
         bone_lines = []
-        for pixels, _ in bottom_surface_paths(binary):
-            for name, (start, stop) in spans.items():
-                inside = np.nonzero((pixels[:, 0] >= start) & (pixels[:, 0] < stop))[0]
-                if len(inside) == 0:
-                    continue
-                breaks = np.nonzero(np.diff(inside) > 1)[0] + 1
-                for run in np.split(inside, breaks):
-                    # One pixel further, so the colours of two regions meet.
-                    last = min(run[-1] + 1, len(pixels) - 1)
-                    run = pixels[run[0] : last + 1]
-                    bone_lines.append((name, run[:, 0] + 0.5, run[:, 1] + 0.5))
-        return {"spans": spans, "centre": centre, "bone_lines": bone_lines}
+        for name, (start, stop) in spans.items():
+            inside = np.nonzero((pixels[:, 0] >= start) & (pixels[:, 0] < stop))[0]
+            if len(inside) == 0:
+                continue
+            breaks = np.nonzero(np.diff(inside) > 1)[0] + 1
+            for run in np.split(inside, breaks):
+                # One pixel further, so the colours of two regions meet.
+                last = min(run[-1] + 1, len(pixels) - 1)
+                run = pixels[run[0] : last + 1]
+                bone_lines.append((name, run[:, 0] + 0.5, run[:, 1] + 0.5))
+        return {"spans": spans, "centre": centre, "top": top, "bone_lines": bone_lines}
 
     def _centre_marker_hit(self, pos):
         overlay = self._region_overlay
@@ -1267,7 +1268,7 @@ class Canvas(QWidget):
             font.setBold(True)
             painter.setFont(font)
             metrics = painter.fontMetrics()
-            columns, top, _ = cartilage_edges(largest_piece(self.visible_mask()))
+            columns, top = overlay["top"]
             for name, (start, stop) in overlay["spans"].items():
                 inside = (columns >= start) & (columns < stop)
                 if not inside.any():
