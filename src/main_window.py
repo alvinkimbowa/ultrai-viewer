@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
         self._base_title = "UltAI Viewer"
         self.setWindowTitle(self._base_title)
         self._sidebar_width = 340
+        self._measurements_sidebar_width = 280
 
         self._create_menu_bar()
 
@@ -187,17 +188,11 @@ class MainWindow(QMainWindow):
         self.canvas.image_loaded.connect(self._update_title_with_image)
         self.canvas.navigation_requested.connect(self._on_canvas_navigation_requested)
 
-        sidebar = self._build_sidebar()
-        sidebar_scroll = QScrollArea()
-        sidebar_scroll.setWidgetResizable(True)
-        sidebar_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        sidebar_scroll.setWidget(sidebar)
-        sidebar_scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        scroll_extent = sidebar_scroll.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
-        sidebar_scroll.setMinimumWidth(self._sidebar_width + scroll_extent + 4)
-        sidebar_scroll.setMaximumWidth(self._sidebar_width + scroll_extent + 4)
-        root_layout.addWidget(sidebar_scroll, stretch=0)
+        self._sidebar_panels = []
+        root_layout.addWidget(
+            self._scrolling_sidebar(self._build_sidebar(), self._sidebar_width),
+            stretch=0,
+        )
 
         canvas_panel = QWidget()
         canvas_layout = QVBoxLayout(canvas_panel)
@@ -249,6 +244,14 @@ class MainWindow(QMainWindow):
         frame_nav_row.addWidget(self.frame_slider, stretch=1)
         canvas_layout.addLayout(frame_nav_row, stretch=0)
         root_layout.addWidget(canvas_panel, stretch=1)
+        root_layout.addWidget(
+            self._scrolling_sidebar(
+                self._build_measurements_sidebar(),
+                self._measurements_sidebar_width,
+                scrollbar_space=False,
+            ),
+            stretch=0,
+        )
 
         self.statusBar().showMessage("Ready")
         self._prev_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Left), self)
@@ -1540,22 +1543,45 @@ class MainWindow(QMainWindow):
 
         self._play_btn_set_play()
 
-    def _build_sidebar(self):
+    def _scrolling_sidebar(self, panel, width, scrollbar_space=True):
+        self._sidebar_panels.append(panel)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(panel)
+        scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        # The space kept free for a scroll bar sits to the right of the
+        # contents, which pushes them off centre while no scroll bar shows.
+        if scrollbar_space:
+            width += scroll.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent) + 4
+        scroll.setFixedWidth(width)
+        return scroll
+
+    def _sidebar_panel_layout(self, width):
         panel = QWidget()
-        panel.setMaximumWidth(self._sidebar_width)
+        panel.setMaximumWidth(width)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
+        return panel, layout
 
-        def configure_button(button):
-            min_height = max(26, int(button.fontMetrics().height() * 1.6))
-            button.setMinimumHeight(min_height)
-            button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+    @staticmethod
+    def _configure_button(button):
+        min_height = max(26, int(button.fontMetrics().height() * 1.6))
+        button.setMinimumHeight(min_height)
+        button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        def section_header(text):
-            header = QLabel(text)
-            header.setObjectName("sectionHeader")
-            return header
+    @staticmethod
+    def _section_header(text):
+        header = QLabel(text)
+        header.setObjectName("sectionHeader")
+        return header
+
+    def _build_sidebar(self):
+        panel, layout = self._sidebar_panel_layout(self._sidebar_width)
+        configure_button = self._configure_button
+        section_header = self._section_header
 
         layout.addWidget(section_header("Files"))
         files_row = QHBoxLayout()
@@ -1717,13 +1743,15 @@ class MainWindow(QMainWindow):
         undo_redo_row.addWidget(self.redo_btn)
         layout.addLayout(undo_redo_row)
 
-        layout.addSpacing(6)
-        sep_end = QFrame()
-        sep_end.setFrameShape(QFrame.Shape.HLine)
-        sep_end.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep_end)
+        layout.addStretch()
 
-        layout.addWidget(section_header("Measurements"))
+        return panel
+
+    def _build_measurements_sidebar(self):
+        panel, layout = self._sidebar_panel_layout(self._measurements_sidebar_width)
+        configure_button = self._configure_button
+
+        layout.addWidget(self._section_header("Measurements"))
         self.px_per_mm_x_spin = QDoubleSpinBox()
         self.px_per_mm_y_spin = QDoubleSpinBox()
         for spin, direction in (
@@ -1740,10 +1768,11 @@ class MainWindow(QMainWindow):
                 "in pixels."
             )
         px_per_mm_row = QHBoxLayout()
+        px_per_mm_row.setSpacing(4)
         px_per_mm_row.addWidget(QLabel("Pixels per mm:"))
         px_per_mm_row.addWidget(QLabel("x"))
         px_per_mm_row.addWidget(self.px_per_mm_x_spin)
-        px_per_mm_row.addSpacing(8)
+        px_per_mm_row.addSpacing(4)
         px_per_mm_row.addWidget(QLabel("y"))
         px_per_mm_row.addWidget(self.px_per_mm_y_spin)
         px_per_mm_row.addStretch(1)
@@ -1817,15 +1846,8 @@ class MainWindow(QMainWindow):
         results_grid.setColumnStretch(0, 1)
         layout.addLayout(results_grid)
 
-        layout.addSpacing(6)
-        sep_measurements = QFrame()
-        sep_measurements.setFrameShape(QFrame.Shape.HLine)
-        sep_measurements.setFrameShadow(QFrame.Shadow.Sunken)
-        layout.addWidget(sep_measurements)
-
         layout.addStretch()
 
-        self._sidebar_panel = panel
         return panel
 
     def _wire_actions(self):
@@ -1876,7 +1898,9 @@ class MainWindow(QMainWindow):
             # event passes it on, so the sidebar itself still scrolls.
             if isinstance(
                 obj, (QComboBox, QSlider, QAbstractSpinBox)
-            ) and self._sidebar_panel.isAncestorOf(obj):
+            ) and any(
+                panel.isAncestorOf(obj) for panel in self._sidebar_panels
+            ):
                 event.ignore()
                 return True
             return False
@@ -2079,7 +2103,7 @@ class MainWindow(QMainWindow):
         target_h = int(screen_rect.height() * 0.45)
         width = min(target_w, max_w)
         height = min(target_h, max_h)
-        min_w = min(1000, max_w)
+        min_w = min(1300, max_w)
         min_h = min(650, max_h)
         width = max(min_w, width)
         height = max(min_h, height)
