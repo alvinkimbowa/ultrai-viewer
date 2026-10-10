@@ -106,10 +106,17 @@ def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
         stored = unrotate_mask(stored, angle, original_shape)
     mask_uint8 = stored.astype(np.uint8) * 255
     mask_path.parent.mkdir(parents=True, exist_ok=True)
-    if mask_path.suffix.lower() in (".tif", ".tiff"):
-        tifffile.imwrite(str(mask_path), mask_uint8)
-    elif not cv2.imwrite(str(mask_path), mask_uint8):
-        raise OSError(f"Failed to save mask: {mask_path.name}")
+    # The file is written under another name and then moved into place, so that
+    # a mask being saved by a segmentation run is never read half-written.
+    partial = mask_path.with_name(f".{mask_path.stem}.partial{mask_path.suffix}")
+    try:
+        if mask_path.suffix.lower() in (".tif", ".tiff"):
+            tifffile.imwrite(str(partial), mask_uint8)
+        elif not cv2.imwrite(str(partial), mask_uint8):
+            raise OSError(f"Failed to save mask: {mask_path.name}")
+        os.replace(partial, mask_path)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def box_to_segment(image, box):
@@ -2371,6 +2378,7 @@ class MainWindow(QMainWindow):
         would otherwise keep the earlier state of an image the run did segment,
         and that state would be saved over the result on leaving the image.
         """
+        self._measurement_logs.clear()
         if self._mode == "sequence" and self._sequence_paths and self._sequence_index >= 0:
             self._load_sequence_image()
         elif self._mode == "video" and self._video_path and self._video_frame_index >= 0:
@@ -3821,6 +3829,7 @@ class BatchInferenceWorker(QObject):
         self._knee_side = knee_side
         self._rois = rois or {}
         self._measurement_log = None
+        self._measured = []
         self._cancel_event = Event()
 
     def cancel(self):
@@ -3828,24 +3837,34 @@ class BatchInferenceWorker(QObject):
 
     @pyqtSlot()
     def run(self):
+        # The outcome is announced only once the measurements are on disk, so
+        # that whoever reacts to it reads the complete file.
         try:
             self._measurement_log = MeasurementLog(*self._measurements)
-            self._segment_images()
-            self._measurement_log.save()
+            signal, values = self._segment_images()
+            self._save_measurements()
         except OSError as exc:
-            self.error.emit(f"Could not save measurements: {exc}")
+            signal, values = self.error, (f"Could not save measurements: {exc}",)
+        signal.emit(*values)
+
+    def _save_measurements(self):
+        """Put the rows of the images segmented into the measurements file as it
+        is on disk, keeping any row changed there while the run was going."""
+        log = MeasurementLog(*self._measurements)
+        for name in self._measured:
+            log.put(name, "", self._measurement_log.get(name, ""))
+        log.save()
 
     def _segment_images(self):
+        """Segment the images; returns the signal to end with and its values."""
         total = len(self._image_paths)
         if total == 0:
-            self.error.emit("No images found for batch segmentation.")
-            return
+            return self.error, ("No images found for batch segmentation.",)
         processed = 0
         skipped = 0
         for idx, image_path in enumerate(self._image_paths, start=1):
             if self._cancel_event.is_set():
-                self.canceled.emit()
-                return
+                return self.canceled, ()
             self.image_started.emit(image_path, idx, total)
             if not self._overwrite_existing and self._existing_mask_path(image_path):
                 skipped += 1
@@ -3882,15 +3901,14 @@ class BatchInferenceWorker(QObject):
                         limits=box,
                         rotation=angle,
                     )
+                    self._measured.append(Path(image_path).name)
             except Exception as exc:
                 if str(exc).lower().startswith("inference canceled"):
-                    self.canceled.emit()
-                    return
-                self.error.emit(str(exc))
-                return
+                    return self.canceled, ()
+                return self.error, (str(exc),)
             processed += 1
             self.progress.emit(idx, total)
-        self.finished.emit(processed, skipped)
+        return self.finished, (processed, skipped)
 
     def _existing_mask_path(self, image_path):
         found = find_mask_files(self._output_dir, image_path, self._image_paths)

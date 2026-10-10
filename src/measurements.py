@@ -3,6 +3,7 @@ Measurements computed from a segmented cartilage mask.
 """
 
 import csv
+import os
 from pathlib import Path
 
 import cv2
@@ -428,9 +429,16 @@ class MeasurementLog:
             file_name, frame = key
             return file_name, int(frame) if frame.isdigit() else -1
 
-        with open(self.path, "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=MEASUREMENT_COLUMNS)
-            writer.writeheader()
-            for key in sorted(self._rows, key=order):
-                writer.writerow(self._rows[key])
+        # Written under another name and then moved into place, so that the
+        # file is never read half-written.
+        partial = self.path.with_name(f".{self.path.name}.partial")
+        try:
+            with open(partial, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MEASUREMENT_COLUMNS)
+                writer.writeheader()
+                for key in sorted(self._rows, key=order):
+                    writer.writerow(self._rows[key])
+            os.replace(partial, self.path)
+        finally:
+            partial.unlink(missing_ok=True)
         self._dirty = False
