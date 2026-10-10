@@ -2780,12 +2780,14 @@ class MainWindow(QMainWindow):
         self._set_video_frame_index(last_index)
 
     def _show_image_file(self, path):
+        """Show an image file; returns False, with an empty canvas, if it cannot be shown."""
         try:
-            image = self.canvas._read_image(path)
+            self._show_image(self.canvas._read_image(path), path)
         except Exception as exc:
-            QMessageBox.critical(self, "Load failed", str(exc))
-            return
-        self._show_image(image, path)
+            self.canvas.clear_image()
+            QMessageBox.critical(self, "Load failed", f"{Path(path).name}: {exc}")
+            return False
+        return True
 
     def _load_sequence_image(self):
         if self._mode != "sequence":
@@ -2793,9 +2795,9 @@ class MainWindow(QMainWindow):
         if self._sequence_index < 0 or self._sequence_index >= len(self._sequence_paths):
             return
         path = self._sequence_paths[self._sequence_index]
-        self._show_image_file(path)
-        self._show_saved_mask()
-        self._restore_frame_inputs()
+        if self._show_image_file(path):
+            self._show_saved_mask()
+            self._restore_frame_inputs()
         self._update_navigation_buttons()
         self._set_slider_value(self._sequence_index)
 
