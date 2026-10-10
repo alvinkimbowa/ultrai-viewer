@@ -153,10 +153,10 @@ Results are kept per model, inside the output folder you select. A model's masks
 An ROI is a box you draw on an image so that only the part inside it is segmented. Each image or video frame has its own ROI, or none.
 
 - **Draw**: choose **ROI Box** in the Tools dropdown and drag a box on the image. To replace a box, start the drag outside it.
-- **Apply to others**: after you draw, the app asks whether to apply the box to all the other loaded images and frames. Yes replaces whatever ROI they had; where one of them already has a saved mask under the selected model, that mask is trimmed to the box straight away. No keeps the box on this image or frame only. Cancel discards the box you just drew and puts back the ROI the image had before, if any. Afterwards each image or frame can still be given a different ROI of its own.
+- A box you draw belongs to that image or frame only. Ctrl+Z takes it back.
 - **Adjust**: with the ROI Box or the Select tool, drag an edge or a corner to resize the box, or drag inside it to move it. This changes the ROI of that image or frame only.
 - **Delete**: right-click the box and choose **Delete ROI**, or click it and press the Delete key. Only that image or frame loses its ROI.
-- **Apply ROI to all** (right-click a box): gives the box, as it is now, to all the other loaded images and frames, after asking. Use it after moving or resizing a box. It does the same as answering Yes right after drawing.
+- **Apply ROI to all** (right-click a box): gives the box, as it is now, to all the other loaded images and frames, after asking. It replaces whatever ROI they had; where one of them already has a saved mask under the selected model, that mask is trimmed to the box straight away. Afterwards each image or frame can still be given a different ROI of its own.
 - **Clear all ROIs** (Edit menu, or right-click a box): removes the ROI from every loaded image and frame, and from their rows in the selected model's measurements file. Saved masks are not changed.
 - Segment image, Segment video and Segment all files use each image's or frame's own ROI, and the whole image where there is none.
 - A mask that already exists is hidden outside the box. Only the part inside is saved and measured. The hidden part comes back if you enlarge or delete the box before leaving that image or frame.

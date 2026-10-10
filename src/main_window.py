@@ -953,11 +953,8 @@ class MainWindow(QMainWindow):
                         found.setdefault(folder, []).append((video_path, name, frame))
         return found
 
-    def _on_roi_drawn(self, previous):
-        if self._offer_roi_to_others(can_discard=True) == QMessageBox.StandardButton.Cancel:
-            self.canvas.drop_last_history()
-            self.canvas.set_roi(previous)
-            self._save_current_roi()
+    def _on_roi_drawn(self):
+        self._save_current_roi()
 
     def _undo(self):
         """Take back the latest step: an edit on the canvas or a step across files."""
@@ -1070,11 +1067,10 @@ class MainWindow(QMainWindow):
             message += f"; {skipped} edited since were left as they are"
         self.statusBar().showMessage(message)
 
-    def _offer_roi_to_others(self, can_discard=False):
+    def _offer_roi_to_others(self):
         """Ask whether the ROI on screen should go to every other image and frame.
 
-        Returns the button chosen, or None when nothing was asked. can_discard adds
-        a Cancel button for throwing away a box that was just drawn.
+        Returns the button chosen, or None when nothing was asked.
         """
         if self.canvas.roi_box() is None or not self._save_current_roi():
             return None
@@ -1092,12 +1088,12 @@ class MainWindow(QMainWindow):
             "It replaces any ROI they have, and where one of them already has a "
             "saved mask, the mask is trimmed to the ROI."
         )
-        buttons = QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        if can_discard:
-            text += "\n\nCancel discards the box you just drew."
-            buttons |= QMessageBox.StandardButton.Cancel
         choice = QMessageBox.question(
-            self, "Apply ROI", text, buttons, QMessageBox.StandardButton.No
+            self,
+            "Apply ROI",
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
         if choice == QMessageBox.StandardButton.Yes:
             self._apply_roi_to(targets, self.canvas.roi_box(), count)

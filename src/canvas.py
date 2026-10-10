@@ -34,8 +34,7 @@ class Canvas(QWidget):
     image_loaded = pyqtSignal(str)
     navigation_requested = pyqtSignal(int)
     mask_changed = pyqtSignal()
-    # Carries the box the image had before the drawn one replaced it, or None.
-    roi_drawn = pyqtSignal(object)
+    roi_drawn = pyqtSignal()
     roi_changed = pyqtSignal()
     delete_requested = pyqtSignal(str)
 
@@ -310,11 +309,6 @@ class Canvas(QWidget):
             self._push_history()
         elif self._undo_stack:
             self._undo_stack[-1] = (self._undo_stack[-1][0], self.roi_box())
-
-    def drop_last_history(self):
-        """Forget the latest recorded edit without bringing back what it replaced."""
-        if len(self._undo_stack) > 1:
-            self._undo_stack.pop()
 
     def history_depth(self):
         return len(self._undo_stack)
@@ -1062,9 +1056,8 @@ class Canvas(QWidget):
             self._roi_draft = None
             self.update()
             if abs(x1 - x0) >= 1 and abs(y1 - y0) >= 1:
-                previous = self.roi_box()
                 self.set_roi((x0, x1, y0, y1), record=True)
-                self.roi_drawn.emit(previous)
+                self.roi_drawn.emit()
             return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
