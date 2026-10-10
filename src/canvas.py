@@ -6,6 +6,7 @@ import os
 import numpy as np
 import cv2
 import tifffile
+from .tiff_stack import read_tiff_frame
 from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox, QScrollBar, QStyle, QMenu
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF
 from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
@@ -633,7 +634,8 @@ class Canvas(QWidget):
     def _read_image(self, file_path):
         lower_path = file_path.lower()
         if lower_path.endswith((".tif", ".tiff")):
-            image = tifffile.imread(file_path)
+            # Of a TIFF holding several images, the first one is used.
+            image = read_tiff_frame(file_path, 0)
         else:
             image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if image is None:

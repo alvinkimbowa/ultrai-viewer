@@ -41,6 +41,7 @@ from .measurements import (
     REGION_NAMES,
     measure,
 )
+from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
 from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
 from threading import Event
 from collections import OrderedDict
@@ -943,7 +944,7 @@ class MainWindow(QMainWindow):
         if self._video_output_dir and self._video_paths:
             folder = str(self._video_output_dir)
             for video_path in self._video_paths:
-                capture = cv2.VideoCapture(video_path)
+                capture = open_capture(video_path)
                 frame_count = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
                 capture.release()
                 name = Path(video_path).name
@@ -1143,7 +1144,7 @@ class MainWindow(QMainWindow):
                             if capture_path != source_path:
                                 if capture is not None:
                                     capture.release()
-                                capture = cv2.VideoCapture(source_path)
+                                capture = open_capture(source_path)
                                 capture_path, position = source_path, 0
                             # Frames are read in order because seeking to a frame
                             # number is not exact in every video format.
@@ -1422,7 +1423,7 @@ class MainWindow(QMainWindow):
         progress.setWindowTitle("Measurements")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(400)
-        capture = cv2.VideoCapture(self._video_path)
+        capture = open_capture(self._video_path)
         position = 0
         try:
             log = self._measurement_log(self._video_output_dir)
@@ -2262,7 +2263,7 @@ class MainWindow(QMainWindow):
 
         total_frames = 0
         for video_path in video_paths:
-            capture = cv2.VideoCapture(video_path)
+            capture = open_capture(video_path)
             if capture.isOpened():
                 total_frames += max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
             capture.release()
@@ -2425,7 +2426,10 @@ class MainWindow(QMainWindow):
         if dialog_result is None:
             return
         kind, paths, output_dir = dialog_result
-        if kind == "video":
+        # A single TIFF file holding several images is gone through frame by
+        # frame, as a video is.
+        stack = kind != "video" and len(paths) == 1 and tiff_frame_count(paths[0]) > 1
+        if kind == "video" or stack:
             self._load_video(paths, output_dir)
         else:
             self._load_sequence(paths, output_dir)
@@ -2615,7 +2619,7 @@ class MainWindow(QMainWindow):
             self._video_capture = None
         self._video_list_index = video_index
         self._video_path = self._video_paths[video_index]
-        capture = cv2.VideoCapture(self._video_path)
+        capture = open_capture(self._video_path)
         if not capture.isOpened():
             QMessageBox.warning(self, "Load failed", f"Could not open video: {Path(self._video_path).name}")
             capture.release()
@@ -2815,7 +2819,7 @@ class MainWindow(QMainWindow):
             return False
         if self._video_capture is not None:
             self._video_capture.release()
-        capture = cv2.VideoCapture(self._video_path)
+        capture = open_capture(self._video_path)
         if not capture.isOpened():
             self._video_capture = None
             return False
@@ -2825,7 +2829,7 @@ class MainWindow(QMainWindow):
 
     def _supports_random_seek(self, video_path):
         suffix = Path(video_path).suffix.lower()
-        return suffix in {".mp4", ".m4v", ".mov"}
+        return suffix in {".mp4", ".m4v", ".mov"} or is_tiff(video_path)
 
     def _decode_video_frame(self, frame_index):
         if frame_index in self._video_frame_cache:
@@ -3887,7 +3891,8 @@ class BatchInferenceWorker(QObject):
     def _load_image(self, file_path):
         lower_path = file_path.lower()
         if lower_path.endswith((".tif", ".tiff")):
-            image = tifffile.imread(file_path)
+            # Of a TIFF holding several images, the first one is used.
+            image = read_tiff_frame(file_path, 0)
         else:
             image = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if image is None:
@@ -3945,7 +3950,7 @@ class VideoBatchInferenceWorker(QObject):
         try:
             total_frames = 0
             for video_path in self._video_paths:
-                capture = cv2.VideoCapture(video_path)
+                capture = open_capture(video_path)
                 if not capture.isOpened():
                     capture.release()
                     raise RuntimeError(f"Could not open video: {Path(video_path).name}")
@@ -3962,7 +3967,7 @@ class VideoBatchInferenceWorker(QObject):
             measurement_log = MeasurementLog(*self._measurements)
             for video_number, video_path in enumerate(self._video_paths, start=1):
                 video_name = Path(video_path).name
-                capture = cv2.VideoCapture(video_path)
+                capture = open_capture(video_path)
                 if not capture.isOpened():
                     capture.release()
                     raise RuntimeError(f"Could not open video: {video_name}")

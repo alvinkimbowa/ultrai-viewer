@@ -40,6 +40,7 @@ The current app size is ~800 MB. Future versions will be smaller and more optimi
 
 - Image type: 2D knee ultrasound images.
 - Preferred format: grayscale TIFF. PNG, JPEG, and BMP are also supported.
+- A TIFF file that holds several images in one: loaded on its own, it opens like a video, each of its images being a frame, with masks saved per frame as for a video. Loaded together with other images, it opens as its first image.
 - Recommendation: use clean, well-cropped ROI images for best segmentation.
 
 ## Models and Speed
