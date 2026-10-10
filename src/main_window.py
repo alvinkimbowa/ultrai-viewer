@@ -31,9 +31,18 @@ from PyQt6.QtWidgets import (
     QGridLayout,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+)
 
 from .canvas import Canvas, REGION_COLORS
+from .theme import TEXT, TEXT_DISABLED
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from .rois import RoiStore
 from .measurements import (
@@ -237,26 +246,6 @@ class MainWindow(QMainWindow):
         self.frame_slider.setFixedHeight(26)
         self.frame_slider.setSingleStep(1)
         self.frame_slider.setPageStep(1)
-        self.frame_slider.setStyleSheet(
-            """
-            QSlider::groove:horizontal {
-                height: 12px;
-                background: #6b6b6b;
-                border-radius: 6px;
-            }
-            QSlider::sub-page:horizontal {
-                background: #9a9a9a;
-                border-radius: 6px;
-            }
-            QSlider::handle:horizontal {
-                background: #e6e6e6;
-                border: 1px solid #4a4a4a;
-                width: 16px;
-                margin: -4px 0;
-                border-radius: 8px;
-            }
-            """
-        )
         frame_nav_row.addWidget(self.frame_slider, stretch=1)
         canvas_layout.addLayout(frame_nav_row, stretch=0)
         root_layout.addWidget(canvas_panel, stretch=1)
@@ -1487,7 +1476,25 @@ class MainWindow(QMainWindow):
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "icons" / f"{name}.svg"
         if not icon_path.exists():
             return None
-        return QIcon(str(icon_path))
+        source = QIcon(str(icon_path)).pixmap(QSize(64, 64))
+        if source.isNull():
+            return None
+        # The icon files are drawn in near black, which does not show on the
+        # dark theme, so the shape is repainted in the text colours.
+        icon = QIcon()
+        for mode, color in (
+            (QIcon.Mode.Normal, TEXT),
+            (QIcon.Mode.Disabled, TEXT_DISABLED),
+        ):
+            tinted = QPixmap(source)
+            painter = QPainter(tinted)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceIn
+            )
+            painter.fillRect(tinted.rect(), QColor(color))
+            painter.end()
+            icon.addPixmap(tinted, mode)
+        return icon
 
     def _init_transport_icons(self):
         icon_size = QSize(14, 14)
@@ -1545,7 +1552,12 @@ class MainWindow(QMainWindow):
             button.setMinimumHeight(min_height)
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
-        layout.addWidget(QLabel("Files"))
+        def section_header(text):
+            header = QLabel(text)
+            header.setObjectName("sectionHeader")
+            return header
+
+        layout.addWidget(section_header("Files"))
         files_row = QHBoxLayout()
         self.load_btn = QPushButton("Load files")
         configure_button(self.load_btn)
@@ -1585,7 +1597,7 @@ class MainWindow(QMainWindow):
         sep3.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep3)
 
-        layout.addWidget(QLabel("Image Analysis"))
+        layout.addWidget(section_header("Image Analysis"))
         model_row = QHBoxLayout()
         self.model_picker = QComboBox()
         self.model_picker.addItem("No models loaded")
@@ -1629,7 +1641,7 @@ class MainWindow(QMainWindow):
         sep4.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep4)
 
-        layout.addWidget(QLabel("Edit"))
+        layout.addWidget(section_header("Edit"))
         tools_row = QHBoxLayout()
         tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
@@ -1711,7 +1723,7 @@ class MainWindow(QMainWindow):
         sep_end.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(sep_end)
 
-        layout.addWidget(QLabel("Measurements"))
+        layout.addWidget(section_header("Measurements"))
         self.px_per_mm_x_spin = QDoubleSpinBox()
         self.px_per_mm_y_spin = QDoubleSpinBox()
         for spin, direction in (

@@ -19,6 +19,7 @@ from .measurements import (
     surface_point,
     top_surface,
 )
+from .theme import SURFACE
 
 
 REGION_COLORS = {
@@ -1122,7 +1123,7 @@ class Canvas(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), Qt.GlobalColor.darkGray)
+        painter.fillRect(self.rect(), QColor(SURFACE))
         if self.pixmap is None:
             painter.setPen(Qt.GlobalColor.white)
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Load an image to begin")

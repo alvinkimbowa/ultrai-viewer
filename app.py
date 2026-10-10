@@ -11,10 +11,12 @@ import onnxruntime  # noqa: F401
 
 from PyQt6.QtWidgets import QApplication
 from src.main_window import MainWindow
+from src.theme import apply_theme
 
 
 def main():
     app = QApplication(sys.argv)
+    apply_theme(app)
     app.setApplicationName("UltAI Viewer")
     window = MainWindow()
     window.show()
