@@ -2362,8 +2362,20 @@ class MainWindow(QMainWindow):
             message += f", {skipped} existing image(s) kept"
         self.statusBar().showMessage(f"{message}.")
         self._close_batch_dialog()
-        if self._sequence_paths and self._sequence_index >= 0:
+        self._show_batch_result()
+
+    def _show_batch_result(self):
+        """Show what a segmentation run saved for the image or frame on screen.
+
+        Also needed after a run that was cancelled or failed part-way: the canvas
+        would otherwise keep the earlier state of an image the run did segment,
+        and that state would be saved over the result on leaving the image.
+        """
+        if self._mode == "sequence" and self._sequence_paths and self._sequence_index >= 0:
             self._load_sequence_image()
+        elif self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            if self._shown_mask_path() is not None:
+                self._show_saved_mask()
 
     def _on_video_started(self, video_name, video_number, video_count, frame_count):
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
@@ -2394,15 +2406,14 @@ class MainWindow(QMainWindow):
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
             self._batch_dialog.mark_complete()
         self._close_batch_dialog()
-        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
-            if self._shown_mask_path() is not None:
-                self._show_saved_mask()
+        self._show_batch_result()
 
     def _on_batch_canceled(self):
         self.statusBar().showMessage("Batch segmentation canceled")
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
             self._batch_dialog.mark_canceling()
         self._close_batch_dialog()
+        self._show_batch_result()
 
     def _on_batch_error(self, message):
         QMessageBox.warning(self, "Batch error", message)
@@ -2410,6 +2421,7 @@ class MainWindow(QMainWindow):
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
             self._batch_dialog.mark_stopped()
         self._close_batch_dialog()
+        self._show_batch_result()
 
     def _on_batch_thread_done(self):
         self._batch_thread = None
