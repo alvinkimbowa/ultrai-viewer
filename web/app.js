@@ -23,9 +23,10 @@ const state = {
   selectedInstance: null, outputPromptReady: false,
 };
 let autoSavePromise=Promise.resolve();
-let wheelFrameSteps=0;
-let wheelFrameRunning=false;
+let wheelSteps=0;
+let wheelRunning=false;
 let sliderPreviewFrame=null;
+let sliderPreviewMedia=null;
 let sliderPreviewRequest=0;
 
 function status(text) { $("status").textContent = text; }
@@ -163,7 +164,7 @@ function rebuildMediaList(){
   select.disabled=!state.media.length; updateNavigation();
 }
 async function openMedia(index){
-  if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo();wheelFrameSteps=0;sliderPreviewFrame=null;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;state.mediaIndex=index; $("mediaList").value=String(index);
+  if(index<0||index>=state.media.length)return;await flushAutoSave();pauseVideo();wheelSteps=0;sliderPreviewFrame=null;sliderPreviewMedia=null;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;state.mediaIndex=index; $("mediaList").value=String(index);
   state.activeClass=null;state.location=null;state.selectedInstance=null;state.outputPromptReady=false;updateChipSelection();
   const item=mediaItem();
   if(item.type==="image"){
@@ -212,11 +213,29 @@ async function setFrame(index,alreadyAtTarget=false){
   await loadSavedMasksForCurrent();
   if(!state.undoByKey.has(annotationKey()))resetHistory();updateNavigation();render();
 }
-function queueWheelFrame(direction){
-  wheelFrameSteps=Math.max(-12,Math.min(12,wheelFrameSteps+direction));if(!wheelFrameRunning)processWheelFrames();
+function goToStart(){const item=mediaItem();if(!item)return;if(item.type==="video")setFrame(0);else openMedia(0);}
+function goToEnd(){const item=mediaItem();if(!item)return;if(item.type==="video")setFrame(state.frameCount-1);else openMedia(state.media.length-1);}
+function queueWheelStep(direction){
+  wheelSteps=Math.max(-12,Math.min(12,wheelSteps+direction));if(!wheelRunning)processWheelSteps();
 }
-async function processWheelFrames(){
-  wheelFrameRunning=true;pauseVideo();while(wheelFrameSteps!==0&&mediaItem()?.type==="video"){const direction=Math.sign(wheelFrameSteps),previous=state.frameIndex;wheelFrameSteps-=direction;if(direction>0)await showNextFrame();else await setFrame(previous-1);if(state.frameIndex===previous)wheelFrameSteps=0;}wheelFrameRunning=false;
+// A step is one frame within a video, and one media item for images, where every item holds a
+// single frame. Steps are queued because advancing is asynchronous and the wheel outruns it.
+async function processWheelSteps(){
+  wheelRunning=true;pauseVideo();
+  while(wheelSteps!==0){
+    const item=mediaItem();if(!item)break;
+    const direction=Math.sign(wheelSteps),remaining=wheelSteps-direction;
+    if(item.type==="video"){
+      const previous=state.frameIndex;wheelSteps=remaining;
+      if(direction>0)await showNextFrame();else await setFrame(previous-1);
+      if(state.frameIndex===previous)wheelSteps=0;
+    }else{
+      const previous=state.mediaIndex;
+      await openMedia(previous+direction);
+      wheelSteps=state.mediaIndex===previous?0:remaining;
+    }
+  }
+  wheelRunning=false;
 }
 function playNextDecodedFrame(){
   if(typeof video.requestVideoFrameCallback!=="function")return Promise.resolve(null);return new Promise(resolve=>{const start=video.currentTime;let settled=false,callbackId=0;const finish=time=>{if(settled)return;settled=true;clearTimeout(timeout);if(callbackId)video.cancelVideoFrameCallback(callbackId);pauseVideo();resolve(time);};const check=(_now,metadata)=>{if(settled)return;if(metadata.mediaTime>start+.0001)return finish(metadata.mediaTime);callbackId=video.requestVideoFrameCallback(check);};const timeout=setTimeout(()=>finish(null),500);callbackId=video.requestVideoFrameCallback(check);video.play().catch(()=>finish(null));});
@@ -230,15 +249,25 @@ async function showNextFrame(){
   await setFrame(frameIndexAt(reached),true);
 }
 function previewSliderFrame(index){
-  const item=mediaItem();if(!item||item.type!=="video")return;pauseVideo();sliderPreviewFrame=Math.max(0,Math.min(state.frameCount-1,index));$("frameLabel").textContent=`${sliderPreviewFrame+1} / ${state.frameCount}`;if(sliderPreviewRequest)return;sliderPreviewRequest=requestAnimationFrame(()=>{sliderPreviewRequest=0;if(sliderPreviewFrame===null)return;const time=frameSeekTime(sliderPreviewFrame);if(typeof video.fastSeek==="function")video.fastSeek(time);else video.currentTime=time;});
+  const item=mediaItem();if(!item)return;
+  // Images are decoded from disk rather than seeked, so dragging only moves the readout and the
+  // item itself is opened when the slider is released.
+  if(item.type!=="video"){sliderPreviewMedia=Math.max(0,Math.min(state.media.length-1,index));$("frameLabel").textContent=`${sliderPreviewMedia+1} / ${state.media.length}`;return;}
+  pauseVideo();sliderPreviewFrame=Math.max(0,Math.min(state.frameCount-1,index));$("frameLabel").textContent=`${sliderPreviewFrame+1} / ${state.frameCount}`;if(sliderPreviewRequest)return;sliderPreviewRequest=requestAnimationFrame(()=>{sliderPreviewRequest=0;if(sliderPreviewFrame===null)return;const time=frameSeekTime(sliderPreviewFrame);if(typeof video.fastSeek==="function")video.fastSeek(time);else video.currentTime=time;});
 }
-async function commitSliderFrame(){const index=sliderPreviewFrame;if(index===null)return;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;sliderPreviewFrame=null;await setFrame(index);}
+async function commitSliderFrame(){
+  if(sliderPreviewMedia!==null){const target=sliderPreviewMedia;sliderPreviewMedia=null;if(target!==state.mediaIndex)await openMedia(target);else updateNavigation();return;}
+  const index=sliderPreviewFrame;if(index===null)return;if(sliderPreviewRequest)cancelAnimationFrame(sliderPreviewRequest);sliderPreviewRequest=0;sliderPreviewFrame=null;await setFrame(index);}
 function updateNavigation(){
   const has=!!mediaItem(), isVideo=has&&mediaItem().type==="video";
   $("prevMedia").disabled=!has||state.mediaIndex<=0;$("nextMedia").disabled=!has||state.mediaIndex>=state.media.length-1;
-  for(const id of ["firstFrame","prevFrame","play","nextFrame","lastFrame","frameSlider"])$(id).disabled=!isVideo;
-  $("frameSlider").max=Math.max(0,state.frameCount-1);$("frameSlider").value=state.frameIndex;
-  $("frameLabel").textContent=isVideo?`${state.frameIndex+1} / ${state.frameCount}`:"1 / 1";
+  for(const id of ["firstFrame","prevFrame","nextFrame","lastFrame","frameSlider"])$(id).disabled=!has;
+  $("play").disabled=!isVideo;
+  // The frame controls step through a video's frames, and through the image list when the media
+  // are images, each of which is a single frame.
+  const count=isVideo?state.frameCount:state.media.length,position=isVideo?state.frameIndex:state.mediaIndex;
+  $("frameSlider").max=Math.max(0,count-1);$("frameSlider").value=position;
+  $("frameLabel").textContent=has?`${position+1} / ${count}`:"1 / 1";
 }
 function pauseVideo(){video.pause();$("play").textContent="▶";}
 async function togglePlayback(){if(video.paused){await flushAutoSave();video.play();$("play").textContent="❚❚";requestAnimationFrame(playLoop);}else pauseVideo();}
@@ -365,7 +394,7 @@ canvas.addEventListener("pointerleave",()=>{if(!state.drawing&&state.eraserCurso
 canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;const before=instances(),after=before.filter(x=>x.mask.some(Boolean));stageRemovals(before,after);state.instancesByKey.set(annotationKey(),after);pushHistory();render();queueAutoSave();}});
 canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();const point=toImagePoint(event),index=point?hitInstance(point):-1;if(index>=0){selectInstance(index);showMaskContextMenu(event);}else{hideMaskContextMenu();if($("tool").value==="polygon")completePolygon();}});
-canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;clampView();render();}else if(mediaItem().type==="video"&&event.deltaY!==0)queueWheelFrame(Math.sign(event.deltaY));},{passive:false});
+canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;clampView();render();}else if(event.deltaY!==0)queueWheelStep(Math.sign(event.deltaY));},{passive:false});
 
 async function activateOutputDirectory(handle,saveCurrent=true){state.outputDir=handle;await loadManifest();await loadSavedMasksForCurrent();render();status(`Output: ${handle.name}`);if(saveCurrent)queueAutoSave();}
 async function chooseOutput(){try{const previous=await recalledHandle("output"),options={id:"ultrai-output",mode:"readwrite"};if(previous)options.startIn=previous;const handle=await window.showDirectoryPicker(options);await rememberHandle("output",handle);await activateOutputDirectory(handle);}catch(error){if(error.name!=="AbortError")alert(error.message);}}
@@ -462,12 +491,12 @@ async function loadSavedMasksForCurrent(){
 $("loadImages").onclick=loadImages;$("loadVideos").onclick=loadVideos;$("chooseOutput").onclick=chooseOutput;$("saveMasks").onclick=saveMasks;
 $("clearData").onclick=async()=>{await flushAutoSave();pauseVideo();clearMediaUrls();state.media=[];state.mediaIndex=-1;state.selectedInstance=null;state.instancesByKey.clear();state.loadedKeys.clear();state.pendingRemovals.length=0;rebuildMediaList();render();status("Cleared");};
 $("mediaList").onchange=()=>openMedia(Number($("mediaList").value));$("prevMedia").onclick=()=>openMedia(state.mediaIndex-1);$("nextMedia").onclick=()=>openMedia(state.mediaIndex+1);
-$("firstFrame").onclick=()=>setFrame(0);$("prevFrame").onclick=()=>queueWheelFrame(-1);$("nextFrame").onclick=()=>queueWheelFrame(1);$("lastFrame").onclick=()=>setFrame(state.frameCount-1);$("frameSlider").oninput=()=>previewSliderFrame(Number($("frameSlider").value));$("frameSlider").onchange=commitSliderFrame;$("play").onclick=togglePlayback;
+$("firstFrame").onclick=goToStart;$("prevFrame").onclick=()=>queueWheelStep(-1);$("nextFrame").onclick=()=>queueWheelStep(1);$("lastFrame").onclick=goToEnd;$("frameSlider").oninput=()=>previewSliderFrame(Number($("frameSlider").value));$("frameSlider").onchange=commitSliderFrame;$("play").onclick=togglePlayback;
 $("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").onclick=redo;$("clearMasks").onclick=()=>{state.selectedInstance=null;stageRemovals(instances(),[]);state.instancesByKey.set(annotationKey(),[]);pushHistory();render();queueAutoSave();};
 for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=()=>{saveToolSettings();render();};$("tool").onchange=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 $("deleteMask").onclick=deleteSelectedInstance;$("maskClass").onchange=event=>relabelSelectedInstance(event.target.value);document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
 video.addEventListener("seeked",()=>{if(sliderPreviewFrame!==null)render();});
-document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")queueWheelFrame(-1);else if(event.key==="ArrowRight")queueWheelFrame(1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
+document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")queueWheelStep(-1);else if(event.key==="ArrowRight")queueWheelStep(1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
 async function runSelfTest(){
   try{
     const previousSettings=localStorage.getItem(TOOL_SETTINGS_KEY);$("showMasks").checked=false;$("fillMasks").checked=true;$("opacity").value="73";$("radius").value="19";saveToolSettings();$("tool").value="select";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";restoreToolSettings();if($("tool").value!=="freehand"||$("showMasks").checked||!$("fillMasks").checked||$("opacity").value!=="73"||$("radius").value!=="19")throw new Error("tool settings");if(previousSettings===null){localStorage.removeItem(TOOL_SETTINGS_KEY);$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";}else{localStorage.setItem(TOOL_SETTINGS_KEY,previousSettings);restoreToolSettings();}
