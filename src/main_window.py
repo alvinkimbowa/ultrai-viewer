@@ -60,6 +60,7 @@ from threading import Event
 from collections import OrderedDict
 import html
 import os
+import time
 from pathlib import Path
 import numpy as np
 import cv2
@@ -131,6 +132,37 @@ def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
         os.replace(partial, mask_path)
     finally:
         partial.unlink(missing_ok=True)
+
+
+def format_duration(seconds):
+    """A duration in words, rounded to what matters at its size."""
+    seconds = max(1, int(round(seconds)))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 10:
+        return f"{minutes} min {seconds:02d} s"
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes:02d} min"
+
+
+class TimeLeft:
+    """Time a run of many items still needs, from the average time per item so
+    far."""
+
+    def __init__(self, total):
+        self._total = total
+        self._start = time.monotonic()
+
+    def text(self, done):
+        if done <= 0:
+            return "Estimating time left..."
+        if done >= self._total:
+            return "Finishing..."
+        per_item = (time.monotonic() - self._start) / done
+        return f"About {format_duration(per_item * (self._total - done))} left"
 
 
 # Grey level, out of 255, above which a pixel counts as part of the picture
@@ -300,6 +332,13 @@ class MainWindow(QMainWindow):
         self._inference_worker = None
         self._inference_box = None
         self._inference_dialog = None
+        # Seconds the last Segment image took, by model, to tell how long the
+        # next one will take.
+        self._inference_seconds = {}
+        self._inference_started = 0.0
+        self._inference_clock = QTimer(self)
+        self._inference_clock.setInterval(500)
+        self._inference_clock.timeout.connect(self._show_inference_time_left)
         self._sequence_paths = []
         self._sequence_index = -1
         self._sequence_base_dir = None
@@ -1270,6 +1309,7 @@ class MainWindow(QMainWindow):
         progress.setWindowTitle(title)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(400)
+        time_left = TimeLeft(count)
         done = 0
         applied = 0
         entries = []
@@ -1284,6 +1324,9 @@ class MainWindow(QMainWindow):
                     for source_path, name, frame in frames:
                         done += 1
                         if done % 25 == 0:
+                            progress.setLabelText(
+                                f"Applying ROI...\n{time_left.text(done)}"
+                            )
                             progress.setValue(done)
                         if frame == "":
                             mask_path = self._find_sequence_mask_path(source_path)
@@ -1603,12 +1646,16 @@ class MainWindow(QMainWindow):
         progress.setWindowTitle("Measurements")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(400)
+        time_left = TimeLeft(len(frames))
         capture = open_capture(self._video_path)
         position = 0
         try:
             log = self._measurement_log(self._video_output_dir)
             for done, frame in enumerate(frames):
                 if done % 25 == 0:
+                    progress.setLabelText(
+                        f"Updating measurements...\n{time_left.text(done)}"
+                    )
                     progress.setValue(done)
                 # Frames are read in order because seeking to a frame number is
                 # not exact in every video format.
@@ -2434,6 +2481,7 @@ class MainWindow(QMainWindow):
         total = len(self._sequence_paths)
         self.statusBar().showMessage("Running batch segmentation...")
         self._show_batch_dialog(total)
+        self._time_left = TimeLeft(total)
 
         self._batch_thread = QThread(self)
         self._measurement_logs.clear()
@@ -2531,6 +2579,7 @@ class MainWindow(QMainWindow):
         self._stash_video_mask_for_current_frame()
         self.statusBar().showMessage(f"{title} running...")
         self._show_video_batch_dialog(len(video_paths), title)
+        self._time_left = TimeLeft(total_frames)
 
         self._batch_thread = QThread(self)
         self._measurement_logs.clear()
@@ -2556,6 +2605,7 @@ class MainWindow(QMainWindow):
         self._batch_worker.video_started.connect(self._on_video_started)
         self._batch_worker.frame_started.connect(self._on_video_frame_started)
         self._batch_worker.frame_progress.connect(self._on_video_frame_progress)
+        self._batch_worker.progress.connect(self._on_video_progress)
         self._batch_worker.frame_segmented.connect(self._on_video_frame_segmented)
         self._batch_worker.video_finished.connect(self._on_video_finished)
         self._batch_worker.finished.connect(self._on_video_batch_finished)
@@ -2581,23 +2631,14 @@ class MainWindow(QMainWindow):
     def _show_batch_dialog(self, total, title="Batch segment"):
         if self._batch_dialog is not None:
             self._batch_dialog.close()
-        self._batch_dialog = QProgressDialog(
-            "Running batch segmentation...",
-            "Cancel",
-            0,
-            total,
-            self,
-        )
-        self._batch_dialog.setWindowTitle(title)
-        self._batch_dialog.setMinimumDuration(0)
-        self._batch_dialog.setAutoClose(False)
-        self._batch_dialog.setAutoReset(False)
+        self._batch_dialog = ImageBatchProgressDialog(total, title, self)
         self._batch_dialog.canceled.connect(self._request_batch_cancel)
         self._batch_dialog.show()
 
     def _close_batch_dialog(self):
         if self._batch_dialog is None:
             return
+        self._batch_dialog.mark_stopped()
         self._batch_dialog.close()
         self._batch_dialog = None
 
@@ -2606,15 +2647,12 @@ class MainWindow(QMainWindow):
             self._batch_worker.cancel()
         self.statusBar().showMessage("Canceling batch segmentation...")
         if self._batch_dialog:
-            if isinstance(self._batch_dialog, VideoBatchProgressDialog):
-                self._batch_dialog.mark_canceling()
-            else:
-                self._batch_dialog.setLabelText("Canceling batch segmentation...")
+            self._batch_dialog.mark_canceling()
 
     def _on_batch_progress(self, current, total):
         if self._batch_dialog:
             self._batch_dialog.setValue(current)
-            self._batch_dialog.setLabelText(f"Segmenting image {current}/{total}")
+            self._batch_dialog.set_time_left(self._time_left.text(current))
 
     def _on_batch_image_started(self, image_path, index, total):
         if self._batch_dialog:
@@ -2673,6 +2711,10 @@ class MainWindow(QMainWindow):
     def _on_video_frame_started(self, video_name, frame_number, frame_count, current, total):
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
             self._batch_dialog.start_frame(frame_number, frame_count)
+
+    def _on_video_progress(self, done, total):
+        if isinstance(self._batch_dialog, VideoBatchProgressDialog):
+            self._batch_dialog.set_time_left(self._time_left.text(done))
 
     def _on_video_frame_progress(self, frame_number, frame_count):
         if isinstance(self._batch_dialog, VideoBatchProgressDialog):
@@ -3903,8 +3945,23 @@ class MainWindow(QMainWindow):
         self._inference_dialog.setAutoReset(False)
         self._inference_dialog.canceled.connect(self._request_inference_cancel)
         self._inference_dialog.show()
+        self._inference_started = time.monotonic()
+        self._show_inference_time_left()
+        self._inference_clock.start()
+
+    def _show_inference_time_left(self):
+        if self._inference_dialog is None:
+            return
+        expected = self._inference_seconds.get(self._model.current_model())
+        if expected is None:
+            note = "Estimating time left..."
+        else:
+            left = expected - (time.monotonic() - self._inference_started)
+            note = f"About {format_duration(left)} left" if left >= 1 else "Finishing..."
+        self._inference_dialog.setLabelText(f"Running segmentation...\n{note}")
 
     def _close_inference_dialog(self):
+        self._inference_clock.stop()
         if self._inference_dialog is None:
             return
         self._inference_dialog.close()
@@ -3918,6 +3975,9 @@ class MainWindow(QMainWindow):
             self._inference_dialog.setLabelText("Canceling segmentation...")
 
     def _on_inference_finished(self, prediction):
+        self._inference_seconds[self._model.current_model()] = (
+            time.monotonic() - self._inference_started
+        )
         self._last_prediction = prediction
         if self._last_prediction is not None and self.canvas.image is not None:
             self.canvas.set_mask(
@@ -3962,6 +4022,67 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class ImageBatchProgressDialog(QDialog):
+    """Progress of Segment all files over images: what is being segmented, a
+    progress bar, the time left under it, and Cancel."""
+
+    canceled = pyqtSignal()
+
+    def __init__(self, total, title, parent=None):
+        super().__init__(parent)
+        self._cancel_requested = False
+        self._finished = False
+        self.setWindowTitle(title)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        self.status_label = QLabel("Running batch segmentation...")
+        layout.addWidget(self.status_label)
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, max(1, int(total)))
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+        self.time_label = QLabel("Estimating time left...")
+        layout.addWidget(self.time_label)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setMinimumWidth(96)
+        self.cancel_btn.clicked.connect(self._request_cancel)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(self.cancel_btn)
+        layout.addLayout(button_row)
+
+    def setValue(self, value):
+        self.progress.setValue(int(value))
+
+    def setLabelText(self, text):
+        self.status_label.setText(text)
+
+    def labelText(self):
+        return self.status_label.text()
+
+    def set_time_left(self, text):
+        self.time_label.setText(text)
+
+    def mark_canceling(self):
+        self._cancel_requested = True
+        self.status_label.setText("Canceling batch segmentation...")
+        self.cancel_btn.setEnabled(False)
+
+    def mark_stopped(self):
+        self._finished = True
+
+    def _request_cancel(self):
+        if self._cancel_requested:
+            return
+        self.mark_canceling()
+        self.canceled.emit()
+
+    def closeEvent(self, event):
+        if not self._finished and not self._cancel_requested:
+            self._request_cancel()
+        super().closeEvent(event)
+
+
 class VideoBatchProgressDialog(QDialog):
     canceled = pyqtSignal()
 
@@ -3991,9 +4112,15 @@ class VideoBatchProgressDialog(QDialog):
         self.frame_progress.setValue(0)
         layout.addWidget(self.frame_progress)
 
+        self.time_label = QLabel("Estimating time left...")
+        layout.addWidget(self.time_label)
+
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self._request_cancel)
         layout.addWidget(self.cancel_btn)
+
+    def set_time_left(self, text):
+        self.time_label.setText(text)
 
     def start_video(self, video_name, video_number, video_count, frame_count):
         self._video_count = max(1, int(video_count))
@@ -4360,7 +4487,7 @@ class VideoBatchInferenceWorker(QObject):
                         measured.append(frame_index)
                         processed += 1
                         self.frame_segmented.emit(video_path, frame_index)
-                        self.progress.emit(processed, total_frames)
+                        self.progress.emit(processed + skipped, total_frames)
                         self.frame_progress.emit(frame_index + 1, frame_count)
                 finally:
                     capture.release()
