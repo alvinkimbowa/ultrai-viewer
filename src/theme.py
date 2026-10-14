@@ -1,19 +1,22 @@
 """
-Dark blue look of the app, built on UBC blue.
+Light grey look of the app with near-black text, for reading in bright light.
+Blue marks what is selected or active.
 """
 
 from PyQt6.QtGui import QColor, QPalette
 
-BACKGROUND = "#001329"
-SURFACE = "#000A18"
-BUTTON = "#002145"
-BUTTON_HOVER = "#003A7D"
-BUTTON_PRESSED = "#002A5E"
-PRIMARY = "#0055B7"
-ACCENT = "#2A9FD8"
-BORDER = "#12335A"
-TEXT = "#E8EEF5"
-TEXT_DISABLED = "#5F7693"
+BACKGROUND = "#EDEDED"
+SURFACE = "#FFFFFF"
+BUTTON = "#E4E4E4"
+BUTTON_HOVER = "#D4D4D4"
+BUTTON_PRESSED = "#C2C2C2"
+PRIMARY = "#0B5CAD"
+ACCENT = "#0B5CAD"
+BORDER = "#9A9A9A"
+TEXT = "#141414"
+TEXT_DISABLED = "#8A8A8A"
+# Behind the image, darker than the panels so the image stands out.
+CANVAS = "#6E6E6E"
 
 STYLE_SHEET = f"""
 QPushButton {{
@@ -102,7 +105,7 @@ QToolTip {{
 }}
 
 QMenuBar {{
-    background-color: {SURFACE};
+    background-color: {BACKGROUND};
     color: {TEXT};
 }}
 QMenuBar::item:selected {{
@@ -126,13 +129,13 @@ QMenu::separator {{
 }}
 
 QStatusBar {{
-    background-color: {SURFACE};
+    background-color: {BACKGROUND};
     color: {TEXT};
     border-top: 1px solid {BORDER};
 }}
 
 QLabel#sectionHeader {{
-    color: {ACCENT};
+    color: {TEXT};
     font-size: 10pt;
     font-weight: bold;
 }}
@@ -156,11 +159,11 @@ def _palette():
         QPalette.ColorRole.ToolTipText: TEXT,
         QPalette.ColorRole.PlaceholderText: TEXT_DISABLED,
         QPalette.ColorRole.Link: ACCENT,
-        QPalette.ColorRole.Light: BORDER,
+        QPalette.ColorRole.Light: SURFACE,
         QPalette.ColorRole.Midlight: BUTTON,
         QPalette.ColorRole.Mid: BORDER,
-        QPalette.ColorRole.Dark: SURFACE,
-        QPalette.ColorRole.Shadow: "#000814",
+        QPalette.ColorRole.Dark: BORDER,
+        QPalette.ColorRole.Shadow: "#5A5A5A",
     }
     for role, color in roles.items():
         palette.setColor(role, QColor(color))
