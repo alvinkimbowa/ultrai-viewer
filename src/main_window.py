@@ -51,6 +51,7 @@ from .measurements import (
     REGION_NAMES,
     knee_side_from_name,
     measure,
+    to_grayscale,
 )
 from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
 from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
@@ -128,6 +129,32 @@ def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
         os.replace(partial, mask_path)
     finally:
         partial.unlink(missing_ok=True)
+
+
+# Grey level, out of 255, above which a pixel counts as part of the picture
+# rather than of the black background around the ultrasound sector.
+SECTOR_THRESHOLD = 5
+
+
+def sector_box(image):
+    """ROI box (left, right, top, bottom) around the ultrasound sector of an image.
+
+    The sector is taken to be the largest connected piece of the image that is not
+    black; text, scales and logos around it are smaller pieces. Returns None for
+    an image that is black all over.
+    """
+    gray = to_grayscale(image)
+    if gray.dtype != np.uint8:
+        peak = float(gray.max())
+        gray = (gray * (255.0 / peak)).astype(np.uint8) if peak > 0 else gray
+    binary = (gray > SECTOR_THRESHOLD).astype(np.uint8)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if count <= 1:
+        return None
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    left, top = int(stats[largest, cv2.CC_STAT_LEFT]), int(stats[largest, cv2.CC_STAT_TOP])
+    width, height = int(stats[largest, cv2.CC_STAT_WIDTH]), int(stats[largest, cv2.CC_STAT_HEIGHT])
+    return left, left + width, top, top + height
 
 
 def box_to_segment(image, box):
@@ -1157,10 +1184,65 @@ class MainWindow(QMainWindow):
             self._apply_roi_to(targets, self.canvas.roi_box(), count)
         return choice
 
-    def _apply_roi_to(self, targets, box, count):
-        """Give a box to the frames listed by _other_frames, trimming saved masks."""
+    def _auto_roi(self):
+        """Draw the ROI around the ultrasound sector, on the image or frame on
+        screen or on every loaded one, as the user chooses."""
+        if self._batch_thread and self._batch_thread.isRunning():
+            return
+        if self.canvas.image is None or self._current_frame_key() is None:
+            QMessageBox.information(self, "No files", "Load files first.")
+            return
+        one, every = (
+            ("Current frame", "All frames")
+            if self._mode == "video"
+            else ("Current image", "All images")
+        )
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Auto ROI")
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.addWidget(QLabel("Automatically estimates the ultrasound field of view (FOV)"))
+        row = QHBoxLayout()
+        row.addStretch(1)
+        dialog_layout.addLayout(row)
+        chosen = []
+        cancel_button = QPushButton("Cancel")
+        cancel_button.setAutoDefault(False)
+        cancel_button.clicked.connect(dialog.reject)
+        row.addWidget(cancel_button)
+        # The choice for the image or frame on screen sits at the far right and
+        # is the one Enter picks.
+        for label in (every, one):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked, label=label: chosen.append(label))
+            button.clicked.connect(dialog.accept)
+            button.setAutoDefault(False)
+            button.setDefault(label == one)
+            row.addWidget(button)
+        for button in dialog.findChildren(QPushButton):
+            button.setMinimumWidth(96)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        box = box_to_segment(self.canvas.image, sector_box(self.canvas.image))
+        if box is None:
+            self.statusBar().showMessage("No ultrasound sector found in this image")
+        else:
+            self.canvas.set_roi(box, record=True)
+            self._save_current_roi()
+        if chosen[-1] == every:
+            targets = self._other_frames()
+            count = sum(len(frames) for frames in targets.values())
+            if count:
+                self._apply_roi_to(targets, None, count, title="Auto ROI")
+
+    def _apply_roi_to(self, targets, box, count, title="Apply ROI"):
+        """Give a box to the frames listed by _other_frames, trimming saved masks.
+
+        With a box of None, each frame gets the box around its own ultrasound
+        sector, found on the frame as it is viewed.
+        """
+        auto = box is None
         progress = QProgressDialog("Applying ROI...", None, 0, count, self)
-        progress.setWindowTitle("Apply ROI")
+        progress.setWindowTitle(title)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(400)
         done = 0
@@ -1186,12 +1268,12 @@ class MainWindow(QMainWindow):
                                 mask_path = None
                         else:
                             mask_path = self._video_mask_path(source_path, frame)
-                        if mask_path is None or not Path(mask_path).is_file():
+                        has_mask = mask_path is not None and Path(mask_path).is_file()
+                        if not has_mask and not auto:
                             entries.append(self._bulk_entry(folder, name, frame))
                             store.set(name, frame, box)
                             applied += 1
                             continue
-                        entries.append(self._bulk_entry(folder, name, frame, mask_path))
                         if frame == "":
                             image = self.canvas._read_image(source_path)
                         else:
@@ -1211,14 +1293,22 @@ class MainWindow(QMainWindow):
                                 image = None
                             elif image.ndim == 3 and image.shape[2] == 3:
                                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        angle = self._angle_of(folder, name)
+                        if auto:
+                            if image is None:
+                                continue
+                            view = rotate_image(image, angle)
+                            box = box_to_segment(view, sector_box(view))
+                            if box is None:
+                                continue
+                        if not has_mask:
+                            entries.append(self._bulk_entry(folder, name, frame))
+                            store.set(name, frame, box)
+                            applied += 1
+                            continue
+                        entries.append(self._bulk_entry(folder, name, frame, mask_path))
                         if self._trim_saved_mask(
-                            Path(mask_path),
-                            box,
-                            image,
-                            log,
-                            name,
-                            frame,
-                            self._angle_of(folder, name),
+                            Path(mask_path), box, image, log, name, frame, angle
                         ):
                             store.set(name, frame, box)
                             applied += 1
@@ -1229,16 +1319,21 @@ class MainWindow(QMainWindow):
                     log.save()
         except Exception as exc:
             progress.close()
-            QMessageBox.warning(self, "Apply ROI", str(exc))
+            QMessageBox.warning(self, title, str(exc))
             return
         for entry in entries:
             self._fill_bulk_entry(entry, "after")
         self._bulk_redo.clear()
-        self._record_bulk({"title": "Apply ROI to all", "entries": entries})
+        self._record_bulk({"title": f"{title} to all", "entries": entries})
         progress.setValue(count)
         message = f"ROI applied to {applied} images and frames"
         if applied < count:
-            message += f"; {count - applied} left out because the ROI does not fit them"
+            reason = (
+                "no ultrasound sector was found in them"
+                if auto
+                else "the ROI does not fit them"
+            )
+            message += f"; {count - applied} left out because {reason}"
         self.statusBar().showMessage(message)
 
     def _trim_saved_mask(self, mask_path, box, image, log, file_name, frame, angle=0.0):
@@ -1792,6 +1887,14 @@ class MainWindow(QMainWindow):
         view_buttons_row.addWidget(self.rotate_btn)
         layout.addLayout(view_buttons_row)
 
+        self.auto_roi_btn = QPushButton("Auto ROI")
+        self.auto_roi_btn.setToolTip(
+            "Draw the ROI around the ultrasound sector, on the image on screen or "
+            "on every loaded image. You can still move, resize or delete it."
+        )
+        configure_button(self.auto_roi_btn)
+        layout.addWidget(self.auto_roi_btn)
+
         layout.addSpacing(5)
 
         undo_redo_row = QHBoxLayout()
@@ -1935,6 +2038,7 @@ class MainWindow(QMainWindow):
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
         self.rotate_btn.clicked.connect(self._rotate_dialog)
+        self.auto_roi_btn.clicked.connect(self._auto_roi)
         self.rotate_action.triggered.connect(self._rotate_dialog)
         self.fill_mask_checkbox.toggled.connect(self.canvas.set_fill_mask)
         self.undo_btn.clicked.connect(self._undo)
