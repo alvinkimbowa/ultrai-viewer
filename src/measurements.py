@@ -328,18 +328,20 @@ class MeasurementLog:
 
         centre_x of None means the suggested centre. knee_side is "left", "right"
         or None, and knee_side_set_by tells where it comes from: "name" for the file
-        name, "user" for a side picked by hand. With prefer_saved, a hand-picked
-        knee side and a user-placed centre already stored for the row win over the
-        arguments.
+        name, "user" for a side picked by hand. With prefer_saved, a knee side
+        already picked by hand wins over one from the name, and a user-placed
+        centre already stored for the row wins over the argument.
         limits is the ROI box (left, right, top, bottom) the mask was confined to,
         if any. rotation is the angle, in degrees clockwise, the image and mask
         were turned by before being measured.
         """
         key = (str(file_name), str(frame))
         saved = self._rows.get(key)
+        if prefer_saved and knee_side_set_by != "user":
+            picked = self.knee_side(file_name, frame)
+            if picked[1] == "user":
+                knee_side, knee_side_set_by = picked
         if prefer_saved and saved is not None:
-            if saved.get("knee_side_set_by") == "user":
-                knee_side, knee_side_set_by = self.knee_side(file_name, frame)
             # A centre placed on a view at another rotation is not kept.
             same_view = self.rotation(file_name, frame) == round(float(rotation), 1)
             if saved.get("centre_set_by") == "user" and same_view:
@@ -401,14 +403,19 @@ class MeasurementLog:
     def knee_side(self, file_name, frame):
         """(knee side, where it comes from) of an image or frame.
 
-        The side picked by hand for it if its row records one ("user"), otherwise
-        the side its file name states ("name"). The side is "left", "right" or None.
-        A side in a row that does not say where it comes from is not used.
+        The side picked by hand if a row records one ("user"), otherwise the side
+        its file name states ("name"). The side is "left", "right" or None. A side
+        in a row that does not say where it comes from is not used. A video has one
+        side for all its frames, so for a frame a pick recorded with any frame of
+        the same video counts, its own row first.
         """
-        row = self.get(file_name, frame)
-        if row is not None and row.get("knee_side_set_by") == "user":
-            side = row.get("knee_side")
-            return (side if side in ("left", "right") else None), "user"
+        rows = [self.get(file_name, frame)]
+        if str(frame) != "":
+            rows += [row for (name, _), row in self._rows.items() if name == file_name]
+        for row in rows:
+            if row is not None and row.get("knee_side_set_by") == "user":
+                side = row.get("knee_side")
+                return (side if side in ("left", "right") else None), "user"
         return knee_side_from_name(file_name), "name"
 
     def matches_inputs(

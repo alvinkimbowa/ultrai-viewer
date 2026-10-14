@@ -375,6 +375,9 @@ class MainWindow(QMainWindow):
         # Where the knee side on screen comes from: "name" for the file name,
         # "user" for a side picked in the Knee dropdown.
         self._knee_set_by = "name"
+        # Knee side picked by hand for a video, by video path. It holds for every
+        # frame of that video, also before any of them has a saved result.
+        self._video_knee_picks = {}
         self.view_picker.currentIndexChanged.connect(self._on_measurement_view_changed)
         self.knee_picker.currentIndexChanged.connect(self._on_knee_side_changed)
         self.reset_centre_btn.clicked.connect(lambda: self.canvas.set_centre_x(None))
@@ -632,9 +635,24 @@ class MainWindow(QMainWindow):
         self._update_measurements()
 
     def _on_knee_side_changed(self):
-        """A side picked by hand; it belongs to the image or frame on screen."""
+        """A side picked by hand. It belongs to the image on screen, or to every
+        frame of the video on screen."""
+        knee_side = self.knee_picker.currentData() or None
         self._knee_set_by = "user"
-        self.canvas.set_knee_side(self.knee_picker.currentData() or None)
+        self.canvas.set_knee_side(knee_side)
+        if self._mode == "video" and self._video_path:
+            self._video_knee_picks[self._video_path] = knee_side
+            if self._batch_thread and self._batch_thread.isRunning():
+                return
+            # The saved frames of the video are measured again with the side.
+            self._stash_video_mask_for_current_frame()
+            self._remeasure_video_frames()
+
+    def _video_knee_side(self, video_path, log, frame):
+        """(knee side, where it comes from) of a frame of a video."""
+        if video_path in self._video_knee_picks:
+            return self._video_knee_picks[video_path], "user"
+        return log.knee_side(Path(video_path).name, frame)
 
     def _show_knee_side(self, knee_side, set_by):
         """Put a knee side in the dropdown without it counting as picked by hand."""
@@ -689,7 +707,12 @@ class MainWindow(QMainWindow):
         try:
             log = self._measurement_log(self._shown_result_dir())
             row = log.get(file_name, frame)
-            self._show_knee_side(*log.knee_side(file_name, frame))
+            if self._mode == "video":
+                self._show_knee_side(
+                    *self._video_knee_side(self._video_path, log, frame)
+                )
+            else:
+                self._show_knee_side(*log.knee_side(file_name, frame))
             # A saved result keeps the ROI it was measured with; rois.csv only
             # supplies the ROI of a frame that has no saved result yet.
             # A row measured at another rotation describes a view that is no
@@ -1559,7 +1582,7 @@ class MainWindow(QMainWindow):
     def _remeasure_video_frames(self):
         """Measure every saved frame mask of the video on screen again.
 
-        Each frame keeps the knee side, centre point and ROI its row records.
+        Each frame keeps the centre point and ROI its row records.
         """
         root = self._video_output_root_for_path(self._video_path)
         if root is None or not root.is_dir():
@@ -1601,6 +1624,9 @@ class MainWindow(QMainWindow):
                 mask = rotate_mask(mask, angle)
                 if image is not None:
                     image = rotate_image(image, angle)
+                knee_side, knee_side_set_by = self._video_knee_side(
+                    self._video_path, log, frame
+                )
                 log.set(
                     name,
                     frame,
@@ -1608,7 +1634,8 @@ class MainWindow(QMainWindow):
                     mask,
                     self.px_per_mm_x_spin.value(),
                     self.px_per_mm_y_spin.value(),
-                    knee_side=knee_side_from_name(name),
+                    knee_side=knee_side,
+                    knee_side_set_by=knee_side_set_by,
                     prefer_saved=True,
                     limits=(
                         log.limits(name, frame)
@@ -2512,6 +2539,10 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
             ),
+            knee_picks={
+                Path(path).name: side
+                for path, side in self._video_knee_picks.items()
+            },
             rois=self._rois_for_segmenting(self._video_output_dir),
             rotations=self._rotation_store(self._video_output_dir).angles(),
             measurements=self._measurement_file(self._video_output_dir),
@@ -4204,6 +4235,7 @@ class VideoBatchInferenceWorker(QObject):
         output_dir,
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
+        knee_picks=None,
         rois=None,
         rotations=None,
         measurements=None,
@@ -4217,6 +4249,8 @@ class VideoBatchInferenceWorker(QObject):
         self._output_dir = Path(output_dir)
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
+        # Knee side picked by hand for a video, by video file name.
+        self._knee_picks = knee_picks or {}
         self._rois = rois or {}
         # (video path, frame number) of the frames whose result is being saved,
         # and of those whose mask file is complete. Read by the window from its
@@ -4308,7 +4342,12 @@ class VideoBatchInferenceWorker(QObject):
                             image,
                             mask >= 0.5,
                             *self._px_per_mm,
-                            knee_side=knee_side_from_name(video_name),
+                            knee_side=self._knee_picks.get(
+                                video_name, knee_side_from_name(video_name)
+                            ),
+                            knee_side_set_by=(
+                                "user" if video_name in self._knee_picks else "name"
+                            ),
                             prefer_saved=True,
                             limits=box,
                             rotation=angle,
