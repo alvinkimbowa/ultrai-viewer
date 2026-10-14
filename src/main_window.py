@@ -357,6 +357,9 @@ class MainWindow(QMainWindow):
         self._batch_thread = None
         self._batch_worker = None
         self._batch_dialog = None
+        # Whether the mask on the canvas was read after the running segmentation
+        # run saved its result for the image or frame on screen.
+        self._shows_run_result = False
         self._gpu_warning = None
         self._init_device_picker()
         self._preload_model()
@@ -784,8 +787,36 @@ class MainWindow(QMainWindow):
         self._shown_angle = self._current_angle()
         self.canvas.load_image_array(rotate_image(image, self._shown_angle), source_name)
 
+    def _run_key(self):
+        """What a segmentation worker calls the image or frame on screen."""
+        if self._mode == "video":
+            return self._video_path, int(self._video_frame_index)
+        if self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            return self._sequence_paths[self._sequence_index]
+        return None
+
+    def _run_result_pending(self):
+        """True while a segmentation run has a result for the image or frame on
+        screen that the canvas does not show yet.
+
+        The run reports a saved result through the event queue, so an image can be
+        left before the canvas has caught up. What the canvas holds is then older
+        than the saved file and must not be saved over it.
+        """
+        worker = self._batch_worker
+        return (
+            worker is not None
+            and self._run_key() in worker.started
+            and not self._shows_run_result
+        )
+
     def _show_saved_mask(self):
         """Put the saved mask of the image or frame on screen on the canvas."""
+        worker = self._batch_worker
+        # Looked up before the file is read: a result listed as saved is complete.
+        self._shows_run_result = worker is not None and self._run_key() in worker.saved
         mask_path = self._shown_mask_path()
         if mask_path is None:
             self.canvas.clear_mask()
@@ -3041,6 +3072,8 @@ class MainWindow(QMainWindow):
             return
         if self._video_frame_index < 0 or not self._video_path:
             return
+        if not force and self._run_result_pending():
+            return
         self._commit_pending_outline()
         mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
         if mask_path is None:
@@ -3233,6 +3266,8 @@ class MainWindow(QMainWindow):
         if not self._sequence_output_dir:
             return
         if self._sequence_index < 0 or self._sequence_index >= len(self._sequence_paths):
+            return
+        if self._run_result_pending():
             return
         self._commit_pending_outline()
         image_path = Path(self._sequence_paths[self._sequence_index])
@@ -3926,6 +3961,10 @@ class BatchInferenceWorker(QObject):
         self._rois = rois or {}
         self._measurement_log = None
         self._measured = []
+        # Paths of the images whose result is being saved, and of those whose mask
+        # file is complete. Read by the window from its own thread.
+        self.started = set()
+        self.saved = set()
         self._cancel_event = Event()
 
     def cancel(self):
@@ -3980,12 +4019,14 @@ class BatchInferenceWorker(QObject):
                 )
                 if prediction is not None:
                     mask = place_prediction(prediction, image, box)
+                    self.started.add(image_path)
                     write_mask_file(
                         Path(self._output_dir) / f"{Path(image_path).stem}.png",
                         mask >= 0.5,
                         angle,
                         stored_shape,
                     )
+                    self.saved.add(image_path)
                     self._measurement_log.set(
                         Path(image_path).name,
                         "",
@@ -4063,6 +4104,11 @@ class VideoBatchInferenceWorker(QObject):
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
         self._rois = rois or {}
+        # (video path, frame number) of the frames whose result is being saved,
+        # and of those whose mask file is complete. Read by the window from its
+        # own thread.
+        self.started = set()
+        self.saved = set()
         self._cancel_event = Event()
 
     def cancel(self):
@@ -4139,7 +4185,9 @@ class VideoBatchInferenceWorker(QObject):
                             self.canceled.emit()
                             return
                         mask = place_prediction(prediction, image, box)
+                        self.started.add((video_path, frame_index))
                         write_mask_file(output_path, mask >= 0.5, angle, stored_shape)
+                        self.saved.add((video_path, frame_index))
                         measurement_log.set(
                             video_name,
                             frame_index,
