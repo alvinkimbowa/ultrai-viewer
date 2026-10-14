@@ -171,14 +171,17 @@ If the mask is in separate pieces, only the largest piece is measured: every num
 
 - **Pixels per mm (x, y)**: the image scale. Type the values, or click **Calibrate**, drag the two horizontal and two vertical lines onto a known distance, and enter the real distance between each pair. Without both values, results are shown in pixels.
 - **View**: **Full cartilage** measures the mask as one piece. **Per region** splits it into lateral, notch (the intercondylar region) and medial, each in its own colour.
-- **Knee**: Right or Left. It decides which side of the image is lateral and which is medial, and stays as set for the following images or frames until you change it.
+- **Knee**: Right, Left or Not set. It decides which side of the image is lateral and which is medial. It is read from the file name each time an image or video opens, and is never carried over from the previous image.
+  - Read as Left or Right: `l`, `r`, `left` or `right` with an underscore on both sides (`NIKE_S901_T1_L_CAR_1.tif`, `s010_v2_12w_r_140_1.tif`), or `l` or `r` followed by one digit at the very end of the name (`Nike_s500_v6_CAR_R3.png`). Capital and small letters both work.
+  - **Not set**: the name gives no side, or gives both. Nothing is assumed: the whole mask and the notch are measured, Lateral and Medial are left empty, and the parts on either side of the notch are drawn in grey.
+  - You can pick Right or Left by hand. That choice is saved with that image or frame only, and is used again the next time it opens. Segment all files, Segment video and Apply ROI to all use each file's own side, not the one on screen.
 - **Centre point**: in Per region view a yellow diamond marks the middle of the intercondylar notch on the top surface of the cartilage. The app suggests a position; with the Select tool, drag it left or right to correct it. **Reset centre point** returns to the suggestion. The notch region is centred on the diamond and is 25% of the width of the ROI, or 25% of the image width when the image has no ROI.
 - **Area**: size of the mask.
 - **Length**: length of the cartilage-bone line, shown as a dotted line. The line is the bottom side of the mask's outline, from the leftmost to the rightmost point of the mask, and the length is the distance along it between those two ends, following every bend and spike of the mask's edge. In Per region view, each region gets the part of the line that lies inside it.
 - **Thickness**: area divided by length.
 - **Echo intensity** and **Variation**: the average brightness inside the mask and how much it varies (standard deviation), in arbitrary units (AU).
 
-Every time a mask is saved, its measurements are saved to the selected model's `measurements_<model>.csv` in the output folder, one row per image or video frame, holding both the whole-mask and the per-region numbers. The `rotation` column records the angle the image was turned by when it was measured.
+Every time a mask is saved, its measurements are saved to the selected model's `measurements_<model>.csv` in the output folder, one row per image or video frame, holding both the whole-mask and the per-region numbers. The `rotation` column records the angle the image was turned by when it was measured. The `knee_side` column holds the side used (empty when not set), and `knee_side_set_by` says where it came from: `name` for the file name, `user` for a side picked by hand.
 
 ## Tips
 

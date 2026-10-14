@@ -4,6 +4,7 @@ Measurements computed from a segmented cartilage mask.
 
 import csv
 import os
+import re
 from pathlib import Path
 
 import cv2
@@ -104,23 +105,44 @@ def surface_point(columns, rows, centre_x):
 
 INTERCONDYLAR_WIDTH_FRACTION = 0.25
 REGION_NAMES = ("lateral", "intercondylar", "medial")
+# What the parts on either side of the intercondylar region are called while the
+# knee side, and so which of them is lateral and which medial, is not known.
+UNASSIGNED_SIDES = ("left_of_notch", "right_of_notch")
+
+
+def knee_side_from_name(file_name):
+    """The knee side a file name states: "left", "right", or None when it states
+    neither or both.
+
+    Looked for in the name without its ending, capitals ignored: `l`, `r`, `left`
+    or `right` with an underscore on both sides, or `l` or `r` followed by a single
+    digit as the last part of the name (`..._CAR_R3`).
+    """
+    stem = Path(file_name).stem.lower()
+    found = set(re.findall(r"(?=_(l|r|left|right)_)", stem))
+    found.update(re.findall(r"_([lr])\d$", stem))
+    sides = {"left" if token in ("l", "left") else "right" for token in found}
+    return sides.pop() if len(sides) == 1 else None
 
 
 def region_columns(image_width, centre_x, knee_side, limits=None):
-    """Column range (start, stop) of each region for a knee side of "right" or "left".
+    """Column range (start, stop) of each region for a knee side of "right", "left"
+    or None.
 
     The intercondylar region is centred on centre_x and is a fixed share of the
     width of the ROI box `limits` (left, right, top, bottom), or of the image width
     when there is no ROI. On a right knee the lateral condyle is on the left of the
-    image.
+    image. With a knee side of None the two outer parts go by the names in
+    UNASSIGNED_SIDES instead of lateral and medial.
     """
     base_width = image_width if limits is None else limits[1] - limits[0]
     half_width = INTERCONDYLAR_WIDTH_FRACTION * base_width / 2.0
     start = int(round(min(max(centre_x - half_width, 0), image_width)))
     stop = int(round(min(max(centre_x + half_width, 0), image_width)))
-    left_name, right_name = (
-        ("lateral", "medial") if knee_side == "right" else ("medial", "lateral")
-    )
+    left_name, right_name = {
+        "right": ("lateral", "medial"),
+        "left": ("medial", "lateral"),
+    }.get(knee_side, UNASSIGNED_SIDES)
     return {
         left_name: (0, start),
         "intercondylar": (start, stop),
@@ -163,12 +185,13 @@ def measure(
     px_per_mm_x,
     px_per_mm_y,
     centre_x=None,
-    knee_side="right",
+    knee_side=None,
     limits=None,
 ):
     """Measure a mask as a whole and split into lateral, intercondylar and medial.
 
-    Only the largest connected piece of the mask is measured.
+    Only the largest connected piece of the mask is measured. With a knee side of
+    None, lateral and medial cannot be told apart and are left as NaN.
     Returns {"unit", "centre_x", "regions"}; "regions" maps "whole" and each region
     name to its area, cartilage-bone interface length, thickness (area / length),
     and the mean and standard deviation of the grey levels inside it. Lengths are in
@@ -221,6 +244,8 @@ def measure(
 
     # Compute measurements for each region
     for name, (start, stop) in spans.items():
+        if name in UNASSIGNED_SIDES:
+            continue
         result["regions"][name] = _measure_columns(
             gray, binary, path, start, stop, scale_x, scale_y
         )
@@ -232,6 +257,7 @@ MEASUREMENT_COLUMNS = [
     "file",
     "frame",
     "knee_side",
+    "knee_side_set_by",
     "centre_x",
     "centre_set_by",
     "limit_left",
@@ -292,15 +318,19 @@ class MeasurementLog:
         px_per_mm_x,
         px_per_mm_y,
         centre_x=None,
-        knee_side="right",
+        knee_side=None,
+        knee_side_set_by="name",
         prefer_saved=False,
         limits=None,
         rotation=0.0,
     ):
         """Measure a mask and store it as the row of its image or frame.
 
-        centre_x of None means the suggested centre. With prefer_saved, a knee side
-        and a user-placed centre already stored for the row win over the arguments.
+        centre_x of None means the suggested centre. knee_side is "left", "right"
+        or None, and knee_side_set_by tells where it comes from: "name" for the file
+        name, "user" for a side picked by hand. With prefer_saved, a hand-picked
+        knee side and a user-placed centre already stored for the row win over the
+        arguments.
         limits is the ROI box (left, right, top, bottom) the mask was confined to,
         if any. rotation is the angle, in degrees clockwise, the image and mask
         were turned by before being measured.
@@ -308,8 +338,8 @@ class MeasurementLog:
         key = (str(file_name), str(frame))
         saved = self._rows.get(key)
         if prefer_saved and saved is not None:
-            if saved.get("knee_side") in ("right", "left"):
-                knee_side = saved["knee_side"]
+            if saved.get("knee_side_set_by") == "user":
+                knee_side, knee_side_set_by = self.knee_side(file_name, frame)
             # A centre placed on a view at another rotation is not kept.
             same_view = self.rotation(file_name, frame) == round(float(rotation), 1)
             if saved.get("centre_set_by") == "user" and same_view:
@@ -323,7 +353,8 @@ class MeasurementLog:
         row = {
             "file": key[0],
             "frame": key[1],
-            "knee_side": knee_side,
+            "knee_side": knee_side or "",
+            "knee_side_set_by": knee_side_set_by,
             "centre_x": (
                 "" if result["centre_x"] is None else f"{result['centre_x']:.1f}"
             ),
@@ -367,8 +398,28 @@ class MeasurementLog:
         except (KeyError, TypeError, ValueError):
             return 0.0
 
+    def knee_side(self, file_name, frame):
+        """(knee side, where it comes from) of an image or frame.
+
+        The side picked by hand for it if its row records one ("user"), otherwise
+        the side its file name states ("name"). The side is "left", "right" or None.
+        A side in a row that does not say where it comes from is not used.
+        """
+        row = self.get(file_name, frame)
+        if row is not None and row.get("knee_side_set_by") == "user":
+            side = row.get("knee_side")
+            return (side if side in ("left", "right") else None), "user"
+        return knee_side_from_name(file_name), "name"
+
     def matches_inputs(
-        self, file_name, frame, centre_x, knee_side, limits, rotation=0.0
+        self,
+        file_name,
+        frame,
+        centre_x,
+        knee_side,
+        knee_side_set_by,
+        limits,
+        rotation=0.0,
     ):
         """True when a row exists and records this centre, knee side, ROI box and
         rotation.
@@ -376,7 +427,9 @@ class MeasurementLog:
         centre_x of None means the suggested centre.
         """
         row = self.get(file_name, frame)
-        if row is None or row.get("knee_side") != knee_side:
+        if row is None or row.get("knee_side") != (knee_side or ""):
+            return False
+        if row.get("knee_side_set_by") != knee_side_set_by:
             return False
         if self.rotation(file_name, frame) != round(float(rotation), 1):
             return False

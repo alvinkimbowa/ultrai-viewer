@@ -49,6 +49,7 @@ from .measurements import (
     MEASUREMENTS_FILE_NAME,
     MeasurementLog,
     REGION_NAMES,
+    knee_side_from_name,
     measure,
 )
 from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
@@ -342,15 +343,12 @@ class MainWindow(QMainWindow):
         self.view_picker.setCurrentIndex(
             0 if settings.value("measurements/view", "region", str) == "full" else 1
         )
-        self.knee_picker.setCurrentIndex(
-            max(0, self.knee_picker.findData(
-                str(settings.value("measurements/knee_side", "right", str))
-            ))
-        )
+        # Where the knee side on screen comes from: "name" for the file name,
+        # "user" for a side picked in the Knee dropdown.
+        self._knee_set_by = "name"
         self.view_picker.currentIndexChanged.connect(self._on_measurement_view_changed)
         self.knee_picker.currentIndexChanged.connect(self._on_knee_side_changed)
         self.reset_centre_btn.clicked.connect(lambda: self.canvas.set_centre_x(None))
-        self.canvas.set_knee_side(self.knee_picker.currentData())
         self._on_measurement_view_changed()
         self.canvas.image_loaded.connect(self._on_image_loaded_during_calibration)
         self._play_timer = QTimer(self)
@@ -602,9 +600,29 @@ class MainWindow(QMainWindow):
         self._update_measurements()
 
     def _on_knee_side_changed(self):
-        knee_side = self.knee_picker.currentData()
-        self._settings().setValue("measurements/knee_side", knee_side)
+        """A side picked by hand; it belongs to the image or frame on screen."""
+        self._knee_set_by = "user"
+        self.canvas.set_knee_side(self.knee_picker.currentData() or None)
+
+    def _show_knee_side(self, knee_side, set_by):
+        """Put a knee side in the dropdown without it counting as picked by hand."""
+        self._knee_set_by = set_by
+        self.knee_picker.blockSignals(True)
+        self.knee_picker.setCurrentIndex(
+            max(0, self.knee_picker.findData(knee_side or ""))
+        )
+        self.knee_picker.blockSignals(False)
         self.canvas.set_knee_side(knee_side)
+
+    def _shown_file_name(self):
+        """Name of the image or video file on screen, or None."""
+        if self._mode == "video" and self._video_path:
+            return Path(self._video_path).name
+        if self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            return Path(self._sequence_paths[self._sequence_index]).name
+        return None
 
     def _current_frame_key(self):
         """(output folder, file name, frame) of the image or frame on screen, or None."""
@@ -625,9 +643,13 @@ class MainWindow(QMainWindow):
     def _restore_frame_inputs(self):
         """Bring back the ROI, knee side and centre point of the frame on screen.
 
-        A frame with no saved knee side keeps the one already chosen, and one with
-        no centre point of its own uses the suggested centre.
+        The knee side is the one picked by hand for the frame if its saved row has
+        one, otherwise the one its file name states, if any. A frame with no centre
+        point of its own uses the suggested centre.
         """
+        shown_name = self._shown_file_name()
+        if shown_name is not None:
+            self._show_knee_side(knee_side_from_name(shown_name), "name")
         key = self._current_frame_key()
         if key is None:
             return
@@ -635,6 +657,7 @@ class MainWindow(QMainWindow):
         try:
             log = self._measurement_log(self._shown_result_dir())
             row = log.get(file_name, frame)
+            self._show_knee_side(*log.knee_side(file_name, frame))
             # A saved result keeps the ROI it was measured with; rois.csv only
             # supplies the ROI of a frame that has no saved result yet.
             # A row measured at another rotation describes a view that is no
@@ -649,9 +672,6 @@ class MainWindow(QMainWindow):
             return
         if row is None:
             return
-        knee_index = self.knee_picker.findData(row.get("knee_side"))
-        if knee_index >= 0:
-            self.knee_picker.setCurrentIndex(knee_index)
         if row.get("centre_set_by") == "user":
             try:
                 self.canvas.set_centre_x(float(row["centre_x"]))
@@ -1211,7 +1231,7 @@ class MainWindow(QMainWindow):
             trimmed,
             self.px_per_mm_x_spin.value(),
             self.px_per_mm_y_spin.value(),
-            knee_side=self.knee_picker.currentData(),
+            knee_side=knee_side_from_name(file_name),
             prefer_saved=True,
             limits=fitted,
             rotation=angle,
@@ -1336,6 +1356,7 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_y_spin.value(),
                 self.canvas.centre_x,
                 self.canvas.knee_side,
+                self._knee_set_by,
                 limits=self.canvas.roi_box(),
                 rotation=self._shown_angle,
             )
@@ -1393,6 +1414,7 @@ class MainWindow(QMainWindow):
                 frame,
                 self.canvas.centre_x,
                 self.canvas.knee_side,
+                self._knee_set_by,
                 self.canvas.roi_box(),
                 self._shown_angle,
             )
@@ -1451,7 +1473,7 @@ class MainWindow(QMainWindow):
                     mask,
                     self.px_per_mm_x_spin.value(),
                     self.px_per_mm_y_spin.value(),
-                    knee_side=self.knee_picker.currentData(),
+                    knee_side=knee_side_from_name(name),
                     prefer_saved=True,
                     limits=(
                         log.limits(name, frame)
@@ -1793,11 +1815,13 @@ class MainWindow(QMainWindow):
         view_row.addWidget(self.view_picker, stretch=1)
         view_row.addSpacing(8)
         self.knee_picker = QComboBox()
+        self.knee_picker.addItem("Not set", "")
         self.knee_picker.addItem("Right", "right")
         self.knee_picker.addItem("Left", "left")
         self.knee_picker.setToolTip(
             "Which knee the image shows. It decides which side is lateral and "
-            "which is medial."
+            "which is medial. It is read from the file name; while it is Not set, "
+            "lateral and medial are not measured."
         )
         view_row.addWidget(QLabel("Knee:"))
         view_row.addWidget(self.knee_picker)
@@ -2239,7 +2263,6 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
             ),
-            knee_side=self.knee_picker.currentData(),
             rois=self._rois_for_segmenting(self._sequence_output_dir),
             rotations=self._rotation_store(self._sequence_output_dir).angles(),
             measurements=self._measurement_file(self._sequence_output_dir),
@@ -2337,7 +2360,6 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
             ),
-            knee_side=self.knee_picker.currentData(),
             rois=self._rois_for_segmenting(self._video_output_dir),
             rotations=self._rotation_store(self._video_output_dir).angles(),
             measurements=self._measurement_file(self._video_output_dir),
@@ -3881,7 +3903,6 @@ class BatchInferenceWorker(QObject):
         output_dir,
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
-        knee_side="right",
         rois=None,
         rotations=None,
         measurements=None,
@@ -3895,7 +3916,6 @@ class BatchInferenceWorker(QObject):
         self._output_dir = output_dir
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
-        self._knee_side = knee_side
         self._rois = rois or {}
         self._measurement_log = None
         self._measured = []
@@ -3965,7 +3985,7 @@ class BatchInferenceWorker(QObject):
                         image,
                         mask >= 0.5,
                         *self._px_per_mm,
-                        knee_side=self._knee_side,
+                        knee_side=knee_side_from_name(image_path),
                         prefer_saved=True,
                         limits=box,
                         rotation=angle,
@@ -4022,7 +4042,6 @@ class VideoBatchInferenceWorker(QObject):
         output_dir,
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
-        knee_side="right",
         rois=None,
         rotations=None,
         measurements=None,
@@ -4036,7 +4055,6 @@ class VideoBatchInferenceWorker(QObject):
         self._output_dir = Path(output_dir)
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
-        self._knee_side = knee_side
         self._rois = rois or {}
         self._cancel_event = Event()
 
@@ -4121,7 +4139,7 @@ class VideoBatchInferenceWorker(QObject):
                             image,
                             mask >= 0.5,
                             *self._px_per_mm,
-                            knee_side=self._knee_side,
+                            knee_side=knee_side_from_name(video_name),
                             prefer_saved=True,
                             limits=box,
                             rotation=angle,

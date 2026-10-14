@@ -12,6 +12,7 @@ from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF
 from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
 
 from .measurements import (
+    UNASSIGNED_SIDES,
     largest_piece,
     outline_sides,
     region_columns,
@@ -27,9 +28,18 @@ REGION_COLORS = {
     "intercondylar": (255, 60, 220),
     "medial": (120, 190, 255),
 }
+# The parts beside the notch while it is not known which is lateral and which
+# medial.
+UNASSIGNED_COLOR = (160, 160, 160)
 WHOLE_MASK_COLOR = (255, 255, 180)
 CENTRE_MARKER_COLOR = (255, 235, 0)
 REGION_LABELS = {"lateral": "Lateral", "intercondylar": "Notch", "medial": "Medial"}
+
+
+def region_color(name):
+    if name in UNASSIGNED_SIDES:
+        return UNASSIGNED_COLOR
+    return REGION_COLORS.get(name, WHOLE_MASK_COLOR)
 
 
 class Canvas(QWidget):
@@ -76,7 +86,8 @@ class Canvas(QWidget):
         # around a centre point on the cartilage's top surface. A centre_x of None
         # means the suggested centre is used; a number is a position the user set.
         self.region_view = False
-        self.knee_side = "right"
+        # "left", "right", or None while the side is not known.
+        self.knee_side = None
         self.centre_x = None
         self._centre_drag = False
         self._region_overlay = None
@@ -730,7 +741,7 @@ class Canvas(QWidget):
         self._region_overlay = self._build_region_overlay(binary)
         if self.region_view and self._region_overlay is not None:
             colored_spans = [
-                (REGION_COLORS[name], span)
+                (region_color(name), span)
                 for name, span in self._region_overlay["spans"].items()
             ]
         else:
@@ -1257,7 +1268,7 @@ class Canvas(QWidget):
                     for x, y in zip(xs, ys)
                 ]
             )
-            color = REGION_COLORS.get(name, WHOLE_MASK_COLOR)
+            color = region_color(name)
             painter.setPen(QPen(QColor(0, 0, 0), 4, Qt.PenStyle.SolidLine))
             painter.drawPolyline(polygon)
             dotted = QPen(QColor(*color), 3, Qt.PenStyle.DotLine)
@@ -1272,7 +1283,7 @@ class Canvas(QWidget):
             columns, top = overlay["top"]
             for name, (start, stop) in overlay["spans"].items():
                 inside = (columns >= start) & (columns < stop)
-                if not inside.any():
+                if name not in REGION_LABELS or not inside.any():
                     continue
                 label = REGION_LABELS[name]
                 middle = columns[inside].mean()
