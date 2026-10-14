@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
     QGridLayout,
+    QToolTip,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import (
@@ -57,6 +58,7 @@ from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
 from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
 from threading import Event
 from collections import OrderedDict
+import html
 import os
 from pathlib import Path
 import numpy as np
@@ -2059,6 +2061,14 @@ class MainWindow(QMainWindow):
         self.frame_slider.valueChanged.connect(self._on_frame_slider_changed)
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.ToolTip:
+            # Plain hover text is shown on one line however long it is; as rich
+            # text it wraps into a compact box.
+            text = obj.toolTip() if isinstance(obj, QWidget) else ""
+            if not text or text.lstrip().startswith("<"):
+                return False
+            QToolTip.showText(event.globalPos(), f"<qt>{html.escape(text)}</qt>", obj)
+            return True
         if event.type() == QEvent.Type.Wheel:
             # The wheel must not change a sidebar control's value. Ignoring the
             # event passes it on, so the sidebar itself still scrolls.
