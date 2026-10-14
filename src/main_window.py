@@ -1305,11 +1305,7 @@ class MainWindow(QMainWindow):
         sector, found on the frame as it is viewed.
         """
         auto = box is None
-        progress = QProgressDialog("Applying ROI...", None, 0, count, self)
-        progress.setWindowTitle(title)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(400)
-        time_left = TimeLeft(count)
+        progress = WorkProgressDialog(title, "Applying ROI...", count, self)
         done = 0
         applied = 0
         entries = []
@@ -1324,9 +1320,6 @@ class MainWindow(QMainWindow):
                     for source_path, name, frame in frames:
                         done += 1
                         if done % 25 == 0:
-                            progress.setLabelText(
-                                f"Applying ROI...\n{time_left.text(done)}"
-                            )
                             progress.setValue(done)
                         if frame == "":
                             mask_path = self._find_sequence_mask_path(source_path)
@@ -1642,20 +1635,15 @@ class MainWindow(QMainWindow):
         if not frames:
             return
         name = Path(self._video_path).name
-        progress = QProgressDialog("Updating measurements...", None, 0, len(frames), self)
-        progress.setWindowTitle("Measurements")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(400)
-        time_left = TimeLeft(len(frames))
+        progress = WorkProgressDialog(
+            "Measurements", "Updating measurements...", len(frames), self
+        )
         capture = open_capture(self._video_path)
         position = 0
         try:
             log = self._measurement_log(self._video_output_dir)
             for done, frame in enumerate(frames):
                 if done % 25 == 0:
-                    progress.setLabelText(
-                        f"Updating measurements...\n{time_left.text(done)}"
-                    )
                     progress.setValue(done)
                 # Frames are read in order because seeking to a frame number is
                 # not exact in every video format.
@@ -4015,6 +4003,44 @@ class MainWindow(QMainWindow):
                 thread.wait(5000)
         self._clear_video_state()
         super().closeEvent(event)
+
+
+class WorkProgressDialog(QDialog):
+    """Progress of work done on the spot, which blocks the app: what is being
+    done, a progress bar, and the time left under it.
+
+    It appears only once the work has taken a moment, and closes when the last
+    item is reported done.
+    """
+
+    def __init__(self, title, text, total, parent=None):
+        super().__init__(parent)
+        self._total = max(1, int(total))
+        self._time_left = TimeLeft(self._total)
+        self._started = time.monotonic()
+        self.setWindowTitle(title)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(text))
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, self._total)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+        self.time_label = QLabel("Estimating time left...")
+        layout.addWidget(self.time_label)
+
+    def setValue(self, value):
+        if value >= self._total:
+            self.close()
+            return
+        if not self.isVisible() and time.monotonic() - self._started < 0.4:
+            return
+        self.progress.setValue(int(value))
+        self.time_label.setText(self._time_left.text(value))
+        self.show()
+        # The work runs on the app's own thread, so the box is repainted here.
+        QApplication.processEvents()
 
 
 class ImageBatchProgressDialog(QDialog):
