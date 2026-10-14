@@ -14,6 +14,8 @@ GPU_FALLBACK_WARNING = (
     "This usually means there is no supported GPU or required drivers "
     "(NVIDIA driver/CUDA/cuDNN) are missing."
 )
+# The model selected when the app starts, when it is among the models found.
+DEFAULT_MODEL = "nnunet205"
 
 
 class ModelIntegration:
@@ -106,6 +108,9 @@ class ModelIntegration:
         for name in sorted(os.listdir(assets_dir)):
             if name.endswith((".onnx", ".nnx")):
                 candidates.append(os.path.join(assets_dir, name))
+        for path in candidates:
+            if os.path.splitext(os.path.basename(path))[0] == DEFAULT_MODEL:
+                return path
         return candidates[0] if candidates else None
 
     def _ensure_session(self):
