@@ -23,6 +23,12 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
+[InstallDelete]
+; Clear the previous version's files so old exes and models don't linger after an upgrade
+Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\UltrAiViewer-v*.exe"
+Type: files; Name: "{app}\UltrAi Viewer-v*.exe"
+
 [Files]
 Source: "{#MyAppDistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
