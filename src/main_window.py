@@ -4116,8 +4116,12 @@ class VideoBatchProgressDialog(QDialog):
         layout.addWidget(self.time_label)
 
         self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setMinimumWidth(96)
         self.cancel_btn.clicked.connect(self._request_cancel)
-        layout.addWidget(self.cancel_btn)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(self.cancel_btn)
+        layout.addLayout(button_row)
 
     def set_time_left(self, text):
         self.time_label.setText(text)
