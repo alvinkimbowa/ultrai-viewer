@@ -1495,6 +1495,10 @@ class MainWindow(QMainWindow):
         # re-read the file each time; they are dropped whenever a background
         # segmentation run has written to the same files.
         key = str(output_dir)
+        if self._batch_thread and self._batch_thread.isRunning():
+            # The run adds rows to the file as it goes, so the file is read anew
+            # each time while it is going.
+            return MeasurementLog(*self._measurement_file(output_dir))
         if key not in self._measurement_logs:
             self._measurement_logs[key] = MeasurementLog(
                 *self._measurement_file(output_dir)
@@ -3967,7 +3971,6 @@ class VideoBatchProgressDialog(QDialog):
         self._cancel_requested = False
         self._finished = False
         self.setWindowTitle(title)
-        self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setMinimumWidth(420)
 
         layout = QVBoxLayout(self)
@@ -4282,6 +4285,8 @@ class VideoBatchInferenceWorker(QObject):
             skipped = 0
             video_count = len(self._video_paths)
             measurement_log = MeasurementLog(*self._measurements)
+            # Frames measured since the measurements file was last written.
+            measured = []
             for video_number, video_path in enumerate(self._video_paths, start=1):
                 video_name = Path(video_path).name
                 capture = open_capture(video_path)
@@ -4352,13 +4357,24 @@ class VideoBatchInferenceWorker(QObject):
                             limits=box,
                             rotation=angle,
                         )
+                        measured.append(frame_index)
                         processed += 1
                         self.frame_segmented.emit(video_path, frame_index)
                         self.progress.emit(processed, total_frames)
                         self.frame_progress.emit(frame_index + 1, frame_count)
                 finally:
                     capture.release()
-                    measurement_log.save()
+                    # The rows go into the file as it is on disk, keeping any row
+                    # changed there while the video was being segmented.
+                    on_disk = MeasurementLog(*self._measurements)
+                    for frame_index in measured:
+                        on_disk.put(
+                            video_name,
+                            frame_index,
+                            measurement_log.get(video_name, frame_index),
+                        )
+                    on_disk.save()
+                    measured.clear()
                 self.video_finished.emit(video_number, video_count)
             self.finished.emit(processed, skipped)
         except Exception as exc:
