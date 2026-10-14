@@ -2427,15 +2427,23 @@ class MainWindow(QMainWindow):
             if count == 1
             else f"Found {count} masks. Do you want to overwrite them?"
         )
-        choice = QMessageBox.question(
-            self,
+        question = QMessageBox(
+            QMessageBox.Icon.Question,
             "Overwrite existing masks?",
             text,
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No
             | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No,
+            self,
         )
+        question.setDefaultButton(QMessageBox.StandardButton.No)
+        # Tab and Shift+Tab go through the buttons in the order they are shown,
+        # which the message box does not do by itself.
+        question.show()
+        shown = sorted(question.buttons(), key=lambda button: button.x())
+        for first, second in zip(shown, shown[1:]):
+            QWidget.setTabOrder(first, second)
+        choice = question.exec()
         if choice == QMessageBox.StandardButton.Cancel:
             return None
         return choice == QMessageBox.StandardButton.Yes
