@@ -804,7 +804,12 @@ class MainWindow(QMainWindow):
         if not self._begin_rotation():
             return
         start = self._current_angle()
-        dialog = QDialog(self)
+        # The box has no parent window: some desktops (GNOME) attach a box to
+        # its parent, and dragging it then drags the whole app, while this one has
+        # to be moved aside to see the image turn.
+        dialog = QDialog()
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.setWindowIcon(self.windowIcon())
         dialog.setWindowTitle("Rotate image")
         dialog_layout = QVBoxLayout(dialog)
         hint = QLabel(
@@ -853,6 +858,8 @@ class MainWindow(QMainWindow):
         buttons.button(QDialogButtonBox.StandardButton.Reset).clicked.connect(
             lambda: angle_spin.setValue(0.0)
         )
+        dialog.adjustSize()
+        dialog.move(self.frameGeometry().center() - dialog.rect().center())
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         self._finish_rotation(angle_spin.value() if accepted else None)
 
