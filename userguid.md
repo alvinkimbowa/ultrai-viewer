@@ -4,10 +4,8 @@ Version 1.1.0 (beta). For research use only; results need clinical validation.
 
 ## Install
 
-Download the app from the [UltrAi Viewer folder](https://ubcca-my.sharepoint.com/:f:/r/personal/alvinbk_student_ubc_ca/Documents/UltrAi%20Research/Musculoskeletal%20ultrasound/Ultrasound%20for%20Osteoarthritis/Desktop%20App/UltrAi%20Viewer?csf=1&web=1&e=vF2m8l).
-
 - **Windows:** run `UltrAiViewer-v1.1.0-windows-x64-installer.exe`, then open **UltrAi Viewer** from the Start menu or the desktop.
-- **Linux:** extract `UltrAiViewer-v1.1.0-linux-x86_64.tar.gz` and run `UltrAiViewer-v1.1.0-linux-x86_64` inside the extracted folder.
+- **Linux:** run `UltrAiViewer-v1.1.0-linux-x86_64` in the folder this guide is in.
 
 Runs on the CPU; a 4-core CPU and 8 GB of RAM are recommended. macOS is not supported.
 
