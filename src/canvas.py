@@ -1275,13 +1275,17 @@ class Canvas(QWidget):
                 if not inside.any():
                     continue
                 label = REGION_LABELS[name]
-                middle_x = offset_x + (columns[inside].mean() + 0.5) * scale
-                label_y = offset_y + top[inside].min() * scale - 8
-                painter.setPen(QColor(*REGION_COLORS[name]))
-                painter.drawText(
-                    QPointF(middle_x - metrics.horizontalAdvance(label) / 2, label_y),
-                    label,
-                )
+                middle = columns[inside].mean()
+                label_width = metrics.horizontalAdvance(label)
+                # The name sits just above the top surface under its own width,
+                # not above the highest point of the whole region.
+                under = inside & (np.abs(columns - middle) * scale <= label_width / 2)
+                if not under.any():
+                    under = inside
+                middle_x = offset_x + (middle + 0.5) * scale
+                label_y = offset_y + top[under].min() * scale - 8
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(QPointF(middle_x - label_width / 2, label_y), label)
             centre_x, centre_y = overlay["centre"]
             x = offset_x + centre_x * scale
             y = offset_y + centre_y * scale
