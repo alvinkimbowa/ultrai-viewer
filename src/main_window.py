@@ -2394,7 +2394,7 @@ class MainWindow(QMainWindow):
             existing_path = self._find_sequence_mask_path(
                 self._sequence_paths[self._sequence_index]
             )
-            if existing_path and not self._confirm_overwrite_existing(1, "image segmentation"):
+            if existing_path and not self._confirm_overwrite_existing(1):
                 return
         self._run_inference()
 
@@ -2415,27 +2415,22 @@ class MainWindow(QMainWindow):
             (existing_path and existing_path.exists()) or self._canvas_has_mask()
         )
         if has_existing_segmentation:
-            scope = (
-                f"{Path(selected_video_path).name}, "
-                f"frame {self._video_frame_index + 1}"
-            )
-            if not self._confirm_overwrite_existing(
-                1,
-                "frame segmentation",
-                scope,
-            ):
+            if not self._confirm_overwrite_existing(1):
                 return
         self._run_inference()
 
-    def _confirm_overwrite_existing(self, count, description, scope=""):
-        scope_text = f" for {scope}" if scope else ""
+    def _confirm_overwrite_existing(self, count):
+        """Ask whether existing masks are overwritten: True for Yes, False for No
+        (keep them and segment only what has none), None for Cancel."""
+        text = (
+            "Found 1 mask. Do you want to overwrite it?"
+            if count == 1
+            else f"Found {count} masks. Do you want to overwrite them?"
+        )
         choice = QMessageBox.question(
             self,
-            "Existing segmentations",
-            f"Found {count} existing {description}(s){scope_text}.\n\n"
-            "Overwrite them?\n\n"
-            "Yes: overwrite existing masks.\n"
-            "No: keep existing masks and segment only missing items.",
+            "Overwrite existing masks?",
+            text,
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No
             | QMessageBox.StandardButton.Cancel,
@@ -2471,10 +2466,7 @@ class MainWindow(QMainWindow):
             1 for image_path in self._sequence_paths if self._find_sequence_mask_path(image_path)
         )
         if existing_count:
-            overwrite_existing = self._confirm_overwrite_existing(
-                existing_count,
-                "image segmentation",
-            )
+            overwrite_existing = self._confirm_overwrite_existing(existing_count)
             if overwrite_existing is None:
                 return
 
@@ -2528,7 +2520,6 @@ class MainWindow(QMainWindow):
         self._start_video_batch_inference(
             [selected_video_path],
             "Segment video",
-            overwrite_scope=Path(selected_video_path).name,
         )
 
     def _run_all_videos_inference(self):
@@ -2537,7 +2528,7 @@ class MainWindow(QMainWindow):
             return
         self._start_video_batch_inference(list(self._video_paths), "Segment all videos")
 
-    def _start_video_batch_inference(self, video_paths, title, overwrite_scope=""):
+    def _start_video_batch_inference(self, video_paths, title):
         if not self._video_output_dir:
             QMessageBox.information(self, "No output folder", "Select an output folder first.")
             return
@@ -2558,11 +2549,7 @@ class MainWindow(QMainWindow):
             for _ in (Path(self._video_output_dir) / Path(video_path).stem).glob("frame_*.png")
         )
         if existing_count:
-            overwrite_existing = self._confirm_overwrite_existing(
-                existing_count,
-                "frame segmentation",
-                overwrite_scope,
-            )
+            overwrite_existing = self._confirm_overwrite_existing(existing_count)
             if overwrite_existing is None:
                 return
 
