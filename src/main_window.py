@@ -1305,7 +1305,9 @@ class MainWindow(QMainWindow):
         sector, found on the frame as it is viewed.
         """
         auto = box is None
-        progress = WorkProgressDialog(title, "Applying ROI...", count, self)
+        progress = WorkProgressDialog(
+            title, "Applying ROI...", count, self, cancelable=True
+        )
         done = 0
         applied = 0
         entries = []
@@ -1318,9 +1320,10 @@ class MainWindow(QMainWindow):
                 position = 0
                 try:
                     for source_path, name, frame in frames:
+                        progress.setValue(done)
+                        if progress.canceled:
+                            break
                         done += 1
-                        if done % 25 == 0:
-                            progress.setValue(done)
                         if frame == "":
                             mask_path = self._find_sequence_mask_path(source_path)
                             if mask_path and Path(mask_path).resolve() == Path(
@@ -1378,6 +1381,8 @@ class MainWindow(QMainWindow):
                         capture.release()
                     store.save()
                     log.save()
+                if progress.canceled:
+                    break
         except Exception as exc:
             progress.close()
             QMessageBox.warning(self, title, str(exc))
@@ -1388,7 +1393,9 @@ class MainWindow(QMainWindow):
         self._record_bulk({"title": f"{title} to all", "entries": entries})
         progress.setValue(count)
         message = f"ROI applied to {applied} images and frames"
-        if applied < count:
+        if progress.canceled:
+            message += f"; canceled after {done} of {count}"
+        elif applied < count:
             reason = (
                 "no ultrasound sector was found in them"
                 if auto
@@ -4013,8 +4020,11 @@ class WorkProgressDialog(QDialog):
     item is reported done.
     """
 
-    def __init__(self, title, text, total, parent=None):
+    def __init__(self, title, text, total, parent=None, cancelable=False):
         super().__init__(parent)
+        self.canceled = False
+        self._cancelable = cancelable
+        self._finished = False
         self._total = max(1, int(total))
         self._time_left = TimeLeft(self._total)
         self._started = time.monotonic()
@@ -4029,15 +4039,36 @@ class WorkProgressDialog(QDialog):
         layout.addWidget(self.progress)
         self.time_label = QLabel("Estimating time left...")
         layout.addWidget(self.time_label)
+        if cancelable:
+            self.cancel_btn = QPushButton("Cancel")
+            self.cancel_btn.setMinimumWidth(96)
+            self.cancel_btn.clicked.connect(self._cancel)
+            button_row = QHBoxLayout()
+            button_row.addStretch(1)
+            button_row.addWidget(self.cancel_btn)
+            layout.addLayout(button_row)
+
+    def _cancel(self):
+        self.canceled = True
+        self.cancel_btn.setEnabled(False)
+        self.time_label.setText("Canceling...")
+
+    def closeEvent(self, event):
+        # Closing the box while the work is going counts as Cancel.
+        if self._cancelable and not self._finished and not self.canceled:
+            self._cancel()
+        super().closeEvent(event)
 
     def setValue(self, value):
         if value >= self._total:
+            self._finished = True
             self.close()
             return
         if not self.isVisible() and time.monotonic() - self._started < 0.4:
             return
         self.progress.setValue(int(value))
-        self.time_label.setText(self._time_left.text(value))
+        if not self.canceled:
+            self.time_label.setText(self._time_left.text(value))
         self.show()
         # The work runs on the app's own thread, so the box is repainted here.
         QApplication.processEvents()
