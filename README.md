@@ -1,181 +1,60 @@
-# UltrAI Viewer
+# UltrAi Nerve Viewer
 
-Desktop PyQt6 application for reviewing knee ultrasound data, running ONNX cartilage segmentation, editing masks manually, and organizing video annotations.
-
-## What This Repo Contains
-
-- A desktop viewer and annotation tool launched from `app.py`
-- ONNX Runtime integration for single-image and batch image segmentation
-- Manual mask editing tools: select, freehand line, segmented line, paint brush, eraser
-- Image-sequence workflow for batch segmentation and mask export
-- Video workflow for frame-by-frame annotation with per-video nerve/location labels
-- PyInstaller packaging for Linux and Windows
+A desktop PyQt6 application for nerve ultrasound. It loads images and videos, annotates nerves and other anatomy as labelled instance masks, segments them with ONNX models, and measures the area of each mask.
 
 ## Features
 
-- Load images: `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`
-- Load videos: `.mp4`, `.avi`, `.mov`, `.mkv`, `.m4v`, `.wmv`
-- Run segmentation on the currently loaded image
-- Run batch segmentation across an image sequence
-- Edit masks with undo/redo
-- Adjust mask visibility, opacity, and brush radius
-- Save masks as `.png` or `.tif/.tiff`
-- Resume video labeling from previously saved frame masks
-- Persist video metadata in `nerve_manifest.json`
-- Use CPU by default, with CUDA ONNX Runtime support when available
+- **Files:** images (`.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`), videos (`.mp4`, `.avi`, `.mov`, `.mkv`, `.m4v`, `.wmv`) and multi-page TIFF stacks.
+- **Labels:** the scanned location of each file, plus the nerve or other-anatomy label of each mask, picked from chips. Custom labels can be added.
+- **Instance masks:** several masks per image or frame, each tagged on the canvas, for example "Median #1". A mask can be relabelled or deleted from its right-click menu.
+- **Editing tools:** freehand and segmented lines, paint brush, eraser, undo and redo.
+- **Segmentation:** ONNX models segment the image on screen, a whole video, or every loaded file. Segmentation can be confined to an ROI box, and Auto ROI finds the ultrasound field of view.
+- **Rotation:** each file can be viewed rotated without changing the file itself.
+- **Measurements:** the area of every mask, in mm² once calibrated, together with the file's side (left/right) and location.
+- **Hardware:** runs on the CPU, or on CUDA through ONNX Runtime when available.
 
-## Repository Layout
+## Output layout
 
-- [`app.py`](/home/ultrai/UltrAi/knee_cat_seg/app.py): app entrypoint
-- [`src/main_window.py`](/home/ultrai/UltrAi/knee_cat_seg/src/main_window.py): main UI and workflow logic
-- [`src/canvas.py`](/home/ultrai/UltrAi/knee_cat_seg/src/canvas.py): image display and mask editing
-- [`src/model_integration.py`](/home/ultrai/UltrAi/knee_cat_seg/src/model_integration.py): ONNX model loading and inference
-- [`assets/`](/home/ultrai/UltrAi/knee_cat_seg/assets): bundled model(s) and UI icons
-- [`UltrAiViewer.spec`](/home/ultrai/UltrAi/knee_cat_seg/UltrAiViewer.spec): PyInstaller spec
-- [`build_linux.sh`](/home/ultrai/UltrAi/knee_cat_seg/build_linux.sh): Linux packaging
-- [`build_windows.bat`](/home/ultrai/UltrAi/knee_cat_seg/build_windows.bat): Windows packaging
+Masks use the same layout as the web annotator (`web_based_app` branch), so either app opens the other's output:
 
-## Requirements
+```text
+<output folder>/
+  nerve_manifest.json            label sets; location and side of each file
+  rois.csv, rotations.csv        ROI box and rotation of each file
+  measurements_<model>.csv       one row per mask: label, area, side, location
+  <model>_predictions/
+    <image stem>/median_001.png
+    <video stem>/frame_000012_median_001.png
+```
 
-- Python 3.10+ recommended
-- Linux or Windows
-- An ONNX model in `assets/`
+With **No model** selected, the masks go in the output folder itself and the measurements in `measurements.csv`.
 
-The repo currently includes:
+## Models
 
-- `assets/nnunet_200.onnx`
+- **Location:** every `.onnx` file in `assets/` is listed under **Model**.
+- **One-channel input:** the model is fed a grey image, min-max scaled to 0–1 and resized to the model's input.
+- **Three-channel input:** the model is treated as a DINOv3 model (as trained in `fm_adaptation`). It is fed the RGB image, resized with its aspect ratio kept onto the model's square input and normalised with the ImageNet mean and standard deviation. If the input size is not fixed, 896 is used.
+- **Output:** the largest connected piece of each class becomes a mask.
+- **Labels:** a single-class model's masks get the nerve picked in the sidebar, or `median`. A model with several classes can name them in a `<model>.json` beside it:
 
-Install Python dependencies:
+  ```json
+  {"classes": ["background", "median", "artery"]}
+  ```
+
+- **Replacement:** a model's masks replace saved masks of the same labels and leave other labels alone.
+
+## Running
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Running The App
-
-From the repository root:
-
-```bash
 python app.py
 ```
 
-## Typical Workflows
-
-### Single image segmentation
-
-1. Launch the app.
-2. Click `Load files` and choose one or more images and an output folder.
-3. Select a model from the sidebar.
-4. Click `Segment image`.
-5. Refine the result with the editing tools if needed.
-6. Save the mask.
-
-### Batch image segmentation
-
-1. Click `Load files`, choose a folder of images and an output folder.
-2. Select a model.
-3. Click `Segment all files`.
-4. Masks are written to the chosen output folder as `<image_stem>.png`.
-
-### Video annotation
-
-1. Click `Load files`, choose one or more videos and an output folder.
-2. Navigate across videos and frames.
-3. Draw or edit masks frame by frame.
-4. Assign `Location` and `Nerve` labels.
-5. Save masks to persist annotated frames.
-
-For video mode, masks are stored under:
-
-```text
-<output_dir>/
-  nerve_manifest.json
-  <video_stem>/
-    frame_000000.png
-    frame_000001.png
-    ...
-```
-
-`nerve_manifest.json` stores the available label sets and the per-video selected labels.
-
-## Controls And Shortcuts
-
-- `Ctrl+S`: save mask
-- `Ctrl+Z`: undo
-- `Ctrl+Y`: redo
-- `Delete`: clear mask
-- `P`: previous image/video item
-- `N`: next image/video item
-- Left/Right arrows in video mode: move across frames
-- Mouse wheel + modifiers: zoom/scroll in the canvas
-
-## Model Behavior
-
-- Models are discovered from `assets/` with `.onnx` or `.nnx` extensions.
-- Input images are normalized to grayscale before inference.
-- Output masks are postprocessed to keep the largest connected component.
-- If GPU execution is selected but unavailable, the app falls back to CPU.
-
 ## Build
 
-### Linux
+- **Linux:** `./build_linux.sh` builds a PyInstaller bundle in `dist/`, and `./ship.sh` packs it into a tarball.
+- **Windows:** `build_windows.bat` builds the bundle and, when Inno Setup 6 is installed, an installer from `UltrAiViewerInstaller.iss`. `ship.bat` zips it.
 
-```bash
-./build_linux.sh
-```
+Models must be in `assets/` at build time. Inference logs are written to `inference.log`.
 
-This builds a PyInstaller bundle in `dist/` and copies the PDF user guide into the packaged app directory.
-
-To create a tarball for distribution:
-
-```bash
-./ship.sh
-```
-
-### Windows
-
-```bat
-build_windows.bat
-```
-
-This builds the PyInstaller output in `dist\`. If Inno Setup 6 is installed, the script also creates a Windows installer using [`UltrAiViewerInstaller.iss`](/home/ultrai/UltrAi/knee_cat_seg/UltrAiViewerInstaller.iss).
-
-To create a zip archive after building:
-
-```bat
-ship.bat
-```
-
-## Notes
-
-- Batch segmentation currently applies to image sequences, not videos.
-- Video mode automatically saves the current frame mask when you move between frames.
-- The packaged build includes icons and `VERSION`; models must still be present in `assets/` at build time.
-- Inference logs are written to `inference.log`.
-
-## Citation
-
-If you use this software in research, cite the repository and the specific version or GitHub release you used.
-
-Suggested citation:
-
-```text
-UltAI Viewer (knee_cat_seg), version 0.2.1. GitHub repository:
-https://github.com/alvinkimbowa/ultrai-viewer
-```
-
-Example BibTeX:
-
-```bibtex
-@software{knee_cat_seg_2026,
-  title = {UltAI Viewer},
-  version = {0.2.1},
-  url = {https://github.com/alvinkimbowa/ultrai-viewer},
-  note = {GitHub repository for knee ultrasound cartilage segmentation and annotation software}
-}
-```
-
-## Related Files
-
-- [`userguid.md`](/home/ultrai/UltrAi/knee_cat_seg/userguid.md): lightweight user-facing guide
-- [`User Guide - UltrAi Viewer.pdf`](/home/ultrai/UltrAi/knee_cat_seg/User%20Guide%20-%20UltrAi%20Viewer.pdf): packaged PDF guide
+See [`userguid.md`](userguid.md) for the user guide.
