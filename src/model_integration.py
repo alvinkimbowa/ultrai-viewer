@@ -1,9 +1,15 @@
 """
 Model integration for single-image ONNX inference (CPU/GPU).
+
+A model with a one-channel input is fed a min-max scaled grey image; one with a
+three-channel input is taken to be a DINOv3 model and fed an RGB image prepared
+as DINOv3 was trained. Either returns the class index of each pixel, covering
+the whole image given, for the caller to resize onto it.
 """
 
 import os
 import sys
+import json
 import contextlib
 import numpy as np
 import cv2
@@ -14,8 +20,10 @@ GPU_FALLBACK_WARNING = (
     "This usually means there is no supported GPU or required drivers "
     "(NVIDIA driver/CUDA/cuDNN) are missing."
 )
-# The model selected when the app starts, when it is among the models found.
-DEFAULT_MODEL = "nnunet205"
+# Side of the square input of a DINOv3 model whose input size is not fixed.
+DINOV3_DEFAULT_SIZE = 896
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 class ModelIntegration:
@@ -108,9 +116,6 @@ class ModelIntegration:
         for name in sorted(os.listdir(assets_dir)):
             if name.endswith((".onnx", ".nnx")):
                 candidates.append(os.path.join(assets_dir, name))
-        for path in candidates:
-            if os.path.splitext(os.path.basename(path))[0] == DEFAULT_MODEL:
-                return path
         return candidates[0] if candidates else None
 
     def _ensure_session(self):
@@ -195,10 +200,43 @@ class ModelIntegration:
         height = shape[2] if len(shape) > 2 and isinstance(shape[2], int) else None
         width = shape[3] if len(shape) > 3 and isinstance(shape[3], int) else None
         if not height or not width:
-            height, width = 512, 512
+            size = DINOV3_DEFAULT_SIZE if self._model_channels(session) == 3 else 512
+            height, width = size, size
         return height, width
 
-    def _prepare_input(self, image, session) -> np.ndarray:
+    def _model_channels(self, session) -> int:
+        shape = session.get_inputs()[0].shape
+        channels = shape[1] if len(shape) > 1 else None
+        return channels if isinstance(channels, int) else 1
+
+    def class_names(self) -> dict[int, str]:
+        """Labels of the model's output classes by index, from the "classes"
+        list of a <model>.json beside the model; empty when there is none.
+
+        Index 0 is the background and has no label.
+        """
+        if not self._model_path:
+            return {}
+        sidecar = os.path.splitext(self._model_path)[0] + ".json"
+        try:
+            with open(sidecar, encoding="utf-8") as handle:
+                classes = json.load(handle).get("classes", [])
+        except (OSError, ValueError, AttributeError):
+            return {}
+        return {
+            index: str(name).strip().lower()
+            for index, name in enumerate(classes)
+            if index > 0 and str(name).strip()
+        }
+
+    def _prepare_input(self, image, session):
+        """The model input, and the part of the model's output that covers the image.
+
+        The part is (top, left, height, width) in the output at the model's input
+        size, or None when the image fills it.
+        """
+        if self._model_channels(session) == 3:
+            return self._prepare_rgb_input(image, session)
         data = image
         if data.ndim == 3:
             if data.shape[2] == 4:
@@ -218,31 +256,77 @@ class ModelIntegration:
             data = np.zeros_like(data, dtype=np.float32)
         target_h, target_w = self._model_input_hw(session)
         resized = cv2.resize(data, (target_w, target_h), interpolation=cv2.INTER_AREA)
-        return resized[None, None, :, :].astype(np.float32)
+        return resized[None, None, :, :].astype(np.float32), None
 
-    def _postprocess(self, prediction) -> np.ndarray:
+    def _prepare_rgb_input(self, image, session):
+        """Input of a DINOv3 model, prepared the way it was trained.
+
+        The image is resized with its aspect ratio kept to fit the model's square
+        input, centred on a black canvas, and normalised with the ImageNet mean
+        and standard deviation.
+        """
+        data = np.asarray(image)
+        if data.ndim == 2:
+            data = np.stack([data] * 3, axis=-1)
+        elif data.shape[2] == 1:
+            data = np.repeat(data, 3, axis=2)
+        elif data.shape[2] == 4:
+            data = data[:, :, :3]
+        if data.dtype != np.uint8:
+            peak = float(data.max())
+            data = (data.astype(np.float32) * (255.0 / peak) if peak > 0 else data)
+            data = np.clip(data, 0, 255).astype(np.uint8)
+        target_h, target_w = self._model_input_hw(session)
+        height, width = data.shape[:2]
+        scale = min(target_h / height, target_w / width)
+        resized_h = max(1, round(height * scale))
+        resized_w = max(1, round(width * scale))
+        resized = cv2.resize(data, (resized_w, resized_h), interpolation=cv2.INTER_CUBIC)
+        top = (target_h - resized_h) // 2
+        left = (target_w - resized_w) // 2
+        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        canvas[top : top + resized_h, left : left + resized_w] = resized
+        normalized = (canvas.astype(np.float32) / 255.0 - IMAGENET_MEAN) / IMAGENET_STD
+        model_input = normalized.transpose(2, 0, 1)[None].astype(np.float32)
+        return model_input, (top, left, resized_h, resized_w)
+
+    def _postprocess(self, prediction, input_hw, part) -> np.ndarray:
+        """Class index of each pixel, with only the largest piece of each class
+        kept, cut to the part of the output that covers the image."""
         data = np.asarray(prediction)
-        if data.ndim == 4:
-            data = np.argmax(data, axis=1)
-        if data.ndim == 3 and data.shape[0] > 1:
-            data = np.argmax(data, axis=0)
-        if data.ndim >= 2:
-            data = np.squeeze(data)
-        return self._largest_component(data)
+        while data.ndim > 3 and data.shape[0] == 1:
+            data = data[0]
+        if data.ndim == 3:
+            if data.shape[0] > 1:
+                data = np.argmax(data, axis=0)
+            else:
+                scores = data[0]
+                cut = 0.5 if 0.0 <= float(scores.min()) and float(scores.max()) <= 1.0 else 0.0
+                data = scores > cut
+        labels = np.squeeze(data).astype(np.uint8)
+        if part is not None:
+            if labels.shape != tuple(input_hw):
+                labels = cv2.resize(
+                    labels, (input_hw[1], input_hw[0]), interpolation=cv2.INTER_NEAREST
+                )
+            top, left, height, width = part
+            labels = labels[top : top + height, left : left + width]
+        return self._largest_piece_per_class(labels)
 
-    def _largest_component(self, mask):
-        binary = np.asarray(mask) > 0
-        if binary.ndim != 2:
-            binary = np.squeeze(binary)
-        if binary.size == 0 or not np.any(binary):
-            return np.zeros_like(binary, dtype=np.uint8)
-        count, labels = cv2.connectedComponents(binary.astype(np.uint8), connectivity=8)
-        if count <= 1:
-            return binary.astype(np.uint8)
-        sizes = np.bincount(labels.ravel())
-        sizes[0] = 0
-        largest = int(np.argmax(sizes))
-        return (labels == largest).astype(np.uint8)
+    def _largest_piece_per_class(self, labels):
+        kept = np.zeros_like(labels, dtype=np.uint8)
+        for index in np.unique(labels):
+            if index == 0:
+                continue
+            count, pieces = cv2.connectedComponents(
+                (labels == index).astype(np.uint8), connectivity=8
+            )
+            if count <= 1:
+                continue
+            sizes = np.bincount(pieces.ravel())
+            sizes[0] = 0
+            kept[pieces == int(np.argmax(sizes))] = index
+        return kept
 
     def run_inference(self, image, cancel_event=None) -> np.ndarray:
         if cancel_event is not None and cancel_event.is_set():
@@ -250,7 +334,7 @@ class ModelIntegration:
         session = self._ensure_session()
         if session is None:
             raise RuntimeError("Model session is not available.")
-        model_input = self._prepare_input(image, session)
+        model_input, part = self._prepare_input(image, session)
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Inference canceled.")
         input_name = session.get_inputs()[0].name
@@ -260,4 +344,4 @@ class ModelIntegration:
             raise RuntimeError("Model returned no outputs.")
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Inference canceled.")
-        return self._postprocess(outputs[0])
+        return self._postprocess(outputs[0], self._model_input_hw(session), part)
