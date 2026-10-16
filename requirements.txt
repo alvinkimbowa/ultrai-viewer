@@ -2,6 +2,7 @@ onnx
 onnxscript
 onnxruntime
 opencv-python
+tifffile
 numpy
 pyinstaller
 scikit-image

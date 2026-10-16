@@ -1,5 +1,5 @@
 """
-Main window for the knee ultrasound app (new MVP shell).
+Main window of the nerve ultrasound app.
 """
 
 from PyQt6.QtWidgets import (
@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFrame,
     QGridLayout,
+    QInputDialog,
     QToolTip,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
@@ -42,96 +43,49 @@ from PyQt6.QtGui import (
     QShortcut,
 )
 
-from .canvas import Canvas, REGION_COLORS
+from .canvas import Canvas
+from .instances import (
+    MaskSet,
+    annotated_frames,
+    clean_class,
+    clip_instances,
+    display_class,
+    instance_title,
+    instances_from_labels,
+    make_instance,
+    next_instance_id,
+    same_instances,
+)
+from .labels import LabelChips, NerveManifest
 from .theme import TEXT, TEXT_DISABLED
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from .rois import RoiStore
 from .measurements import (
     MEASUREMENTS_FILE_NAME,
     MeasurementLog,
-    REGION_NAMES,
-    knee_side_from_name,
-    measure,
+    area_unit,
+    measure_instances,
     to_grayscale,
 )
 from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
-from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
+from .rotations import RotationStore, rotate_image, rotate_mask
 from threading import Event
 from collections import OrderedDict
 import html
-import os
 import time
 from pathlib import Path
 import numpy as np
 import cv2
-import tifffile
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv")
-MASK_EXTENSIONS = (".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg")
 MIN_LIMITED_SIZE = 8
+# The label a single-class model's masks get when no label is picked.
+DEFAULT_MODEL_CLASS = "median"
 
 
 NO_MODEL_LABEL = "No model"
 PREDICTIONS_SUFFIX = "_predictions"
-
-
-def find_mask_files(folder, image_path, images=()):
-    """Mask files in `folder` that belong to an image, the best match first.
-
-    A mask belongs to an image when its file name starts with the image's name
-    without its ending: "scan.png", "scan.tif.png" and "scan_mask.png" all belong
-    to "scan.tif". The character after that start must not be a letter or a digit,
-    which keeps "scan_15.png" from being taken as the mask of "scan_1.tif". The
-    exact name "scan.png" comes first, then the shortest name.
-
-    `images` are the loaded image files; they are never taken as masks, since
-    the output folder can be the folder the images are in.
-    """
-    image_path = Path(image_path)
-    stem = image_path.stem
-    try:
-        names = os.listdir(folder)
-    except OSError:
-        return []
-    skip = {os.path.abspath(path) for path in images}
-    skip.add(os.path.abspath(image_path))
-    found = []
-    for name in names:
-        if not name.startswith(stem) or not name.lower().endswith(MASK_EXTENSIONS):
-            continue
-        if name[len(stem) : len(stem) + 1].isalnum():
-            continue
-        path = Path(folder) / name
-        if os.path.abspath(path) in skip or not path.is_file():
-            continue
-        found.append(path)
-    return sorted(found, key=lambda path: (path.stem != stem, len(path.name), path.name))
-
-
-def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
-    """Save a mask as a 0/255 image that lines up with the image file as stored.
-
-    mask is the mask as viewed. For an image viewed turned by angle, it is turned
-    back onto the stored image, whose (height, width) is original_shape.
-    """
-    mask_path = Path(mask_path)
-    stored = np.asarray(mask) > 0
-    if angle:
-        stored = unrotate_mask(stored, angle, original_shape)
-    mask_uint8 = stored.astype(np.uint8) * 255
-    mask_path.parent.mkdir(parents=True, exist_ok=True)
-    # The file is written under another name and then moved into place, so that
-    # a mask being saved by a segmentation run is never read half-written.
-    partial = mask_path.with_name(f".{mask_path.stem}.partial{mask_path.suffix}")
-    try:
-        if mask_path.suffix.lower() in (".tif", ".tiff"):
-            tifffile.imwrite(str(partial), mask_uint8)
-        elif not cv2.imwrite(str(partial), mask_uint8):
-            raise OSError(f"Failed to save mask: {mask_path.name}")
-        os.replace(partial, mask_path)
-    finally:
-        partial.unlink(missing_ok=True)
 
 
 def format_duration(seconds):
@@ -222,14 +176,43 @@ def place_prediction(prediction, image, box):
     """
     height, width = image.shape[:2]
     left, right, top, bottom = (0, width, 0, height) if box is None else box
-    part = np.asarray(prediction).astype(np.float32)
+    part = np.asarray(prediction).astype(np.uint8)
     if part.shape[:2] != (bottom - top, right - left):
         part = cv2.resize(
             part, (right - left, bottom - top), interpolation=cv2.INTER_NEAREST
         )
-    mask = np.zeros((height, width), dtype=np.float32)
-    mask[top:bottom, left:right] = part
-    return mask
+    labels = np.zeros((height, width), dtype=np.uint8)
+    labels[top:bottom, left:right] = part
+    return labels
+
+
+def prediction_instances(labels, class_names, default_class):
+    """The instances a model's class map stands for.
+
+    class_names labels the model's classes by index. Without it, a model with
+    one class gives default_class and one with several gives "class <index>".
+    """
+    found = [int(v) for v in np.unique(labels) if v > 0]
+    if not class_names:
+        if len(found) <= 1:
+            class_names = {index: default_class for index in found}
+        else:
+            class_names = {index: f"class {index}" for index in found}
+    return instances_from_labels(labels, class_names)
+
+
+def merge_predicted(kept, predicted):
+    """Kept instances plus predicted ones, numbered on from those kept."""
+    merged = list(kept)
+    for instance in predicted:
+        merged.append(
+            make_instance(
+                instance["class"],
+                next_instance_id(merged, instance["class"]),
+                instance["mask"],
+            )
+        )
+    return merged
 
 
 class MainWindow(QMainWindow):
@@ -249,6 +232,11 @@ class MainWindow(QMainWindow):
         self.canvas = Canvas()
         self.canvas.image_loaded.connect(self._update_title_with_image)
         self.canvas.navigation_requested.connect(self._on_canvas_navigation_requested)
+        self.canvas.notice.connect(self.statusBar().showMessage)
+        # The label sets and the location and side of each file, kept in the
+        # selected output folder; one with no folder yet holds only the defaults.
+        self._manifest = NerveManifest()
+        self._manifest_dir = None
 
         self._sidebar_panels = []
         root_layout.addWidget(
@@ -260,6 +248,8 @@ class MainWindow(QMainWindow):
         canvas_layout = QVBoxLayout(canvas_panel)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
         canvas_layout.setSpacing(0)
+        canvas_layout.addWidget(self._build_label_panel(), stretch=0)
+        canvas_layout.addSpacing(6)
         canvas_layout.addWidget(self.canvas, stretch=1)
         canvas_layout.addSpacing(6)
         frame_nav_row = QHBoxLayout()
@@ -327,7 +317,6 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
         self._wire_actions()
         self._model = ModelIntegration()
-        self._last_prediction = None
         self._inference_thread = None
         self._inference_worker = None
         self._inference_box = None
@@ -388,7 +377,7 @@ class MainWindow(QMainWindow):
             (self.px_per_mm_x_spin, "measurements/px_per_mm_x"),
             (self.px_per_mm_y_spin, "measurements/px_per_mm_y"),
         ):
-            spin.setValue(float(settings.value(key, 1.0, float) or 1.0))
+            spin.setValue(float(settings.value(key, 0.0, float) or 0.0))
             spin.valueChanged.connect(self._on_px_per_mm_changed)
         self._build_calibration_dialog()
         self.h_lines_mm_spin.setValue(
@@ -408,19 +397,14 @@ class MainWindow(QMainWindow):
         self.canvas.roi_drawn.connect(self._on_roi_drawn)
         self.canvas.roi_changed.connect(self._save_current_roi)
         self.canvas.delete_requested.connect(self._on_delete_requested)
-        self.view_picker.setCurrentIndex(
-            0 if settings.value("measurements/view", "region", str) == "full" else 1
-        )
-        # Where the knee side on screen comes from: "name" for the file name,
-        # "user" for a side picked in the Knee dropdown.
-        self._knee_set_by = "name"
-        # Knee side picked by hand for a video, by video path. It holds for every
-        # frame of that video, also before any of them has a saved result.
-        self._video_knee_picks = {}
-        self.view_picker.currentIndexChanged.connect(self._on_measurement_view_changed)
-        self.knee_picker.currentIndexChanged.connect(self._on_knee_side_changed)
-        self.reset_centre_btn.clicked.connect(lambda: self.canvas.set_centre_x(None))
-        self._on_measurement_view_changed()
+        self.side_picker.currentIndexChanged.connect(self._on_side_changed)
+        self.location_chips.picked.connect(self._on_location_picked)
+        self.nerve_chips.picked.connect(lambda label: self._on_class_picked(label, "nerves"))
+        self.anatomy_chips.picked.connect(lambda label: self._on_class_picked(label, "anatomy"))
+        self.location_chips.add_requested.connect(lambda: self._add_label("locations"))
+        self.nerve_chips.add_requested.connect(lambda: self._add_label("nerves"))
+        self.anatomy_chips.add_requested.connect(lambda: self._add_label("anatomy"))
+        self._show_label_sets()
         self.canvas.image_loaded.connect(self._on_image_loaded_during_calibration)
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
@@ -457,7 +441,7 @@ class MainWindow(QMainWindow):
         self.save_mask_action = QAction("Save masks", self)
         self.save_mask_action.setShortcut(QKeySequence.StandardKey.Save)
         file_menu.addAction(self.save_mask_action)
-        self.delete_mask_action = QAction("Delete mask", self)
+        self.delete_mask_action = QAction("Delete all masks", self)
         file_menu.addAction(self.delete_mask_action)
         self.close_file_action = QAction("Close file", self)
         file_menu.addAction(self.close_file_action)
@@ -657,51 +641,123 @@ class MainWindow(QMainWindow):
         self._end_calibration()
         self.statusBar().showMessage("Calibration applied")
 
-    def _on_measurement_view_changed(self):
-        region_view = bool(self.view_picker.currentData())
-        self._settings().setValue(
-            "measurements/view", "region" if region_view else "full"
-        )
-        self.canvas.set_region_view(region_view)
-        self.knee_picker.setEnabled(region_view)
-        self.reset_centre_btn.setEnabled(region_view)
-        for region in self._result_columns:
-            visible = (region != "whole") if region_view else (region == "whole")
-            self._result_headers[region].setVisible(visible and region_view)
-            for (value_region, _), label in self._result_values.items():
-                if value_region == region:
-                    label.setVisible(visible)
-        self._update_measurements()
+    def _base_output_dir(self):
+        return self._video_base_dir if self._mode == "video" else self._sequence_base_dir
 
-    def _on_knee_side_changed(self):
-        """A side picked by hand. It belongs to the image on screen, or to every
-        frame of the video on screen."""
-        knee_side = self.knee_picker.currentData() or None
-        self._knee_set_by = "user"
-        self.canvas.set_knee_side(knee_side)
-        if self._mode == "video" and self._video_path:
-            self._video_knee_picks[self._video_path] = knee_side
+    def _load_manifest(self):
+        """Read the label sets and file labels of the selected output folder."""
+        folder = self._base_output_dir()
+        if folder == self._manifest_dir:
+            return
+        try:
+            self._manifest = NerveManifest(folder)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self, "Labels", f"Could not read {Path(folder) / 'nerve_manifest.json'}: {exc}"
+            )
+            self._manifest = NerveManifest()
+        self._manifest_dir = folder
+        self._show_label_sets()
+
+    def _save_manifest(self):
+        try:
+            self._manifest.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not save the labels: {exc}")
+
+    def _show_label_sets(self):
+        """Put the label sets on the chips and give the canvas their colours."""
+        order = self._manifest.class_order()
+        self.canvas.set_class_order(order)
+        self.canvas.set_label_choices(self._manifest.nerves, self._manifest.anatomy)
+        colors = {label: self.canvas.color_of(label) for label in order}
+        self.location_chips.set_labels(self._manifest.locations)
+        self.nerve_chips.set_labels(self._manifest.nerves, colors)
+        self.anatomy_chips.set_labels(self._manifest.anatomy, colors)
+        self._show_file_labels()
+
+    def _show_file_labels(self):
+        """Show the location and side of the file on screen."""
+        name = self._shown_file_name()
+        is_video = self._mode == "video"
+        location = None if name is None else self._manifest.location(name, is_video)
+        side = None if name is None else self._manifest.side(name, is_video)
+        self.location_chips.set_checked(location)
+        self.side_picker.blockSignals(True)
+        self.side_picker.setCurrentIndex(max(0, self.side_picker.findData(side or "")))
+        self.side_picker.blockSignals(False)
+
+    def _file_labels(self, file_name, is_video):
+        """(side, location) of a file."""
+        return (
+            self._manifest.side(file_name, is_video),
+            self._manifest.location(file_name, is_video),
+        )
+
+    def _on_class_picked(self, label, kind):
+        """A nerve or anatomy chip picked: new masks get its label. Nerve and
+        anatomy chips share one choice, so picking one unchecks the other row."""
+        other = self.anatomy_chips if kind == "nerves" else self.nerve_chips
+        if label:
+            other.set_checked(None)
+        self.canvas.set_active_class(label or None)
+        if label:
+            self.statusBar().showMessage(f"New masks are labelled {display_class(label)}")
+
+    def _on_location_picked(self, location):
+        name = self._shown_file_name()
+        if name is None:
+            self.location_chips.set_checked(None)
+            QMessageBox.information(self, "No files", "Load files first.")
+            return
+        self._manifest.set_location(name, self._mode == "video", location or None)
+        self._save_manifest()
+        self._file_labels_changed()
+        self.statusBar().showMessage(
+            f"Location of {name}: {display_class(location)}" if location else f"Location of {name} cleared"
+        )
+
+    def _on_side_changed(self):
+        name = self._shown_file_name()
+        if name is None:
+            return
+        self._manifest.set_side(name, self._mode == "video", self.side_picker.currentData() or None)
+        self._save_manifest()
+        self._file_labels_changed()
+
+    def _file_labels_changed(self):
+        """Bring the measurements of the file on screen up to date with its
+        location and side; for a video, those of every saved frame."""
+        if self._mode == "video":
             if self._batch_thread and self._batch_thread.isRunning():
                 return
-            # The saved frames of the video are measured again with the side.
             self._stash_video_mask_for_current_frame()
             self._remeasure_video_frames()
+        elif self._mode == "sequence":
+            self._save_sequence_mask_if_needed()
 
-    def _video_knee_side(self, video_path, log, frame):
-        """(knee side, where it comes from) of a frame of a video."""
-        if video_path in self._video_knee_picks:
-            return self._video_knee_picks[video_path], "user"
-        return log.knee_side(Path(video_path).name, frame)
-
-    def _show_knee_side(self, knee_side, set_by):
-        """Put a knee side in the dropdown without it counting as picked by hand."""
-        self._knee_set_by = set_by
-        self.knee_picker.blockSignals(True)
-        self.knee_picker.setCurrentIndex(
-            max(0, self.knee_picker.findData(knee_side or ""))
+    def _add_label(self, kind):
+        titles = {"locations": "location", "nerves": "nerve", "anatomy": "anatomy"}
+        text, ok = QInputDialog.getText(
+            self, f"Add {titles[kind]}", f"Name of the new {titles[kind]}:"
         )
-        self.knee_picker.blockSignals(False)
-        self.canvas.set_knee_side(knee_side)
+        if not ok or not clean_class(text):
+            return
+        if not self._manifest.add_label(kind, text):
+            QMessageBox.information(
+                self, "Add label", f"There is already a label called {display_class(text)}."
+            )
+            return
+        self._save_manifest()
+        self._show_label_sets()
+        chips = {"locations": self.location_chips, "nerves": self.nerve_chips, "anatomy": self.anatomy_chips}
+        if kind == "locations":
+            if self._shown_file_name() is not None:
+                self.location_chips.set_checked(clean_class(text))
+                self._on_location_picked(clean_class(text))
+        else:
+            chips[kind].set_checked(clean_class(text))
+            self._on_class_picked(clean_class(text), kind)
 
     def _shown_file_name(self):
         """Name of the image or video file on screen, or None."""
@@ -730,94 +786,85 @@ class MainWindow(QMainWindow):
         return str(output_dir), file_name, str(frame)
 
     def _restore_frame_inputs(self):
-        """Bring back the ROI, knee side and centre point of the frame on screen.
-
-        The knee side is the one picked by hand for the frame if its saved row has
-        one, otherwise the one its file name states, if any. A frame with no centre
-        point of its own uses the suggested centre.
-        """
-        shown_name = self._shown_file_name()
-        if shown_name is not None:
-            self._show_knee_side(knee_side_from_name(shown_name), "name")
+        """Bring back the ROI, location and side of the frame on screen."""
+        self._show_file_labels()
         key = self._current_frame_key()
         if key is None:
             return
         output_dir, file_name, frame = key
         try:
             log = self._measurement_log(self._shown_result_dir())
-            row = log.get(file_name, frame)
-            if self._mode == "video":
-                self._show_knee_side(
-                    *self._video_knee_side(self._video_path, log, frame)
-                )
-            else:
-                self._show_knee_side(*log.knee_side(file_name, frame))
             # A saved result keeps the ROI it was measured with; rois.csv only
             # supplies the ROI of a frame that has no saved result yet.
-            # A row measured at another rotation describes a view that is no
-            # longer the one on screen, so its ROI and centre point do not apply.
-            if row is not None and log.rotation(file_name, frame) != self._shown_angle:
-                row = None
-            if row is not None:
+            # A result measured at another rotation describes a view that is no
+            # longer the one on screen, so its ROI does not apply.
+            rows = log.get(file_name, frame)
+            if rows and log.rotation(file_name, frame) == self._shown_angle:
                 self.canvas.set_roi(log.limits(file_name, frame))
             else:
                 self.canvas.set_roi(self._roi_store(output_dir).get(file_name, frame))
         except OSError:
             return
-        if row is None:
-            return
-        if row.get("centre_set_by") == "user":
-            try:
-                self.canvas.set_centre_x(float(row["centre_x"]))
-            except (TypeError, ValueError):
-                pass
 
     def _shown_result_dir(self):
         """Folder holding the saved result of the image or frame on screen.
 
         The selected model's results folder, or the selected output folder itself
-        when only that holds a mask for it (results saved before models had
-        folders of their own).
+        when only that holds masks for it (masks drawn with no model selected).
         """
         if self._mode == "video":
             results_dir, base_dir = self._video_output_dir, self._video_base_dir
         else:
             results_dir, base_dir = self._sequence_output_dir, self._sequence_base_dir
-        shown = self._shown_mask_path()
+        shown = self._shown_mask_set()
         if shown is not None and base_dir and results_dir != str(base_dir):
-            if Path(results_dir) not in Path(shown).parents:
+            if Path(results_dir) not in shown.folder.parents:
                 return str(base_dir)
         return results_dir
 
-    def _shown_mask_path(self):
-        """Saved mask file of the image or frame on screen, or None."""
-        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
-            for base_dir in (self._video_output_dir, self._video_base_dir):
-                if base_dir:
-                    path = (
-                        Path(base_dir)
-                        / Path(self._video_path).stem
-                        / f"frame_{int(self._video_frame_index):06d}.png"
-                    )
-                    if path.is_file():
-                        return path
+    def _mask_set_in(self, results_dir, source_path, frame=None):
+        """The mask files of an image, or of a frame of a video, in a results folder."""
+        if not results_dir:
             return None
+        return MaskSet(Path(results_dir) / Path(source_path).stem, frame)
+
+    def _current_mask_set(self):
+        """Where the masks of the image or frame on screen are saved."""
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            return self._mask_set_in(
+                self._video_output_dir, self._video_path, self._video_frame_index
+            )
         if self._mode == "sequence" and 0 <= self._sequence_index < len(
             self._sequence_paths
         ):
-            image_path = Path(self._sequence_paths[self._sequence_index])
-            for base_dir in (self._sequence_output_dir, self._sequence_base_dir):
-                if not base_dir:
-                    continue
-                found = find_mask_files(base_dir, image_path, self._sequence_paths)
-                if found:
-                    return found[0]
+            return self._mask_set_in(
+                self._sequence_output_dir, self._sequence_paths[self._sequence_index]
+            )
+        return None
+
+    def _shown_mask_set(self):
+        """Saved masks of the image or frame on screen: those in the model's
+        results folder, else those in the selected output folder, else None."""
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            source, frame = self._video_path, self._video_frame_index
+            folders = (self._video_output_dir, self._video_base_dir)
+        elif self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            source, frame = self._sequence_paths[self._sequence_index], None
+            folders = (self._sequence_output_dir, self._sequence_base_dir)
+        else:
+            return None
+        for folder in folders:
+            mask_set = self._mask_set_in(folder, source, frame)
+            if mask_set is not None and mask_set.exists():
+                return mask_set
         return None
 
     def _restore_folder_inputs(self):
-        """Show the ROI, knee side and centre point the output folder holds for the
-        frame on screen, in place of those of the folder it was switched from."""
-        self.canvas.set_centre_x(None)
+        """Show the ROI, location and side the output folder holds for the frame
+        on screen, in place of those of the folder it was switched from."""
+        self._load_manifest()
         self._restore_frame_inputs()
 
     def _roi_store(self, output_dir):
@@ -867,11 +914,6 @@ class MainWindow(QMainWindow):
         key = self._current_frame_key()
         return 0.0 if key is None else self._angle_of(key[0], key[1])
 
-    def _read_saved_mask(self, mask_path, angle=0.0):
-        """A saved mask file as a bool array, turned the way its image is viewed."""
-        raw = self.canvas._read_mask(str(mask_path))
-        return rotate_mask(raw >= (128 if raw.max() > 1 else 0.5), angle)
-
     def _show_image(self, image, source_name):
         """Put an image as stored on the canvas, turned by its file's angle."""
         self._original_shape = image.shape[:2]
@@ -908,18 +950,14 @@ class MainWindow(QMainWindow):
         worker = self._batch_worker
         # Looked up before the file is read: a result listed as saved is complete.
         self._shows_run_result = worker is not None and self._run_key() in worker.saved
-        mask_path = self._shown_mask_path()
-        if mask_path is None:
+        mask_set = self._shown_mask_set()
+        if mask_set is None:
             self.canvas.clear_mask()
-        elif not self._shown_angle:
-            self.canvas.load_mask(str(mask_path))
-        else:
-            try:
-                mask = self._read_saved_mask(mask_path, self._shown_angle)
-            except Exception as exc:
-                QMessageBox.critical(self, "Load failed", str(exc))
-                return
-            self.canvas.set_mask(mask.astype(np.float32))
+            return
+        try:
+            self.canvas.set_instances(mask_set.read(self._shown_angle))
+        except Exception as exc:
+            QMessageBox.critical(self, "Load failed", str(exc))
 
     def _rotate_dialog(self):
         """Let the user turn the image on screen, previewing while a slider moves."""
@@ -1000,8 +1038,8 @@ class MainWindow(QMainWindow):
             else:
                 self._save_sequence_mask_if_needed()
                 image = self.canvas._read_image(self._sequence_paths[self._sequence_index])
-            mask_path = self._shown_mask_path()
-            mask = None if mask_path is None else self._read_saved_mask(mask_path)
+            mask_set = self._shown_mask_set()
+            instances = [] if mask_set is None else mask_set.read()
         except Exception as exc:
             QMessageBox.warning(self, "Rotate image", str(exc))
             return False
@@ -1009,7 +1047,7 @@ class MainWindow(QMainWindow):
             return False
         self._rotation_preview = {
             "image": image,
-            "mask": mask,
+            "instances": instances,
             "source": self.canvas.image_path or "",
         }
         return True
@@ -1022,8 +1060,13 @@ class MainWindow(QMainWindow):
         self.canvas.load_image_array(
             rotate_image(preview["image"], angle), preview["source"]
         )
-        if preview["mask"] is not None:
-            self.canvas.set_mask(rotate_mask(preview["mask"], angle).astype(np.float32))
+        if preview["instances"]:
+            self.canvas.set_instances(
+                [
+                    make_instance(i["class"], i["id"], rotate_mask(i["mask"], angle))
+                    for i in preview["instances"]
+                ]
+            )
 
     def _finish_rotation(self, angle):
         """Keep an angle chosen in a preview, or with None go back to the stored one."""
@@ -1055,7 +1098,7 @@ class MainWindow(QMainWindow):
             return
         if self._mode == "video":
             self._remeasure_video_frames()
-        elif self._canvas_has_mask() and self._shown_result_dir() == output_dir:
+        elif self.canvas.has_visible_mask() and self._shown_result_dir() == output_dir:
             self._record_measurement(output_dir, file_name)
         self.statusBar().showMessage(f"Rotation of {file_name}: {self._shown_angle:g}°")
 
@@ -1140,14 +1183,14 @@ class MainWindow(QMainWindow):
         step["depth"] = self.canvas.history_depth()
         self._bulk_undo.append(step)
 
-    def _bulk_entry(self, folder, name, frame, mask_path=None):
+    def _bulk_entry(self, folder, name, frame, mask_set=None):
         """What one image or frame holds before a step across files changes it."""
         entry = {
             "folder": str(folder),
             "base": self._base_dir_of(folder),
             "name": name,
             "frame": str(frame),
-            "mask_path": None if mask_path is None else Path(mask_path),
+            "mask_set": mask_set,
         }
         self._fill_bulk_entry(entry, "prev")
         return entry
@@ -1156,11 +1199,9 @@ class MainWindow(QMainWindow):
         name, frame = entry["name"], entry["frame"]
         row = self._measurement_log(entry["folder"]).get(name, frame)
         entry[f"{side}_roi"] = self._roi_store(entry["base"]).get(name, frame)
-        entry[f"{side}_row"] = None if row is None else dict(row)
-        path = entry["mask_path"]
-        entry[f"{side}_bytes"] = (
-            path.read_bytes() if path is not None and path.is_file() else None
-        )
+        entry[f"{side}_row"] = None if row is None else [dict(r) for r in row]
+        mask_set = entry["mask_set"]
+        entry[f"{side}_files"] = None if mask_set is None else mask_set.snapshot()
 
     def _swap_bulk(self, step, side):
         """Put the files of a step across files into their "prev" or "after" state.
@@ -1182,10 +1223,10 @@ class MainWindow(QMainWindow):
                 name, frame = entry["name"], entry["frame"]
                 store = self._roi_store(entry["base"])
                 log = self._measurement_log(entry["folder"])
-                path = entry["mask_path"]
-                held = path.read_bytes() if path is not None and path.is_file() else None
+                mask_set = entry["mask_set"]
+                held = None if mask_set is None else mask_set.snapshot()
                 if store.get(name, frame) != entry[f"{other}_roi"] or (
-                    path is not None and held != entry[f"{other}_bytes"]
+                    mask_set is not None and held != entry[f"{other}_files"]
                 ):
                     skipped += 1
                     continue
@@ -1193,12 +1234,8 @@ class MainWindow(QMainWindow):
                     store.remove(name, frame)
                 else:
                     store.set(name, frame, entry[f"{side}_roi"])
-                if path is not None and held != entry[f"{side}_bytes"]:
-                    if entry[f"{side}_bytes"] is None:
-                        path.unlink()
-                    else:
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_bytes(entry[f"{side}_bytes"])
+                if mask_set is not None and held != entry[f"{side}_files"]:
+                    mask_set.restore(entry[f"{side}_files"])
                 log.put(name, frame, entry[f"{side}_row"])
                 touched[id(store)] = store
                 touched[id(log)] = log
@@ -1324,15 +1361,10 @@ class MainWindow(QMainWindow):
                         if progress.canceled:
                             break
                         done += 1
-                        if frame == "":
-                            mask_path = self._find_sequence_mask_path(source_path)
-                            if mask_path and Path(mask_path).resolve() == Path(
-                                source_path
-                            ).resolve():
-                                mask_path = None
-                        else:
-                            mask_path = self._video_mask_path(source_path, frame)
-                        has_mask = mask_path is not None and Path(mask_path).is_file()
+                        mask_set = self._mask_set_in(
+                            folder, source_path, None if frame == "" else frame
+                        )
+                        has_mask = mask_set is not None and mask_set.exists()
                         if not has_mask and not auto:
                             entries.append(self._bulk_entry(folder, name, frame))
                             store.set(name, frame, box)
@@ -1370,9 +1402,9 @@ class MainWindow(QMainWindow):
                             store.set(name, frame, box)
                             applied += 1
                             continue
-                        entries.append(self._bulk_entry(folder, name, frame, mask_path))
+                        entries.append(self._bulk_entry(folder, name, frame, mask_set))
                         if self._trim_saved_mask(
-                            Path(mask_path), box, image, log, name, frame, angle
+                            mask_set, box, image, log, name, frame, angle
                         ):
                             store.set(name, frame, box)
                             applied += 1
@@ -1404,45 +1436,42 @@ class MainWindow(QMainWindow):
             message += f"; {count - applied} left out because {reason}"
         self.statusBar().showMessage(message)
 
-    def _trim_saved_mask(self, mask_path, box, image, log, file_name, frame, angle=0.0):
-        """Blank a saved mask outside a box and bring its measurements up to date.
+    def _trim_saved_mask(self, mask_set, box, image, log, file_name, frame, angle=0.0):
+        """Blank saved masks outside a box and bring their measurements up to date.
 
         The box is in the view of the file, which is turned by angle. Returns
-        False, changing nothing, when the box does not fit the mask.
+        False, changing nothing, when the box does not fit the masks.
         """
-        stored_shape = self.canvas._read_mask(str(mask_path)).shape[:2]
-        mask = self._read_saved_mask(mask_path, angle)
-        if image is not None:
-            image = rotate_image(image, angle)
-        fitted = box_to_segment(mask, box)
+        stored_shape = mask_set.stored_shape()
+        instances = mask_set.read(angle)
+        if not instances:
+            return False
+        fitted = box_to_segment(instances[0]["mask"], box)
         if fitted is None:
             return False
-        left, right, top, bottom = fitted
-        trimmed = np.zeros_like(mask)
-        trimmed[top:bottom, left:right] = mask[top:bottom, left:right]
-        if not trimmed.any():
-            mask_path.unlink()
+        trimmed = clip_instances(instances, fitted)
+        if not trimmed:
+            mask_set.remove()
             log.remove(file_name, frame)
             return True
-        write_mask_file(mask_path, trimmed, angle, stored_shape)
+        mask_set.write(trimmed, angle, stored_shape)
+        is_video = frame != ""
+        side, location = self._file_labels(file_name, is_video)
         log.set(
             file_name,
             frame,
-            image,
             trimmed,
             self.px_per_mm_x_spin.value(),
             self.px_per_mm_y_spin.value(),
-            knee_side=knee_side_from_name(file_name),
-            prefer_saved=True,
+            side=side,
+            location=location,
             limits=fitted,
             rotation=angle,
         )
         return True
 
     def _on_delete_requested(self, kind):
-        if kind == "mask":
-            self._delete_current_mask()
-        elif kind == "roi":
+        if kind == "roi":
             self.canvas.set_roi(None, record=True)
             if self._save_current_roi():
                 self.statusBar().showMessage("ROI deleted")
@@ -1505,33 +1534,31 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Removed {removed} ROIs")
 
     def _update_measurements(self):
-        mask = self.canvas.visible_mask()
-        result = measure(
-            self.canvas.image,
-            None if mask is None else mask >= 0.5,
-            self.px_per_mm_x_spin.value(),
-            self.px_per_mm_y_spin.value(),
-            self.canvas.centre_x,
-            self.canvas.knee_side,
-            self.canvas.roi_box(),
-        )
-        unit = result["unit"]
-        row_titles = {
-            "area": f"Area ({unit}²)",
-            "length": f"Length ({unit})",
-            "thickness": f"Thickness ({unit})",
-            "echo_mean": "Echo intensity (AU)",
-            "echo_sd": "Variation (AU)",
-        }
-        for measure_name, title in row_titles.items():
-            self._result_row_labels[measure_name].setText(title)
-        for (region, measure_name), label in self._result_values.items():
-            value = result["regions"][region][measure_name]
-            if np.isnan(value):
-                label.setText("–")
-            else:
-                decimals = 1 if measure_name in ("echo_mean", "echo_sd") else 2
-                label.setText(f"{value:.{decimals}f}")
+        """List the area of each mask on screen in the measurements sidebar."""
+        while self.results_grid.count():
+            widget = self.results_grid.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        px_x, px_y = self.px_per_mm_x_spin.value(), self.px_per_mm_y_spin.value()
+        unit = area_unit(px_x, px_y)
+        header = QLabel(f"Area ({unit}²)")
+        header.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.results_grid.addWidget(QLabel("Mask"), 0, 1)
+        self.results_grid.addWidget(header, 0, 2)
+        results = measure_instances(self.canvas.visible_instances(), px_x, px_y)
+        if not results:
+            self.results_grid.addWidget(QLabel("No masks"), 1, 1)
+        for row, result in enumerate(results, start=1):
+            swatch = QLabel()
+            dot = QPixmap(12, 12)
+            dot.fill(QColor(*self.canvas.color_of(result["class"])))
+            swatch.setPixmap(dot)
+            self.results_grid.addWidget(swatch, row, 0)
+            self.results_grid.addWidget(QLabel(instance_title(result)), row, 1)
+            value = QLabel(f"{result['area']:.2f}" if unit == "mm" else str(result["area_px"]))
+            value.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self.results_grid.addWidget(value, row, 2)
 
     def _measurement_log(self, output_dir):
         # Logs are kept in memory so that stepping through video frames does not
@@ -1549,19 +1576,18 @@ class MainWindow(QMainWindow):
         return self._measurement_logs[key]
 
     def _record_measurement(self, output_dir, file_name, frame=""):
-        """Store the measurements of the mask on screen next to its saved mask."""
+        """Store the measurements of the masks on screen next to their saved masks."""
+        side, location = self._file_labels(file_name, frame != "")
         try:
             log = self._measurement_log(output_dir)
             log.set(
                 file_name,
                 frame,
-                self.canvas.image,
-                np.asarray(self.canvas.visible_mask()) >= 0.5,
+                self.canvas.visible_instances(),
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
-                self.canvas.centre_x,
-                self.canvas.knee_side,
-                self._knee_set_by,
+                side=side,
+                location=location,
                 limits=self.canvas.roi_box(),
                 rotation=self._shown_angle,
             )
@@ -1569,120 +1595,80 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self.statusBar().showMessage(f"Could not save measurements: {exc}")
 
-    def _saved_mask_matches(self, mask_path):
-        """True when a saved mask file holds the same mask as the one on screen."""
-        if mask_path is None or not Path(mask_path).is_file():
+    def _saved_masks_match(self, mask_set):
+        """True when saved mask files hold the same masks as those on screen."""
+        if mask_set is None or not mask_set.exists():
             return False
         try:
-            stored = self._read_saved_mask(mask_path)
+            stored = mask_set.read()
         except Exception:
             return False
-        shown = np.asarray(self.canvas.visible_mask()) >= 0.5
-        if self._shown_angle:
-            # Turning a mask is not exactly reversible, so the file counts as
-            # the same mask when it gives the mask on screen once turned, or
-            # when the mask on screen gives the file once turned back.
-            if stored.ndim != 2:
-                return False
-            if np.array_equal(rotate_mask(stored, self._shown_angle), shown):
-                return True
-            return bool(
-                np.array_equal(
-                    unrotate_mask(shown, self._shown_angle, stored.shape), stored
-                )
-            )
-        saved = stored
-        if saved.shape != shown.shape:
-            if saved.ndim != 2:
-                return False
-            saved = cv2.resize(
-                saved.astype(np.uint8),
-                (shown.shape[1], shown.shape[0]),
-                interpolation=cv2.INTER_NEAREST,
-            ).astype(bool)
-        return bool(np.array_equal(saved, shown))
+        shown = self.canvas.visible_instances()
+        if not self._shown_angle:
+            return same_instances(stored, shown)
+        # Turning a mask is not exactly reversible, so the files count as the
+        # same masks when they give the masks on screen once turned.
+        turned = [
+            make_instance(i["class"], i["id"], rotate_mask(i["mask"], self._shown_angle))
+            for i in stored
+        ]
+        return same_instances(turned, shown)
 
-    def _write_shown_mask(self, mask_path):
-        """Save the mask on screen so that it lines up with the stored image."""
-        write_mask_file(
-            mask_path,
-            np.asarray(self.canvas.visible_mask()) >= 0.5,
-            self._shown_angle,
-            self._original_shape,
+    def _write_shown_masks(self, mask_set):
+        """Save the masks on screen so that they line up with the stored image."""
+        mask_set.write(
+            self.canvas.visible_instances(), self._shown_angle, self._original_shape
         )
 
     def _measurement_is_current(self, output_dir, file_name, frame=""):
-        """True when the saved row was measured with the inputs on screen."""
+        """True when the saved rows were measured with the inputs on screen."""
+        side, location = self._file_labels(file_name, frame != "")
         try:
             return self._measurement_log(output_dir).matches_inputs(
                 file_name,
                 frame,
-                self.canvas.centre_x,
-                self.canvas.knee_side,
-                self._knee_set_by,
+                side,
+                location,
                 self.canvas.roi_box(),
                 self._shown_angle,
+                (self.px_per_mm_x_spin.value(), self.px_per_mm_y_spin.value()),
             )
         except OSError:
             return False
 
     def _remeasure_video_frames(self):
-        """Measure every saved frame mask of the video on screen again.
+        """Measure every saved frame of the video on screen again.
 
-        Each frame keeps the centre point and ROI its row records.
+        Each frame keeps the ROI its rows record.
         """
         root = self._video_output_root_for_path(self._video_path)
         if root is None or not root.is_dir():
             return
-        frames = sorted(
-            int(path.stem.split("_")[-1])
-            for path in root.glob("frame_*.png")
-            if path.stem.split("_")[-1].isdigit()
-        )
+        frames = sorted(annotated_frames(root))
         if not frames:
             return
         name = Path(self._video_path).name
+        side, location = self._file_labels(name, True)
+        angle = self._angle_of(self._video_output_dir, name)
         progress = WorkProgressDialog(
             "Measurements", "Updating measurements...", len(frames), self
         )
-        capture = open_capture(self._video_path)
-        position = 0
         try:
             log = self._measurement_log(self._video_output_dir)
             for done, frame in enumerate(frames):
                 if done % 25 == 0:
                     progress.setValue(done)
-                # Frames are read in order because seeking to a frame number is
-                # not exact in every video format.
-                while position < frame:
-                    capture.grab()
-                    position += 1
-                success, image = capture.read()
-                position += 1
-                if not success:
-                    image = None
-                elif image.ndim == 3 and image.shape[2] == 3:
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                mask = self._load_saved_video_mask_for_frame(self._video_path, frame)
-                if mask is None or not mask.any():
+                instances = MaskSet(root, frame).read(angle)
+                if not instances:
                     continue
-                angle = self._angle_of(self._video_output_dir, name)
-                mask = rotate_mask(mask, angle)
-                if image is not None:
-                    image = rotate_image(image, angle)
-                knee_side, knee_side_set_by = self._video_knee_side(
-                    self._video_path, log, frame
-                )
                 log.set(
                     name,
                     frame,
-                    image,
-                    mask,
+                    instances,
                     self.px_per_mm_x_spin.value(),
                     self.px_per_mm_y_spin.value(),
-                    knee_side=knee_side,
-                    knee_side_set_by=knee_side_set_by,
-                    prefer_saved=True,
+                    side=side,
+                    location=location,
                     limits=(
                         log.limits(name, frame)
                         if log.rotation(name, frame) == angle
@@ -1694,7 +1680,6 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self.statusBar().showMessage(f"Could not save measurements: {exc}")
         finally:
-            capture.release()
             progress.setValue(len(frames))
 
     def _forget_measurement(self, output_dir, file_name, frame=""):
@@ -1883,7 +1868,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.segment_all_btn)
 
         mask_row = QHBoxLayout()
-        self.delete_mask_btn = QPushButton("Delete mask")
+        self.delete_mask_btn = QPushButton("Delete masks")
+        self.delete_mask_btn.setToolTip(
+            "Delete every mask of the image or frame on screen. To delete one "
+            "mask, right-click it or select it and press Delete."
+        )
         configure_button(self.delete_mask_btn)
         mask_row.addWidget(self.delete_mask_btn)
         self.save_btn = QPushButton("Save masks")
@@ -1985,6 +1974,34 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    def _build_label_panel(self):
+        """The location, nerve and anatomy chips, in rows across the top of the
+        image."""
+        panel = QWidget()
+        grid = QGridLayout(panel)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        self.location_chips = LabelChips("+ Add location")
+        self.location_chips.setToolTip("Where on the body the file on screen was scanned")
+        self.nerve_chips = LabelChips("+ Add nerve")
+        self.nerve_chips.setToolTip("The label new masks get")
+        self.anatomy_chips = LabelChips("+ Add anatomy")
+        self.anatomy_chips.setToolTip("The label new masks get")
+        for row, (title, chips) in enumerate(
+            (
+                ("Location:", self.location_chips),
+                ("Nerve:", self.nerve_chips),
+                ("Other anatomy:", self.anatomy_chips),
+            )
+        ):
+            label = QLabel(title)
+            label.setStyleSheet("font-weight: bold;")
+            grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            grid.addWidget(chips, row, 1)
+        grid.setColumnStretch(1, 1)
+        return panel
+
     def _build_measurements_sidebar(self):
         panel, layout = self._sidebar_panel_layout(self._measurements_sidebar_width)
         configure_button = self._configure_button
@@ -2002,8 +2019,8 @@ class MainWindow(QMainWindow):
             spin.setSpecialValueText("Not set")
             spin.setToolTip(
                 f"How many image pixels make up one millimetre going {direction} "
-                "the image. While either value is not set, thickness is shown "
-                "in pixels."
+                "the image. While either value is not set, areas are shown in "
+                "pixels."
             )
         px_per_mm_row = QHBoxLayout()
         px_per_mm_row.setSpacing(4)
@@ -2023,68 +2040,24 @@ class MainWindow(QMainWindow):
         configure_button(self.calibrate_btn)
         layout.addWidget(self.calibrate_btn)
 
-        view_row = QHBoxLayout()
-        self.view_picker = QComboBox()
-        self.view_picker.addItem("Full cartilage", False)
-        self.view_picker.addItem("Per region", True)
-        view_row.addWidget(QLabel("View:"))
-        view_row.addWidget(self.view_picker, stretch=1)
-        view_row.addSpacing(8)
-        self.knee_picker = QComboBox()
-        self.knee_picker.addItem("Not set", "")
-        self.knee_picker.addItem("Right", "right")
-        self.knee_picker.addItem("Left", "left")
-        self.knee_picker.setToolTip(
-            "Which knee the image shows. It decides which side is lateral and "
-            "which is medial. It is read from the file name; while it is Not set, "
-            "lateral and medial are not measured."
+        side_row = QHBoxLayout()
+        self.side_picker = QComboBox()
+        self.side_picker.addItem("Not set", "")
+        self.side_picker.addItem("Left", "left")
+        self.side_picker.addItem("Right", "right")
+        self.side_picker.setToolTip(
+            "Which side of the body the file on screen shows. It is recorded with "
+            "the measurements of every image or frame of the file."
         )
-        view_row.addWidget(QLabel("Knee:"))
-        view_row.addWidget(self.knee_picker)
-        layout.addLayout(view_row)
-        self.reset_centre_btn = QPushButton("Reset centre point")
-        self.reset_centre_btn.setToolTip(
-            "Move the diamond back to the position the app suggests"
-        )
-        configure_button(self.reset_centre_btn)
-        layout.addWidget(self.reset_centre_btn)
+        side_row.addWidget(QLabel("Side:"))
+        side_row.addWidget(self.side_picker, stretch=1)
+        layout.addLayout(side_row)
 
-        # One column of values per region; the view decides which columns show.
-        results_grid = QGridLayout()
-        results_grid.setHorizontalSpacing(8)
-        self._result_columns = ("whole",) + REGION_NAMES
-        column_titles = {
-            "whole": "Whole",
-            "lateral": "Lateral",
-            "intercondylar": "Notch",
-            "medial": "Medial",
-        }
-        self._result_headers = {}
-        self._result_row_labels = {}
-        self._result_values = {}
-        for column, region in enumerate(self._result_columns, start=1):
-            header = QLabel(column_titles[region])
-            header.setAlignment(Qt.AlignmentFlag.AlignRight)
-            if region in REGION_COLORS:
-                red, green, blue = REGION_COLORS[region]
-                header.setStyleSheet(
-                    f"color: rgb({red}, {green}, {blue}); font-weight: bold;"
-                )
-            results_grid.addWidget(header, 0, column)
-            self._result_headers[region] = header
-        for row, measure_name in enumerate(
-            ("area", "length", "thickness", "echo_mean", "echo_sd"), start=1
-        ):
-            row_label = QLabel()
-            results_grid.addWidget(row_label, row, 0)
-            self._result_row_labels[measure_name] = row_label
-            for column, region in enumerate(self._result_columns, start=1):
-                value = QLabel("–")
-                value.setAlignment(Qt.AlignmentFlag.AlignRight)
-                results_grid.addWidget(value, row, column)
-                self._result_values[(region, measure_name)] = value
-        results_grid.setColumnStretch(0, 1)
-        layout.addLayout(results_grid)
+        # One row per mask on screen, filled in by _update_measurements.
+        self.results_grid = QGridLayout()
+        self.results_grid.setHorizontalSpacing(8)
+        self.results_grid.setColumnStretch(1, 1)
+        layout.addLayout(self.results_grid)
 
         layout.addStretch()
 
@@ -2239,25 +2212,12 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(self._base_title)
 
-    def _saved_mask_paths_for_current(self):
-        if self._mode == "sequence" and 0 <= self._sequence_index < len(self._sequence_paths):
-            if not self._sequence_output_dir:
-                return []
-            image_path = Path(self._sequence_paths[self._sequence_index])
-            return find_mask_files(
-                self._shown_result_dir(), image_path, self._sequence_paths
-            )
-        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
-            mask_path = self._shown_mask_path()
-            if mask_path is not None:
-                return [mask_path]
-        return []
-
     def _delete_current_mask(self):
+        """Delete every mask of the image or frame on screen, after asking."""
         self._commit_pending_outline()
-        mask_paths = self._saved_mask_paths_for_current()
+        mask_set = self._shown_mask_set()
         result_dir = self._shown_result_dir()
-        if not mask_paths and not self._canvas_has_mask():
+        if mask_set is None and not self.canvas.has_visible_mask():
             return
         if self._mode == "video":
             target = f"frame {self._video_frame_index + 1} of {Path(self._video_path).name}"
@@ -2267,8 +2227,9 @@ class MainWindow(QMainWindow):
             target = "this image"
         choice = QMessageBox.question(
             self,
-            "Delete mask",
-            f"Delete the mask for {target}?\n\nThe mask will be permanently deleted.",
+            "Delete masks",
+            f"Delete all masks of {target}?\n\nThe masks will be permanently deleted. "
+            "To delete one mask, right-click it.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2276,8 +2237,8 @@ class MainWindow(QMainWindow):
             return
         self.canvas.clear_mask()
         try:
-            for mask_path in mask_paths:
-                mask_path.unlink()
+            if mask_set is not None:
+                mask_set.remove()
         except OSError as exc:
             QMessageBox.warning(self, "Delete error", str(exc))
             return
@@ -2292,8 +2253,8 @@ class MainWindow(QMainWindow):
                 result_dir,
                 Path(self._sequence_paths[self._sequence_index]).name,
             )
-        if mask_paths:
-            self.statusBar().showMessage("Mask deleted from the output folder")
+        if mask_set is not None:
+            self.statusBar().showMessage("Masks deleted from the output folder")
 
     def _close_current_file(self):
         if self._mode == "video":
@@ -2385,12 +2346,6 @@ class MainWindow(QMainWindow):
         if self._mode != "sequence":
             QMessageBox.information(self, "No files", "Load files first.")
             return
-        if 0 <= self._sequence_index < len(self._sequence_paths):
-            existing_path = self._find_sequence_mask_path(
-                self._sequence_paths[self._sequence_index]
-            )
-            if existing_path and not self._confirm_overwrite_existing(1):
-                return
         self._run_inference()
 
     def _run_current_video_frame_inference(self):
@@ -2401,26 +2356,19 @@ class MainWindow(QMainWindow):
         if selected_index < 0 or selected_index >= len(self._video_paths):
             QMessageBox.information(self, "No video", "Select a video first.")
             return
-        selected_video_path = self._video_paths[selected_index]
-        existing_path = self._video_mask_path(
-            selected_video_path,
-            self._video_frame_index,
-        )
-        has_existing_segmentation = bool(
-            (existing_path and existing_path.exists()) or self._canvas_has_mask()
-        )
-        if has_existing_segmentation:
-            if not self._confirm_overwrite_existing(1):
-                return
         self._run_inference()
 
     def _confirm_overwrite_existing(self, count):
         """Ask whether existing masks are overwritten: True for Yes, False for No
-        (keep them and segment only what has none), None for Cancel."""
+        (keep them and segment only what has none), None for Cancel.
+
+        Overwriting replaces only the masks of the labels the model segments;
+        masks of other labels stay.
+        """
+        noun = "image or frame" if count == 1 else "images or frames"
         text = (
-            "Found 1 mask. Do you want to overwrite it?"
-            if count == 1
-            else f"Found {count} masks. Do you want to overwrite them?"
+            f"Found masks on {count} {noun}. Do you want to replace the masks "
+            "of the labels the model segments?"
         )
         question = QMessageBox(
             QMessageBox.Icon.Question,
@@ -2466,7 +2414,9 @@ class MainWindow(QMainWindow):
 
         overwrite_existing = True
         existing_count = sum(
-            1 for image_path in self._sequence_paths if self._find_sequence_mask_path(image_path)
+            1
+            for image_path in self._sequence_paths
+            if self._mask_set_in(self._sequence_output_dir, image_path).exists()
         )
         if existing_count:
             overwrite_existing = self._confirm_overwrite_existing(existing_count)
@@ -2492,6 +2442,11 @@ class MainWindow(QMainWindow):
             rois=self._rois_for_segmenting(self._sequence_output_dir),
             rotations=self._rotation_store(self._sequence_output_dir).angles(),
             measurements=self._measurement_file(self._sequence_output_dir),
+            file_labels={
+                Path(path).name: self._file_labels(Path(path).name, False)
+                for path in self._sequence_paths
+            },
+            default_class=self._model_default_class(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -2547,9 +2502,8 @@ class MainWindow(QMainWindow):
 
         overwrite_existing = True
         existing_count = sum(
-            1
+            len(annotated_frames(Path(self._video_output_dir) / Path(video_path).stem))
             for video_path in video_paths
-            for _ in (Path(self._video_output_dir) / Path(video_path).stem).glob("frame_*.png")
         )
         if existing_count:
             overwrite_existing = self._confirm_overwrite_existing(existing_count)
@@ -2582,13 +2536,14 @@ class MainWindow(QMainWindow):
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
             ),
-            knee_picks={
-                Path(path).name: side
-                for path, side in self._video_knee_picks.items()
-            },
             rois=self._rois_for_segmenting(self._video_output_dir),
             rotations=self._rotation_store(self._video_output_dir).angles(),
             measurements=self._measurement_file(self._video_output_dir),
+            file_labels={
+                Path(path).name: self._file_labels(Path(path).name, True)
+                for path in video_paths
+            },
+            default_class=self._model_default_class(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
         self._batch_thread.started.connect(self._batch_worker.run)
@@ -2686,7 +2641,7 @@ class MainWindow(QMainWindow):
         if self._mode == "sequence" and self._sequence_paths and self._sequence_index >= 0:
             self._load_sequence_image()
         elif self._mode == "video" and self._video_path and self._video_frame_index >= 0:
-            if self._shown_mask_path() is not None:
+            if self._shown_mask_set() is not None:
                 self._show_saved_mask()
 
     def _on_video_started(self, video_name, video_number, video_count, frame_count):
@@ -2768,6 +2723,7 @@ class MainWindow(QMainWindow):
         self._sequence_index = 0
         self._sequence_output_dir = output_dir
         self._update_output_dir_tooltip()
+        self._load_manifest()
         self.file_combo.setEnabled(True)
         self.file_combo.clear()
         self.file_combo.addItems([Path(p).name for p in self._sequence_paths])
@@ -2789,6 +2745,7 @@ class MainWindow(QMainWindow):
         self._save_persisted_paths()
         self._update_output_dir_tooltip()
         self._mode = "video"
+        self._load_manifest()
         self.file_combo.setEnabled(True)
         self.file_combo.clear()
         self.file_combo.addItems([Path(p).name for p in self._video_paths])
@@ -2860,8 +2817,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Output folder: {directory}")
 
     def _show_saved_result(self):
-        """Put the saved mask, ROI, knee side and centre point of the image or
-        frame on screen back on the canvas, as held by the results folder in use."""
+        """Put the saved masks, ROI, location and side of the image or frame on
+        screen back on the canvas, as held by the results folder in use."""
         if self.canvas.image is None or self._current_frame_key() is None:
             return
         if self._current_angle() != self._shown_angle:
@@ -2918,21 +2875,6 @@ class MainWindow(QMainWindow):
         if not output_dir:
             return None
         return Path(output_dir) / Path(video_path).stem
-
-    def _video_mask_path(self, video_path, frame_index):
-        root = self._video_output_root_for_path(video_path)
-        if root is None:
-            return None
-        return root / f"frame_{int(frame_index):06d}.png"
-
-    def _load_saved_video_mask_for_frame(self, video_path, frame_index):
-        mask_path = self._video_mask_path(video_path, frame_index)
-        if mask_path is None or not mask_path.exists():
-            return None
-        mask_gray = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-        if mask_gray is None:
-            return None
-        return (mask_gray >= 128).astype(np.float32)
 
     def _open_video_at_index(self, video_index, start_frame=0):
         if video_index < 0 or video_index >= len(self._video_paths):
@@ -3223,31 +3165,18 @@ class MainWindow(QMainWindow):
         self._update_navigation_buttons()
         self._update_title_with_image(self._video_path or "")
 
-    def _canvas_has_mask(self):
-        mask = self.canvas.visible_mask()
-        if mask is None:
-            return False
-        return bool(np.any(np.asarray(mask) >= 0.5))
-
-    def _mask_hidden_by_roi(self):
-        """True when the canvas holds mask that the ROI keeps out of view."""
-        mask = self.canvas.mask
-        if mask is None or self.canvas.roi_box() is None:
-            return False
-        return bool(np.any(np.asarray(mask) >= 0.5)) and not self._canvas_has_mask()
-
     def _commit_pending_outline(self):
         if self.canvas is None:
             return
         self.canvas.commit_pending_outline_to_mask()
 
     def _stash_video_mask_for_current_frame(self, force=False):
-        """Save the mask and measurements of the frame on screen if they changed.
+        """Save the masks and measurements of the frame on screen if they changed.
 
-        A mask equal to its saved file is not written again, and its measurements
-        row is left alone while it records the knee side, centre point and ROI on
-        screen. force writes both regardless. After a change of pixels per mm,
-        every saved frame of the video is measured again.
+        Masks equal to their saved files are not written again, and their
+        measurements are left alone while they record the location, side, ROI
+        and pixels per mm on screen. force writes both regardless. After a
+        change of pixels per mm, every saved frame of the video is measured again.
         """
         if self._mode != "video":
             return
@@ -3256,58 +3185,52 @@ class MainWindow(QMainWindow):
         if not force and self._run_result_pending():
             return
         self._commit_pending_outline()
-        mask_path = self._video_mask_path(self._video_path, self._video_frame_index)
-        if mask_path is None:
+        mask_set = self._current_mask_set()
+        if mask_set is None:
             return
         name = Path(self._video_path).name
         calibration_changed = self._calibration_changed
         self._calibration_changed = False
-        self._stash_video_frame(mask_path, name, force)
+        self._stash_video_frame(mask_set, name, force)
         if calibration_changed:
             self._remeasure_video_frames()
 
-    def _stash_video_frame(self, mask_path, name, force):
-        if self._canvas_has_mask():
+    def _stash_video_frame(self, mask_set, name, force):
+        frame = self._video_frame_index
+        if self.canvas.has_visible_mask():
             shown_dir = self._shown_result_dir()
             if not force and shown_dir != self._video_output_dir:
-                # The mask shown comes from the selected output folder itself. It
-                # is copied into the model's results folder only once it differs
-                # from what that folder holds.
-                if self._saved_mask_matches(self._shown_mask_path()) and (
-                    self._measurement_log(shown_dir).get(name, self._video_frame_index)
-                    is None
-                    or self._measurement_is_current(
-                        shown_dir, name, self._video_frame_index
-                    )
+                # The masks shown come from the selected output folder itself.
+                # They are copied into the model's results folder only once they
+                # differ from what that folder holds.
+                if self._saved_masks_match(self._shown_mask_set()) and (
+                    self._measurement_log(shown_dir).get(name, frame) is None
+                    or self._measurement_is_current(shown_dir, name, frame)
                 ):
                     return
-            mask_same = not force and self._saved_mask_matches(mask_path)
-            if not mask_same:
+            masks_same = not force and self._saved_masks_match(mask_set)
+            if not masks_same:
                 try:
-                    self._write_shown_mask(mask_path)
+                    self._write_shown_masks(mask_set)
                 except OSError as exc:
                     QMessageBox.warning(self, "Save error", str(exc))
                     return
-            if not mask_same or not self._measurement_is_current(
-                self._video_output_dir, name, self._video_frame_index
+            if not masks_same or not self._measurement_is_current(
+                self._video_output_dir, name, frame
             ):
-                self._record_measurement(
-                    self._video_output_dir, name, self._video_frame_index
-                )
+                self._record_measurement(self._video_output_dir, name, frame)
             return
-        if self._mask_hidden_by_roi():
+        if not self.canvas.has_mask_data() or self.canvas.has_hidden_mask():
             return
-        if mask_path.exists():
+        if self._shown_result_dir() != self._video_output_dir:
+            return
+        if mask_set.exists():
             try:
-                mask_path.unlink()
+                mask_set.remove()
             except OSError as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
                 return
-            self._forget_measurement(
-                self._video_output_dir,
-                Path(self._video_path).name,
-                self._video_frame_index,
-            )
+            self._forget_measurement(self._video_output_dir, name, frame)
 
     def _update_navigation_buttons(self):
         is_video = self._mode == "video"
@@ -3436,11 +3359,11 @@ class MainWindow(QMainWindow):
             self.play_btn.setText("||")
 
     def _save_sequence_mask_if_needed(self):
-        """Save the mask and measurements of the image on screen if they changed.
+        """Save the masks and measurements of the image on screen if they changed.
 
-        A mask equal to its saved file is not written again, and its measurements
-        row is left alone while it records the knee side, centre point and ROI on
-        screen and pixels per mm was not changed with this image on screen.
+        Masks equal to their saved files are not written again, and their
+        measurements are left alone while they record the location, side, ROI
+        and pixels per mm on screen.
         """
         if self._mode != "sequence":
             return
@@ -3452,56 +3375,48 @@ class MainWindow(QMainWindow):
             return
         self._commit_pending_outline()
         image_path = Path(self._sequence_paths[self._sequence_index])
-        calibration_changed = self._calibration_changed
         self._calibration_changed = False
-        if not self._canvas_has_mask():
+        if not self.canvas.has_visible_mask():
             self._remove_emptied_sequence_mask(image_path)
             return
         shown_dir = self._shown_result_dir()
-        if shown_dir != self._sequence_output_dir and not calibration_changed:
-            # The mask shown comes from the selected output folder itself. It is
-            # copied into the model's results folder only once it differs from
-            # what that folder holds.
-            if self._saved_mask_matches(self._shown_mask_path()) and (
+        if shown_dir != self._sequence_output_dir:
+            # The masks shown come from the selected output folder itself. They
+            # are copied into the model's results folder only once they differ
+            # from what that folder holds.
+            if self._saved_masks_match(self._shown_mask_set()) and (
                 self._measurement_log(shown_dir).get(image_path.name, "") is None
                 or self._measurement_is_current(shown_dir, image_path.name)
             ):
                 return
-        saved_path = self._find_sequence_mask_path(image_path)
-        # With the images' own folder as output folder, a PNG image is found as
-        # its own mask.
-        if saved_path and Path(saved_path).resolve() == image_path.resolve():
-            saved_path = None
-        mask_same = self._saved_mask_matches(saved_path)
-        output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
+        mask_set = self._current_mask_set()
+        masks_same = self._saved_masks_match(mask_set)
         try:
-            if not mask_same:
-                self._write_shown_mask(output_path)
-                self.statusBar().showMessage(f"Saved mask: {output_path.name}")
-            if (
-                not mask_same
-                or calibration_changed
-                or not self._measurement_is_current(
-                    self._sequence_output_dir, image_path.name
-                )
+            if not masks_same:
+                self._write_shown_masks(mask_set)
+                self.statusBar().showMessage(f"Saved masks of {image_path.name}")
+            if not masks_same or not self._measurement_is_current(
+                self._sequence_output_dir, image_path.name
             ):
                 self._record_measurement(self._sequence_output_dir, image_path.name)
         except Exception as exc:
             QMessageBox.warning(self, "Save error", str(exc))
 
     def _remove_emptied_sequence_mask(self, image_path):
-        """Delete the saved mask of an image whose mask was erased down to nothing."""
-        # An empty canvas only means "erased" when a mask was loaded or drawn for
-        # the image on screen; a saved mask that was never shown must be kept.
-        if not self.canvas.has_mask_data() or self._mask_hidden_by_roi():
+        """Delete the saved masks of an image whose masks were erased down to nothing."""
+        # An empty canvas only means "erased" when masks were loaded or drawn for
+        # the image on screen; saved masks that were never shown must be kept.
+        if not self.canvas.has_mask_data() or self.canvas.has_hidden_mask():
             return
         if not self.canvas.image_path or Path(self.canvas.image_path) != image_path:
             return
         if self._shown_result_dir() != self._sequence_output_dir:
             return
+        mask_set = self._current_mask_set()
+        if mask_set is None or not mask_set.exists():
+            return
         try:
-            for mask_path in self._saved_mask_paths_for_current():
-                mask_path.unlink()
+            mask_set.remove()
         except OSError as exc:
             QMessageBox.warning(self, "Save error", str(exc))
             return
@@ -3512,77 +3427,27 @@ class MainWindow(QMainWindow):
             self._save_video_masks()
             return
         self._commit_pending_outline()
-        if not self._canvas_has_mask():
+        if not self.canvas.has_visible_mask():
             QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")
             return
         if self._sequence_output_dir and self._sequence_index >= 0:
             image_path = Path(self._sequence_paths[self._sequence_index])
-            output_path = Path(self._sequence_output_dir) / f"{image_path.stem}.png"
             try:
-                self._write_shown_mask(output_path)
-                self.statusBar().showMessage(f"Saved mask: {output_path.name}")
+                self._write_shown_masks(self._current_mask_set())
+                self.statusBar().showMessage(f"Saved masks of {image_path.name}")
                 self._record_measurement(self._sequence_output_dir, image_path.name)
             except Exception as exc:
                 QMessageBox.warning(self, "Save error", str(exc))
-            return
-        self.canvas.save_mask_dialog()
-
-    def _save_video_frame_mask_dialog(self):
-        if self._mode != "video":
-            QMessageBox.information(self, "No video", "Load a video first.")
-            return
-        self._commit_pending_outline()
-        if not self._canvas_has_mask():
-            QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")
-            return
-        default_dir = str(Path(self._video_path).parent) if self._video_path else ""
-        video_stem = Path(self._video_path).stem if self._video_path else "video"
-        default_name = f"{video_stem}_frame_{self._video_frame_index:06d}.png"
-        default_path = str(Path(default_dir) / default_name) if default_dir else default_name
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save frame mask",
-            default_path,
-            "Mask Files (*.tif *.tiff *.png)",
-        )
-        if not path:
-            return
-        try:
-            self.canvas.save_mask(path)
-            self._stash_video_mask_for_current_frame()
-            self.statusBar().showMessage(f"Saved mask: {Path(path).name}")
-        except Exception as exc:
-            QMessageBox.warning(self, "Save error", str(exc))
 
     def _save_video_masks(self):
-        if self._mode != "video":
-            QMessageBox.information(self, "No video", "Load a video first.")
-            return
-        if not self._video_path:
+        if self._mode != "video" or not self._video_path:
             QMessageBox.information(self, "No video", "Load a video first.")
             return
         self._commit_pending_outline()
         self._stash_video_mask_for_current_frame(force=True)
-        output_dir = (self._video_output_dir or "").strip()
-        if not output_dir:
-            output_dir = QFileDialog.getExistingDirectory(
-                self,
-                "Select output folder",
-                self._last_video_output_dir or self._last_video_input_dir,
-            )
-            if not output_dir:
-                return
-            self._video_output_dir = output_dir
-            self._last_video_output_dir = output_dir
-            self._save_persisted_paths()
-            self._update_output_dir_tooltip()
-        video_output_root = self._video_output_root_for_path(self._video_path)
-        annotated_count = 0
-        if video_output_root.exists() and video_output_root.is_dir():
-            for mask_path in sorted(video_output_root.glob("frame_*.png")):
-                suffix = mask_path.stem.split("_")[-1]
-                if suffix.isdigit():
-                    annotated_count += 1
+        annotated_count = len(
+            annotated_frames(self._video_output_root_for_path(self._video_path))
+        )
         if annotated_count <= 0:
             QMessageBox.information(self, "No masks", "No annotated frames found.")
             return
@@ -3590,12 +3455,6 @@ class MainWindow(QMainWindow):
             f"Saved {annotated_count}/{self._video_frame_count} annotated frames "
             f"for {Path(self._video_path).name}"
         )
-
-    def _find_sequence_mask_path(self, image_path):
-        if not self._sequence_output_dir:
-            return None
-        found = find_mask_files(self._sequence_output_dir, image_path, self._sequence_paths)
-        return str(found[0]) if found else None
 
     def _show_load_dialog(self):
         dialog = QDialog(self)
@@ -3968,15 +3827,28 @@ class MainWindow(QMainWindow):
         self._inference_seconds[self._model.current_model()] = (
             time.monotonic() - self._inference_started
         )
-        self._last_prediction = prediction
-        if self._last_prediction is not None and self.canvas.image is not None:
-            self.canvas.set_mask(
-                place_prediction(
-                    self._last_prediction, self.canvas.image, self._inference_box
-                )
-            )
-        self.statusBar().showMessage("Segmentation complete")
         self._close_inference_dialog()
+        if prediction is None or self.canvas.image is None:
+            return
+        labels = place_prediction(prediction, self.canvas.image, self._inference_box)
+        class_names = self._model.class_names()
+        default_class = self._model_default_class()
+        found = prediction_instances(labels, class_names, default_class)
+        segmented = set(class_names.values()) if class_names else {default_class}
+        segmented.update(i["class"] for i in found)
+        if not found:
+            self.statusBar().showMessage("Segmentation complete: nothing found")
+            return
+        self.canvas.replace_classes(found, segmented)
+        names = ", ".join(
+            instance_title(i) for i in self.canvas.instances if i["class"] in segmented
+        )
+        self.statusBar().showMessage(f"Segmentation complete: {names}")
+
+    def _model_default_class(self):
+        """The label a single-class model's masks get: the nerve or anatomy
+        picked, or the default nerve."""
+        return self.canvas.active_class or DEFAULT_MODEL_CLASS
 
     def _on_inference_canceled(self):
         self.statusBar().showMessage("Segmentation canceled")
@@ -4224,6 +4096,31 @@ class VideoBatchProgressDialog(QDialog):
         super().closeEvent(event)
 
 
+def segment_into(model, image, box, mask_set, angle, stored_shape, default_class, cancel_event):
+    """Segment an image as viewed and save the masks into a mask set.
+
+    The masks of the labels the model segments replace those saved; masks of
+    other labels stay. Returns every mask the image or frame then has.
+    """
+    prediction = model.run_inference(crop_to_box(image, box), cancel_event=cancel_event)
+    if cancel_event.is_set():
+        raise RuntimeError("Inference canceled.")
+    labels = place_prediction(prediction, image, box)
+    class_names = model.class_names()
+    found = prediction_instances(labels, class_names, default_class)
+    segmented = set(class_names.values()) if class_names else {default_class}
+    segmented.update(i["class"] for i in found)
+    kept = [i for i in mask_set.read(angle) if i["class"] not in segmented]
+    merged = merge_predicted(kept, found)
+    mask_set.write(
+        [i for i in merged if i["class"] in segmented],
+        angle,
+        stored_shape,
+        classes=segmented,
+    )
+    return merged
+
+
 class InferenceWorker(QObject):
     finished = pyqtSignal(object)
     canceled = pyqtSignal()
@@ -4279,11 +4176,16 @@ class BatchInferenceWorker(QObject):
         rois=None,
         rotations=None,
         measurements=None,
+        file_labels=None,
+        default_class=DEFAULT_MODEL_CLASS,
     ):
         super().__init__()
         self._rotations = rotations or {}
         # (folder, file name) of the measurements file the results go into.
         self._measurements = measurements or (output_dir, MEASUREMENTS_FILE_NAME)
+        # (side, location) of each image, by file name.
+        self._file_labels = file_labels or {}
+        self._default_class = default_class
         self._model = model
         self._image_paths = list(image_paths)
         self._output_dir = output_dir
@@ -4332,45 +4234,37 @@ class BatchInferenceWorker(QObject):
             if self._cancel_event.is_set():
                 return self.canceled, ()
             self.image_started.emit(image_path, idx, total)
-            if not self._overwrite_existing and self._existing_mask_path(image_path):
+            name = Path(image_path).name
+            mask_set = MaskSet(Path(self._output_dir) / Path(image_path).stem)
+            if not self._overwrite_existing and mask_set.exists():
                 skipped += 1
                 self.progress.emit(idx, total)
                 continue
             try:
-                angle = self._rotations.get(Path(image_path).name, 0.0)
+                angle = self._rotations.get(name, 0.0)
                 image = self._load_image(image_path)
                 stored_shape = image.shape[:2]
                 image = rotate_image(image, angle)
-                box = box_to_segment(
-                    image, self._rois.get((Path(image_path).name, ""))
+                box = box_to_segment(image, self._rois.get((name, "")))
+                self.started.add(image_path)
+                instances = segment_into(
+                    self._model, image, box, mask_set, angle, stored_shape,
+                    self._default_class, self._cancel_event,
                 )
-                prediction = self._model.run_inference(
-                    crop_to_box(image, box),
-                    cancel_event=self._cancel_event,
+                self.saved.add(image_path)
+                side, location = self._file_labels.get(name, (None, None))
+                self._measurement_log.set(
+                    name,
+                    "",
+                    instances,
+                    *self._px_per_mm,
+                    side=side,
+                    location=location,
+                    limits=box,
+                    rotation=angle,
                 )
-                if prediction is not None:
-                    mask = place_prediction(prediction, image, box)
-                    self.started.add(image_path)
-                    write_mask_file(
-                        Path(self._output_dir) / f"{Path(image_path).stem}.png",
-                        mask >= 0.5,
-                        angle,
-                        stored_shape,
-                    )
-                    self.saved.add(image_path)
-                    self._measurement_log.set(
-                        Path(image_path).name,
-                        "",
-                        image,
-                        mask >= 0.5,
-                        *self._px_per_mm,
-                        knee_side=knee_side_from_name(image_path),
-                        prefer_saved=True,
-                        limits=box,
-                        rotation=angle,
-                    )
-                    self._measured.append(Path(image_path).name)
-                    self.image_segmented.emit(image_path)
+                self._measured.append(name)
+                self.image_segmented.emit(image_path)
             except Exception as exc:
                 if str(exc).lower().startswith("inference canceled"):
                     return self.canceled, ()
@@ -4378,10 +4272,6 @@ class BatchInferenceWorker(QObject):
             processed += 1
             self.progress.emit(idx, total)
         return self.finished, (processed, skipped)
-
-    def _existing_mask_path(self, image_path):
-        found = find_mask_files(self._output_dir, image_path, self._image_paths)
-        return found[0] if found else None
 
     def _load_image(self, file_path):
         lower_path = file_path.lower()
@@ -4421,22 +4311,24 @@ class VideoBatchInferenceWorker(QObject):
         output_dir,
         overwrite_existing=True,
         px_per_mm=(0.0, 0.0),
-        knee_picks=None,
         rois=None,
         rotations=None,
         measurements=None,
+        file_labels=None,
+        default_class=DEFAULT_MODEL_CLASS,
     ):
         super().__init__()
         self._rotations = rotations or {}
         # (folder, file name) of the measurements file the results go into.
         self._measurements = measurements or (output_dir, MEASUREMENTS_FILE_NAME)
+        # (side, location) of each video, by file name.
+        self._file_labels = file_labels or {}
+        self._default_class = default_class
         self._model = model
         self._video_paths = list(video_paths)
         self._output_dir = Path(output_dir)
         self._overwrite_existing = bool(overwrite_existing)
         self._px_per_mm = px_per_mm
-        # Knee side picked by hand for a video, by video file name.
-        self._knee_picks = knee_picks or {}
         self._rois = rois or {}
         # (video path, frame number) of the frames whose result is being saved,
         # and of those whose mask file is complete. Read by the window from its
@@ -4480,6 +4372,8 @@ class VideoBatchInferenceWorker(QObject):
                 self.video_started.emit(video_name, video_number, video_count, frame_count)
                 video_output_dir = self._output_dir / Path(video_path).stem
                 video_output_dir.mkdir(parents=True, exist_ok=True)
+                annotated = annotated_frames(video_output_dir)
+                side, location = self._file_labels.get(video_name, (None, None))
                 try:
                     for frame_index in range(frame_count):
                         if self._cancel_event.is_set():
@@ -4492,13 +4386,13 @@ class VideoBatchInferenceWorker(QObject):
                             processed + 1,
                             total_frames,
                         )
-                        output_path = video_output_dir / f"frame_{frame_index:06d}.png"
+                        mask_set = MaskSet(video_output_dir, frame_index)
                         success, frame = capture.read()
                         if not success or frame is None:
                             raise RuntimeError(
                                 f"Could not decode {video_name} frame {frame_index}."
                             )
-                        if not self._overwrite_existing and output_path.exists():
+                        if not self._overwrite_existing and frame_index in annotated:
                             skipped += 1
                             self.progress.emit(processed + skipped, total_frames)
                             self.frame_progress.emit(frame_index + 1, frame_count)
@@ -4513,30 +4407,19 @@ class VideoBatchInferenceWorker(QObject):
                         box = box_to_segment(
                             image, self._rois.get((video_name, str(frame_index)))
                         )
-                        prediction = self._model.run_inference(
-                            crop_to_box(image, box),
-                            cancel_event=self._cancel_event,
-                        )
-                        if self._cancel_event.is_set():
-                            self.canceled.emit()
-                            return
-                        mask = place_prediction(prediction, image, box)
                         self.started.add((video_path, frame_index))
-                        write_mask_file(output_path, mask >= 0.5, angle, stored_shape)
+                        instances = segment_into(
+                            self._model, image, box, mask_set, angle, stored_shape,
+                            self._default_class, self._cancel_event,
+                        )
                         self.saved.add((video_path, frame_index))
                         measurement_log.set(
                             video_name,
                             frame_index,
-                            image,
-                            mask >= 0.5,
+                            instances,
                             *self._px_per_mm,
-                            knee_side=self._knee_picks.get(
-                                video_name, knee_side_from_name(video_name)
-                            ),
-                            knee_side_set_by=(
-                                "user" if video_name in self._knee_picks else "name"
-                            ),
-                            prefer_saved=True,
+                            side=side,
+                            location=location,
                             limits=box,
                             rotation=angle,
                         )

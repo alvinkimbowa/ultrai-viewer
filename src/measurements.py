@@ -1,153 +1,13 @@
 """
-Measurements computed from a segmented cartilage mask.
+Area of each segmented instance, and the measurements file that records it.
 """
 
 import csv
 import os
-import re
 from pathlib import Path
 
 import cv2
 import numpy as np
-
-
-def binarize_mask(mask):
-    return (mask > 0).astype(np.uint8)
-
-
-def largest_piece(mask):
-    """The mask with only its largest connected piece kept, as a bool array.
-
-    Pixels that touch at a corner count as connected. Of pieces of equal size,
-    the one met first going down the image from the top-left is kept.
-    """
-    binary = np.asarray(mask) > 0
-    count, labels = cv2.connectedComponents(binary.astype(np.uint8), connectivity=8)
-    if count <= 2:
-        return binary
-    sizes = np.bincount(labels.ravel())
-    sizes[0] = 0
-    return labels == int(np.argmax(sizes))
-
-
-def outline_sides(mask):
-    """The outline of a single-piece mask, split into its top and bottom sides.
-
-    The probe is at the top of the image, so the top side is the cartilage surface
-    and the bottom side is the cartilage-bone interface. Each side is the (x, y)
-    pixels of the outline from the leftmost to the rightmost column of the mask,
-    pixel by pixel as traced. Where an end of the mask is a vertical edge, the top
-    side ends at its highest pixel and the bottom side at its lowest, so the edge
-    itself belongs to neither side.
-    """
-    binary = (np.asarray(mask) > 0).astype(np.uint8)
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    points = contours[0][:, 0, :].astype(np.int64)
-    xs, ys = points[:, 0], points[:, 1]
-    left = np.nonzero(xs == xs.min())[0]
-    right = np.nonzero(xs == xs.max())[0]
-    count = len(points)
-
-    def stretch(first, last):
-        """The outline points met going forward round the loop from first to last."""
-        return points[(first + np.arange((last - first) % count + 1)) % count]
-
-    top_left, top_right = int(left[ys[left].argmin()]), int(right[ys[right].argmin()])
-    bottom_left, bottom_right = int(left[ys[left].argmax()]), int(right[ys[right].argmax()])
-    # The sign of the enclosed area gives the tracing direction: positive runs
-    # left end -> top -> right end -> bottom on screen, where y points down.
-    area = np.sum(xs * np.roll(ys, -1) - np.roll(xs, -1) * ys)
-    if area > 0:
-        return stretch(top_left, top_right), stretch(bottom_right, bottom_left)[::-1]
-    return stretch(top_right, top_left)[::-1], stretch(bottom_left, bottom_right)
-
-
-def top_surface(top_side):
-    """Columns the top side of an outline covers, with its row in each.
-
-    The row is the highest point of the top side in that column.
-    """
-    first = top_side[:, 0].min()
-    columns = np.arange(first, top_side[:, 0].max() + 1)
-    rows = np.full(len(columns), np.iinfo(np.int64).max)
-    np.minimum.at(rows, top_side[:, 0] - first, top_side[:, 1])
-    return columns, rows
-
-
-def step_lengths(pixels, scale_x=1.0, scale_y=1.0):
-    """Length of each step between consecutive (x, y) pixels of a path, in the
-    units of the two scales."""
-    moves = np.diff(pixels, axis=0)
-    return np.hypot(moves[:, 0] * scale_x, moves[:, 1] * scale_y)
-
-
-def path_length(path, start, stop):
-    """Length of the part of a path that lies in columns start to stop.
-
-    A step between two columns counts half towards each.
-    """
-    pixels, steps = path
-    inside = ((pixels[:, 0] >= start) & (pixels[:, 0] < stop)).astype(float)
-    return float(np.sum(steps * (inside[:-1] + inside[1:]) / 2.0))
-
-
-def suggest_centre_x(columns, rows):
-    """Column where a top surface, as given by top_surface, dips deepest."""
-    deepest = columns[rows == rows.max()]
-    return float(deepest[len(deepest) // 2])
-
-
-def surface_point(columns, rows, centre_x):
-    """The point of a top surface at centre_x, or at the nearest covered column."""
-    index = int(np.abs(columns - centre_x).argmin())
-    return float(centre_x), float(rows[index])
-
-
-INTERCONDYLAR_WIDTH_FRACTION = 0.25
-REGION_NAMES = ("lateral", "intercondylar", "medial")
-# What the parts on either side of the intercondylar region are called while the
-# knee side, and so which of them is lateral and which medial, is not known.
-UNASSIGNED_SIDES = ("left_of_notch", "right_of_notch")
-
-
-def knee_side_from_name(file_name):
-    """The knee side a file name states: "left", "right", or None when it states
-    neither or both.
-
-    Looked for in the name without its ending, capitals ignored: `l`, `r`, `left`
-    or `right` with an underscore on both sides, or `l` or `r` followed by a single
-    digit as the last part of the name (`..._CAR_R3`).
-    """
-    stem = Path(file_name).stem.lower()
-    found = set(re.findall(r"(?=_(l|r|left|right)_)", stem))
-    found.update(re.findall(r"_([lr])\d$", stem))
-    sides = {"left" if token in ("l", "left") else "right" for token in found}
-    return sides.pop() if len(sides) == 1 else None
-
-
-def region_columns(image_width, centre_x, knee_side, limits=None):
-    """Column range (start, stop) of each region for a knee side of "right", "left"
-    or None.
-
-    The intercondylar region is centred on centre_x and is a fixed share of the
-    width of the ROI box `limits` (left, right, top, bottom), or of the image width
-    when there is no ROI. On a right knee the lateral condyle is on the left of the
-    image. With a knee side of None the two outer parts go by the names in
-    UNASSIGNED_SIDES instead of lateral and medial.
-    """
-    base_width = image_width if limits is None else limits[1] - limits[0]
-    half_width = INTERCONDYLAR_WIDTH_FRACTION * base_width / 2.0
-    start = int(round(min(max(centre_x - half_width, 0), image_width)))
-    stop = int(round(min(max(centre_x + half_width, 0), image_width)))
-    left_name, right_name = {
-        "right": ("lateral", "medial"),
-        "left": ("medial", "lateral"),
-    }.get(knee_side, UNASSIGNED_SIDES)
-    return {
-        left_name: (0, start),
-        "intercondylar": (start, stop),
-        right_name: (stop, image_width),
-    }
 
 
 def to_grayscale(image):
@@ -160,125 +20,58 @@ def to_grayscale(image):
     return image[:, :, 0]
 
 
-MEASURES = ("area", "length", "thickness", "echo_mean", "echo_sd")
+def area_unit(px_per_mm_x, px_per_mm_y):
+    """"mm" when both resolutions are known, "px" otherwise."""
+    return "mm" if px_per_mm_x and px_per_mm_y else "px"
 
 
-def _measure_columns(gray, binary, path, start, stop, scale_x, scale_y):
-    values = dict.fromkeys(MEASURES, np.nan)
-    region = binary[:, start:stop]
-    if not region.any():
-        return values
-    values["area"] = float(region.sum()) * scale_x * scale_y
-    values["length"] = path_length(path, start, stop)
-    if values["length"] > 0:
-        values["thickness"] = values["area"] / values["length"]
-    if gray is not None:
-        pixels = gray[:, start:stop][region]
-        values["echo_mean"] = float(np.mean(pixels))
-        values["echo_sd"] = float(np.std(pixels))
-    return values
+def measure_instances(instances, px_per_mm_x, px_per_mm_y):
+    """Area of each instance: [{"class", "id", "area_px", "area"}].
 
-
-def measure(
-    image,
-    mask,
-    px_per_mm_x,
-    px_per_mm_y,
-    centre_x=None,
-    knee_side=None,
-    limits=None,
-):
-    """Measure a mask as a whole and split into lateral, intercondylar and medial.
-
-    Only the largest connected piece of the mask is measured. With a knee side of
-    None, lateral and medial cannot be told apart and are left as NaN.
-    Returns {"unit", "centre_x", "regions"}; "regions" maps "whole" and each region
-    name to its area, cartilage-bone interface length, thickness (area / length),
-    and the mean and standard deviation of the grey levels inside it. Lengths are in
-    mm when both resolutions are known and in pixels otherwise. centre_x of None
-    uses the suggested centre. limits is the ROI box (left, right, top, bottom) the
-    mask is confined to, if any; the intercondylar region is sized from it. Values
-    that cannot be computed are NaN.
+    "area" is in mm² when both resolutions are known and in pixels otherwise.
     """
-    in_mm = bool(px_per_mm_x and px_per_mm_y)
-    scale_x = 1.0 / px_per_mm_x if in_mm else 1.0
-    scale_y = 1.0 / px_per_mm_y if in_mm else 1.0
-    result = {
-        "unit": "mm" if in_mm else "px",
-        "centre_x": None,
-        "regions": {
-            name: dict.fromkeys(MEASURES, np.nan) for name in ("whole",) + REGION_NAMES
-        },
-    }
-    if mask is None:
-        return result
-
-    # 1. Extract the largest connected component from the mask
-    binary = largest_piece(mask)
-
-    # Return empty results if the mask is empty
-    if not binary.any():
-        return result    
-    
-    # 2. Extract the top and bottom cartilage surfaces
-    top_side, bottom_side = outline_sides(binary)
-    path = bottom_side, step_lengths(bottom_side, scale_x, scale_y)
-    
-    # 3. Suggest the centre of the intercondylar notch if not manually provided
-    width = binary.shape[1]
-    if centre_x is None:
-        centre_x = suggest_centre_x(*top_surface(top_side))
-    result["centre_x"] = centre_x
-
-    # 4. Compute the measures for the whole mask and each region
-    # Prepare image for echo intensity measurements
-    gray = None
-    if image is not None and image.shape[:2] == binary.shape[:2]:
-        gray = to_grayscale(image)
-
-    # Define cartilage regions based on the suggested centre and knee side
-    spans = {
-        "whole": (0, width),
-        **region_columns(width, centre_x, knee_side, limits),
-    }
-
-    # Compute measurements for each region
-    for name, (start, stop) in spans.items():
-        if name in UNASSIGNED_SIDES:
+    scale = 1.0
+    if area_unit(px_per_mm_x, px_per_mm_y) == "mm":
+        scale = 1.0 / (px_per_mm_x * px_per_mm_y)
+    results = []
+    for instance in instances:
+        pixels = int(np.count_nonzero(instance["mask"]))
+        if pixels == 0:
             continue
-        result["regions"][name] = _measure_columns(
-            gray, binary, path, start, stop, scale_x, scale_y
+        results.append(
+            {
+                "class": instance["class"],
+                "id": instance["id"],
+                "area_px": pixels,
+                "area": pixels * scale,
+            }
         )
-    return result
+    return results
 
 
 MEASUREMENTS_FILE_NAME = "measurements.csv"
+LIMIT_COLUMNS = ["limit_left", "limit_right", "limit_top", "limit_bottom"]
 MEASUREMENT_COLUMNS = [
     "file",
     "frame",
-    "knee_side",
-    "knee_side_set_by",
-    "centre_x",
-    "centre_set_by",
-    "limit_left",
-    "limit_right",
-    "limit_top",
-    "limit_bottom",
-    "rotation",
+    "side",
+    "location",
+    "class",
+    "instance_id",
+    "area_px",
+    "area",
+    "unit",
     "pixels_per_mm_x",
     "pixels_per_mm_y",
-    "unit",
-] + [
-    f"{region}_{measure_name}"
-    for region in ("whole",) + REGION_NAMES
-    for measure_name in MEASURES
-]
+    "rotation",
+] + LIMIT_COLUMNS
 
 
 class MeasurementLog:
-    """A measurements file of one output folder, one row per image or video frame.
+    """A measurements file of one output folder, one row per instance.
 
-    `frame` is the frame number for a video and "" for an image.
+    `frame` is the frame number for a video and "" for an image. The rows of one
+    image or frame are kept together and always replaced together.
     """
 
     def __init__(self, output_dir, file_name=MEASUREMENTS_FILE_NAME):
@@ -289,176 +82,123 @@ class MeasurementLog:
             with open(self.path, newline="", encoding="utf-8") as handle:
                 for row in csv.DictReader(handle):
                     key = (row.get("file", ""), row.get("frame", ""))
-                    self._rows[key] = {
-                        column: row.get(column, "") for column in MEASUREMENT_COLUMNS
-                    }
+                    self._rows.setdefault(key, []).append(
+                        {column: row.get(column, "") for column in MEASUREMENT_COLUMNS}
+                    )
 
     def get(self, file_name, frame):
+        """The rows of an image or frame, or None when it has none."""
         return self._rows.get((str(file_name), str(frame)))
 
-    def put(self, file_name, frame, row):
-        """Store a row exactly as given, or remove the row when given None."""
+    def put(self, file_name, frame, rows):
+        """Store rows exactly as given, or remove them when given None."""
         key = (str(file_name), str(frame))
-        if row is None:
+        if not rows:
             self.remove(file_name, frame)
-        elif self._rows.get(key) != row:
-            self._rows[key] = dict(row)
+        elif self._rows.get(key) != rows:
+            self._rows[key] = [dict(row) for row in rows]
             self._dirty = True
 
     def keys(self):
-        """(file, frame) of every row."""
+        """(file, frame) of every image or frame with rows."""
         return list(self._rows)
 
     def set(
         self,
         file_name,
         frame,
-        image,
-        mask,
+        instances,
         px_per_mm_x,
         px_per_mm_y,
-        centre_x=None,
-        knee_side=None,
-        knee_side_set_by="name",
-        prefer_saved=False,
+        side=None,
+        location=None,
         limits=None,
         rotation=0.0,
     ):
-        """Measure a mask and store it as the row of its image or frame.
+        """Measure the instances of an image or frame and store them as its rows.
 
-        centre_x of None means the suggested centre. knee_side is "left", "right"
-        or None, and knee_side_set_by tells where it comes from: "name" for the file
-        name, "user" for a side picked by hand. With prefer_saved, a knee side
-        already picked by hand wins over one from the name, and a user-placed
-        centre already stored for the row wins over the argument.
-        limits is the ROI box (left, right, top, bottom) the mask was confined to,
-        if any. rotation is the angle, in degrees clockwise, the image and mask
-        were turned by before being measured.
+        side is "left", "right" or None, location the scanned site or None.
+        limits is the ROI box (left, right, top, bottom) the masks were confined
+        to, if any. rotation is the angle, in degrees clockwise, the image and
+        masks were turned by before being measured.
         """
-        key = (str(file_name), str(frame))
-        saved = self._rows.get(key)
-        if prefer_saved and knee_side_set_by != "user":
-            picked = self.knee_side(file_name, frame)
-            if picked[1] == "user":
-                knee_side, knee_side_set_by = picked
-        if prefer_saved and saved is not None:
-            # A centre placed on a view at another rotation is not kept.
-            same_view = self.rotation(file_name, frame) == round(float(rotation), 1)
-            if saved.get("centre_set_by") == "user" and same_view:
-                try:
-                    centre_x = float(saved["centre_x"])
-                except (TypeError, ValueError):
-                    pass
-        result = measure(
-            image, mask, px_per_mm_x, px_per_mm_y, centre_x, knee_side, limits
-        )
-        row = {
-            "file": key[0],
-            "frame": key[1],
-            "knee_side": knee_side or "",
-            "knee_side_set_by": knee_side_set_by,
-            "centre_x": (
-                "" if result["centre_x"] is None else f"{result['centre_x']:.1f}"
-            ),
-            "centre_set_by": "auto" if centre_x is None else "user",
-            "limit_left": "" if limits is None else str(limits[0]),
-            "limit_right": "" if limits is None else str(limits[1]),
-            "limit_top": "" if limits is None else str(limits[2]),
-            "limit_bottom": "" if limits is None else str(limits[3]),
-            "rotation": f"{rotation:.1f}",
+        unit = area_unit(px_per_mm_x, px_per_mm_y)
+        shared = {
+            "file": str(file_name),
+            "frame": str(frame),
+            "side": side or "",
+            "location": location or "",
+            "unit": unit,
             "pixels_per_mm_x": f"{px_per_mm_x:.3f}" if px_per_mm_x else "",
             "pixels_per_mm_y": f"{px_per_mm_y:.3f}" if px_per_mm_y else "",
-            "unit": result["unit"],
+            "rotation": f"{rotation:.1f}",
         }
-        for region, values in result["regions"].items():
-            for measure_name, value in values.items():
-                row[f"{region}_{measure_name}"] = (
-                    "" if np.isnan(value) else f"{value:.4f}"
-                )
-        if saved != row:
-            self._rows[key] = row
-            self._dirty = True
+        for column, value in zip(LIMIT_COLUMNS, limits or ("",) * 4):
+            shared[column] = str(value)
+        rows = []
+        for result in measure_instances(instances, px_per_mm_x, px_per_mm_y):
+            rows.append(
+                {
+                    **shared,
+                    "class": result["class"],
+                    "instance_id": str(result["id"]),
+                    "area_px": str(result["area_px"]),
+                    "area": f"{result['area']:.4f}",
+                }
+            )
+        self.put(file_name, frame, rows)
 
     def limits(self, file_name, frame):
-        """The ROI box (left, right, top, bottom) recorded in a row, or None."""
-        row = self.get(file_name, frame)
-        if row is None:
+        """The ROI box (left, right, top, bottom) recorded for a frame, or None."""
+        rows = self.get(file_name, frame)
+        if not rows:
             return None
         try:
-            return tuple(
-                int(row[column])
-                for column in ("limit_left", "limit_right", "limit_top", "limit_bottom")
-            )
+            return tuple(int(rows[0][column]) for column in LIMIT_COLUMNS)
         except (KeyError, TypeError, ValueError):
             return None
 
     def rotation(self, file_name, frame):
-        """The angle a row was measured at; 0 for a row that records none."""
-        row = self.get(file_name, frame)
+        """The angle a frame was measured at; 0 for one that records none."""
+        rows = self.get(file_name, frame)
         try:
-            return float(row["rotation"])
-        except (KeyError, TypeError, ValueError):
+            return float(rows[0]["rotation"])
+        except (TypeError, IndexError, KeyError, ValueError):
             return 0.0
 
-    def knee_side(self, file_name, frame):
-        """(knee side, where it comes from) of an image or frame.
-
-        The side picked by hand if a row records one ("user"), otherwise the side
-        its file name states ("name"). The side is "left", "right" or None. A side
-        in a row that does not say where it comes from is not used. A video has one
-        side for all its frames, so for a frame a pick recorded with any frame of
-        the same video counts, its own row first.
-        """
-        rows = [self.get(file_name, frame)]
-        if str(frame) != "":
-            rows += [row for (name, _), row in self._rows.items() if name == file_name]
-        for row in rows:
-            if row is not None and row.get("knee_side_set_by") == "user":
-                side = row.get("knee_side")
-                return (side if side in ("left", "right") else None), "user"
-        return knee_side_from_name(file_name), "name"
-
     def matches_inputs(
-        self,
-        file_name,
-        frame,
-        centre_x,
-        knee_side,
-        knee_side_set_by,
-        limits,
-        rotation=0.0,
+        self, file_name, frame, side, location, limits, rotation, px_per_mm
     ):
-        """True when a row exists and records this centre, knee side, ROI box and
-        rotation.
-
-        centre_x of None means the suggested centre.
-        """
-        row = self.get(file_name, frame)
-        if row is None or row.get("knee_side") != (knee_side or ""):
+        """True when a frame has rows and they record this side, location, ROI
+        box, rotation and pixels per mm."""
+        rows = self.get(file_name, frame)
+        if not rows:
             return False
-        if row.get("knee_side_set_by") != knee_side_set_by:
+        first = rows[0]
+        if first.get("side") != (side or "") or first.get("location") != (
+            location or ""
+        ):
             return False
         if self.rotation(file_name, frame) != round(float(rotation), 1):
             return False
-        if centre_x is None:
-            if row.get("centre_set_by") != "auto":
-                return False
-        elif row.get("centre_set_by") != "user" or row.get("centre_x") != (
-            f"{centre_x:.1f}"
-        ):
+        x, y = px_per_mm
+        if first.get("pixels_per_mm_x") != (f"{x:.3f}" if x else ""):
+            return False
+        if first.get("pixels_per_mm_y") != (f"{y:.3f}" if y else ""):
             return False
         recorded = self.limits(file_name, frame)
         return recorded == (None if limits is None else tuple(limits))
 
     def clear_limits(self, file_names):
         """Blank the recorded ROI box in every row of the named files."""
-        for (file_name, _), row in self._rows.items():
+        for (file_name, _), rows in self._rows.items():
             if file_name not in file_names:
                 continue
-            for column in ("limit_left", "limit_right", "limit_top", "limit_bottom"):
-                if row.get(column):
-                    row[column] = ""
-                    self._dirty = True
+            for row in rows:
+                for column in LIMIT_COLUMNS:
+                    if row.get(column):
+                        row[column] = ""
+                        self._dirty = True
 
     def remove(self, file_name, frame):
         if self._rows.pop((str(file_name), str(frame)), None) is not None:
@@ -481,7 +221,7 @@ class MeasurementLog:
                 writer = csv.DictWriter(handle, fieldnames=MEASUREMENT_COLUMNS)
                 writer.writeheader()
                 for key in sorted(self._rows, key=order):
-                    writer.writerow(self._rows[key])
+                    writer.writerows(self._rows[key])
             os.replace(partial, self.path)
         finally:
             partial.unlink(missing_ok=True)

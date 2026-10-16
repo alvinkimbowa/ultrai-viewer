@@ -1,45 +1,35 @@
 """
-Canvas widget for displaying images and mask annotation tools.
+Canvas widget for displaying images and annotating them with instance masks.
 """
 
-import os
 import numpy as np
 import cv2
-import tifffile
 from .tiff_stack import read_tiff_frame
-from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox, QScrollBar, QStyle, QMenu
-from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF
-from PyQt6.QtCore import Qt, QRect, QPoint, QPointF, pyqtSignal
+from PyQt6.QtWidgets import QWidget, QMessageBox, QScrollBar, QStyle, QMenu
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF, QFont
+from PyQt6.QtCore import Qt, QRect, QRectF, QPoint, QPointF, pyqtSignal
 
-from .measurements import (
-    UNASSIGNED_SIDES,
-    largest_piece,
-    outline_sides,
-    region_columns,
-    suggest_centre_x,
-    surface_point,
-    top_surface,
+from .instances import (
+    clean_class,
+    clip_instances,
+    copy_instances,
+    display_class,
+    instance_title,
+    make_instance,
+    next_instance_id,
 )
+from .labels import class_color
 from .theme import CANVAS
 
 
-REGION_COLORS = {
-    "lateral": (255, 170, 0),
-    "intercondylar": (255, 60, 220),
-    "medial": (120, 190, 255),
-}
-# The parts beside the notch while it is not known which is lateral and which
-# medial.
-UNASSIGNED_COLOR = (160, 160, 160)
-WHOLE_MASK_COLOR = (255, 255, 180)
-CENTRE_MARKER_COLOR = (255, 235, 0)
-REGION_LABELS = {"lateral": "Lateral", "intercondylar": "Notch", "medial": "Medial"}
-
-
-def region_color(name):
-    if name in UNASSIGNED_SIDES:
-        return UNASSIGNED_COLOR
-    return REGION_COLORS.get(name, WHOLE_MASK_COLOR)
+def label_anchor(mask):
+    """The mask pixel (x, y) nearest the mask's centroid, so that a label put
+    there sits on the mask even when the mask is curved or hollow."""
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return None
+    nearest = int(np.argmin((xs - xs.mean()) ** 2 + (ys - ys.mean()) ** 2))
+    return int(xs[nearest]), int(ys[nearest])
 
 
 class Canvas(QWidget):
@@ -49,17 +39,30 @@ class Canvas(QWidget):
     roi_drawn = pyqtSignal()
     roi_changed = pyqtSignal()
     delete_requested = pyqtSignal(str)
+    # A message for the status bar, such as why a drawing was not made.
+    notice = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.image = None
         self.pixmap = None
         self.image_path = None
-        self.mask = None
+        # The masks of the image on screen, each {"class", "id", "mask"} with a
+        # uint8 0/1 mask the size of the image. Later ones are drawn on top.
+        self.instances = []
+        # Index in self.instances of the instance the Select tool picked, or None.
+        self.selected_index = None
+        # The label new masks get, and the order of the labels, which gives each
+        # its colour.
+        self.active_class = None
+        self.class_order = []
+        # The labels offered when relabelling a mask: (nerves, other anatomy).
+        self.label_choices = ([], [])
         self.mask_pixmap = None
+        self._label_anchors = []
         self.mask_opacity = 0.5
         self.show_contour_only = True
-        # Each history entry is (mask, ROI box): the state after one edit.
+        # Each history entry is (instances, ROI box): the state after one edit.
         self._undo_stack = []
         self._redo_stack = []
         # edit_count goes up with every edit recorded, history_resets with every
@@ -78,24 +81,13 @@ class Canvas(QWidget):
         self._freehand_points = []
         self._last_outline = []
         self._cursor_pos = None
-
-        # Calibration lines in image pixels: "h" holds the y positions of the two
-        # horizontal lines, "v" the x positions of the two vertical lines. They
-        # outlive a calibration so the next one starts from the same places.
-        # Per-region view splits the mask into lateral, intercondylar and medial
-        # around a centre point on the cartilage's top surface. A centre_x of None
-        # means the suggested centre is used; a number is a position the user set.
-        self.region_view = False
-        # "left", "right", or None while the side is not known.
-        self.knee_side = None
-        self.centre_x = None
-        self._centre_drag = False
-        self._region_overlay = None
+        # The instance a brush stroke paints into.
+        self._stroke_target = None
 
         # The ROI of the image on screen, or None: "v" holds the x positions of its
         # two vertical edges and "h" the y positions of its two horizontal edges, in
-        # image pixels. The mask outside it is hidden, not saved and not measured,
-        # but stays in self.mask.
+        # image pixels. The masks outside it are hidden, not saved and not
+        # measured, but stay in self.instances.
         self._roi = None
         self._roi_drag = None
         # While the whole ROI is being dragged: where the press landed, the edge
@@ -107,6 +99,9 @@ class Canvas(QWidget):
         # What a click with the Select tool picked for deletion: "roi", "mask" or None.
         self.selection = None
 
+        # Calibration lines in image pixels: "h" holds the y positions of the two
+        # horizontal lines, "v" the x positions of the two vertical lines. They
+        # outlive a calibration so the next one starts from the same places.
         self._calibrating = False
         self._calibration_lines = None
         self._calibration_drag = None
@@ -129,44 +124,6 @@ class Canvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def load_image_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Load Image",
-            "",
-            "Image Files (*.png *.jpg *.jpeg *.tif *.tiff *.bmp)",
-        )
-        if path:
-            self.load_image(path)
-
-    def save_mask_dialog(self):
-        if not self.has_mask_data():
-            QMessageBox.information(self, "No mask", "Run segmentation or annotate before saving a mask.")
-            return
-        default_path = ""
-        if self.image_path:
-            default_dir = os.path.dirname(self.image_path)
-            default_name = f"{os.path.splitext(os.path.basename(self.image_path))[0]}.png"
-            default_path = os.path.join(default_dir, default_name)
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Mask",
-            default_path,
-            "Mask Files (*.tif *.tiff *.png)",
-        )
-        if path:
-            self.save_mask(path)
-
-    def save_mask(self, file_path):
-        if not self.has_mask_data():
-            raise ValueError("No mask available to save.")
-        mask_uint8 = (self.visible_mask() >= 0.5).astype(np.uint8) * 255
-        lower_path = file_path.lower()
-        if lower_path.endswith((".tif", ".tiff")):
-            tifffile.imwrite(file_path, mask_uint8)
-        else:
-            cv2.imwrite(file_path, mask_uint8)
-
     def load_image(self, file_path):
         try:
             raw = self._read_image(file_path)
@@ -183,9 +140,8 @@ class Canvas(QWidget):
         self.image = raw
         self.pixmap = self._to_pixmap(raw)
         self.image_path = source_name or None
-        height, width = self.image.shape[:2]
-        self.mask = np.zeros((height, width), dtype=np.float32)
-        self.centre_x = None
+        self.instances = []
+        self.selected_index = None
         self._roi = None
         self._roi_drag = None
         self._roi_move = None
@@ -199,39 +155,25 @@ class Canvas(QWidget):
         self.update()
         self.image_loaded.emit(source_name)
 
-    def load_mask(self, file_path):
-        try:
-            mask = self._read_mask(file_path)
-        except Exception as exc:
-            QMessageBox.critical(self, "Load failed", str(exc))
-            return
-        if self.image is None:
-            QMessageBox.information(self, "No image", "Load an image before loading a mask.")
-            return
-        if mask.shape[:2] != self.image.shape[:2]:
-            mask = cv2.resize(
-                mask, (self.image.shape[1], self.image.shape[0]), interpolation=cv2.INTER_NEAREST
-            )
-        self.set_mask(mask)
-
     def clear_mask(self):
-        if self.mask is None:
-            return
+        """Remove every mask of the image on screen, as a step Undo takes back."""
         if self.selection == "mask":
             self.selection = None
+        self.selected_index = None
+        self._last_outline = []
         if self.image is None:
-            self.mask = None
+            self.instances = []
             self.mask_pixmap = None
-            self._last_outline = []
             self._mask_touched = False
             self._reset_history()
             self.update()
             self.mask_changed.emit()
             return
-        height, width = self.image.shape[:2]
-        self.mask = np.zeros((height, width), dtype=np.float32)
+        if not self.instances:
+            self.update()
+            return
+        self.instances = []
         self._refresh_mask_pixmap()
-        self._last_outline = []
         self._push_history()
         self._mask_touched = True
         self.update()
@@ -248,25 +190,78 @@ class Canvas(QWidget):
         self.update()
         self.image_loaded.emit("")
 
-    def set_mask(self, mask):
+    def set_instances(self, instances):
+        """Show these masks, as the state Undo starts from."""
         if self.image is None:
             return
-        self.mask = self._normalize_mask(mask)
+        height, width = self.image.shape[:2]
+        self.instances = [
+            make_instance(
+                i["class"],
+                i["id"],
+                i["mask"]
+                if i["mask"].shape[:2] == (height, width)
+                else cv2.resize(
+                    i["mask"].astype(np.uint8), (width, height),
+                    interpolation=cv2.INTER_NEAREST,
+                ),
+            )
+            for i in instances
+        ]
+        self.selected_index = None
+        if self.selection == "mask":
+            self.selection = None
         self._refresh_mask_pixmap()
         self._mask_touched = True
         self._reset_history()
         self.update()
 
+    def replace_classes(self, instances, classes):
+        """Put new masks in place of those of the given classes, as a step Undo
+        takes back. The new masks are numbered on from the masks kept."""
+        if self.image is None:
+            return
+        classes = {clean_class(c) for c in classes}
+        kept = [i for i in self.instances if i["class"] not in classes]
+        for instance in instances:
+            kept.append(
+                make_instance(
+                    instance["class"],
+                    next_instance_id(kept, instance["class"]),
+                    instance["mask"],
+                )
+            )
+        self.instances = kept
+        self.selected_index = None
+        if self.selection == "mask":
+            self.selection = None
+        self._refresh_mask_pixmap()
+        self._push_history()
+        self._mask_touched = True
+        self.update()
+
+    def set_class_order(self, order):
+        self.class_order = [clean_class(c) for c in order]
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def set_label_choices(self, nerves, anatomy):
+        self.label_choices = (list(nerves), list(anatomy))
+
+    def set_active_class(self, name):
+        self.active_class = clean_class(name) or None
+
+    def color_of(self, class_name):
+        return class_color(class_name, self.class_order)
+
     def set_mask_opacity(self, opacity):
         self.mask_opacity = max(0.0, min(1.0, float(opacity)))
-        if self.mask is not None:
-            self._refresh_mask_pixmap()
+        self._refresh_mask_pixmap()
         self.update()
 
     def set_contour_only(self, enabled):
         self.show_contour_only = bool(enabled)
-        if self.mask is not None:
-            self._refresh_mask_pixmap()
+        self._refresh_mask_pixmap()
         self.update()
 
     def set_tool(self, tool_name):
@@ -290,26 +285,55 @@ class Canvas(QWidget):
         self.show_contour_only = not self.fill_mask
         if self.fill_mask and self._last_outline:
             self.commit_pending_outline_to_mask()
-        if self.mask is not None:
-            self._refresh_mask_pixmap()
+        self._refresh_mask_pixmap()
         self.update()
 
     def commit_pending_outline_to_mask(self):
         if len(self._last_outline) < 2:
             return False
-        self._ensure_mask()
-        points = np.array(
-            [[p.x(), p.y()] for p in self._last_outline],
-            dtype=np.int32,
-        ).reshape((-1, 1, 2))
-        cv2.fillPoly(self.mask, [points], 1.0)
+        outline = self._last_outline
+        self._last_outline = []
+        made = self._add_polygon(outline)
+        self.update()
+        return made
+
+    def _add_polygon(self, points):
+        """Fill a closed outline as a new mask of the active label.
+
+        With no label picked the outline is added to the selected mask instead,
+        and with neither nothing is drawn. Returns whether a mask changed.
+        """
+        if self.image is None:
+            return False
+        outline = np.array([[p.x(), p.y()] for p in points], dtype=np.int32)
+        if self.active_class is not None:
+            height, width = self.image.shape[:2]
+            mask = np.zeros((height, width), dtype=np.uint8)
+            cv2.fillPoly(mask, [outline.reshape((-1, 1, 2))], 1)
+            self.instances.append(
+                make_instance(
+                    self.active_class,
+                    next_instance_id(self.instances, self.active_class),
+                    mask,
+                )
+            )
+            self.selected_index = len(self.instances) - 1
+        elif self._selected_instance() is not None:
+            cv2.fillPoly(
+                self._selected_instance()["mask"], [outline.reshape((-1, 1, 2))], 1
+            )
+        else:
+            self.notice.emit("Pick a nerve or anatomy label before drawing a mask")
+            return False
+        self._refresh_mask_pixmap()
         self._push_history()
         self._mask_touched = True
-        self._last_outline = []
-        if self.mask is not None:
-            self._refresh_mask_pixmap()
-        self.update()
         return True
+
+    def _selected_instance(self):
+        if self.selected_index is None or self.selected_index >= len(self.instances):
+            return None
+        return self.instances[self.selected_index]
 
     def set_roi(self, box, record=False):
         """Give the image on screen the ROI box (left, right, top, bottom), or None.
@@ -354,17 +378,17 @@ class Canvas(QWidget):
         top, bottom = sorted(int(round(y)) for y in self._roi["h"])
         return left, right, top, bottom
 
-    def visible_mask(self):
-        """The mask as shown, saved and measured: empty outside the ROI."""
-        if self.mask is None:
-            return None
-        box = self.roi_box()
-        if box is None:
-            return self.mask
-        left, right, top, bottom = box
-        visible = np.zeros_like(self.mask)
-        visible[top:bottom, left:right] = self.mask[top:bottom, left:right]
-        return visible
+    def visible_instances(self):
+        """The masks as shown, saved and measured: emptied outside the ROI, with
+        those left empty dropped."""
+        return clip_instances(self.instances, self.roi_box())
+
+    def has_visible_mask(self):
+        return bool(self.visible_instances())
+
+    def has_hidden_mask(self):
+        """True when the ROI keeps every mask on the image out of view."""
+        return any(i["mask"].any() for i in self.instances) and not self.has_visible_mask()
 
     def _roi_screen_rect(self):
         scale, offset_x, offset_y = self._current_view()
@@ -447,16 +471,24 @@ class Canvas(QWidget):
             max(0.0, min(float(height), (pos.y() - offset_y) / scale)),
         )
 
-    def _mask_at(self, pos):
-        """True when the mask as shown covers the image pixel under a widget position."""
-        mask = self.visible_mask()
+    def _instance_at(self, pos):
+        """Index of the topmost mask shown at a widget position, or None."""
         point = self._screen_to_image(pos)
-        if mask is None or point is None:
-            return False
-        height, width = mask.shape[:2]
-        if not (0 <= point.x() < width and 0 <= point.y() < height):
-            return False
-        return bool(mask[point.y(), point.x()] > 0)
+        if point is None or self.image is None:
+            return None
+        x, y = point.x(), point.y()
+        box = self.roi_box()
+        if box is not None:
+            left, right, top, bottom = box
+            if not (left <= x < right and top <= y < bottom):
+                return None
+        for index in range(len(self.instances) - 1, -1, -1):
+            if self.instances[index]["mask"][y, x]:
+                return index
+        return None
+
+    def _mask_at(self, pos):
+        return self._instance_at(pos) is not None
 
     def _outline_at(self, pos):
         """True when a widget position is on or inside the outline not yet filled in."""
@@ -487,69 +519,39 @@ class Canvas(QWidget):
         if kind == "outline":
             self._last_outline = []
             self.update()
+        elif kind == "mask":
+            self.delete_selected_instance()
         else:
             self.delete_requested.emit(kind)
 
-    def set_region_view(self, enabled):
-        self.region_view = bool(enabled)
+    def delete_selected_instance(self):
+        instance = self._selected_instance()
+        if instance is None:
+            return
+        del self.instances[self.selected_index]
+        self.selected_index = None
+        self.selection = None
         self._refresh_mask_pixmap()
+        self._push_history()
+        self._mask_touched = True
+        self.notice.emit(f"Deleted {instance_title(instance)}")
         self.update()
 
-    def set_knee_side(self, knee_side):
-        self.knee_side = knee_side
+    def relabel_selected_instance(self, class_name):
+        """Give the selected mask another label, numbered on from that label's masks."""
+        instance = self._selected_instance()
+        class_name = clean_class(class_name)
+        if instance is None or not class_name or instance["class"] == class_name:
+            return
+        old_title = instance_title(instance)
+        others = [i for i in self.instances if i is not instance]
+        instance["id"] = next_instance_id(others, class_name)
+        instance["class"] = class_name
         self._refresh_mask_pixmap()
+        self._push_history()
+        self._mask_touched = True
+        self.notice.emit(f"{old_title} is now {instance_title(instance)}")
         self.update()
-
-    def set_centre_x(self, centre_x):
-        self.centre_x = None if centre_x is None else float(centre_x)
-        self._refresh_mask_pixmap()
-        self.update()
-
-    def _build_region_overlay(self, binary):
-        """Work out what is drawn over the mask: the bone line, and the regions.
-
-        Both follow the largest connected piece of the mask, the one measured.
-        """
-        if not binary.any():
-            return None
-        binary = largest_piece(binary)
-        width = binary.shape[1]
-        top_side, pixels = outline_sides(binary)
-        top = top_surface(top_side)
-        if self.region_view:
-            centre_x = self.centre_x
-            if centre_x is None:
-                centre_x = suggest_centre_x(*top)
-            spans = region_columns(width, centre_x, self.knee_side, self.roi_box())
-            centre = surface_point(*top, centre_x)
-        else:
-            spans = {"whole": (0, width)}
-            centre = None
-        # The line drawn is the path the length is measured along, cut where it
-        # passes from one region into the next.
-        bone_lines = []
-        for name, (start, stop) in spans.items():
-            inside = np.nonzero((pixels[:, 0] >= start) & (pixels[:, 0] < stop))[0]
-            if len(inside) == 0:
-                continue
-            breaks = np.nonzero(np.diff(inside) > 1)[0] + 1
-            for run in np.split(inside, breaks):
-                # One pixel further, so the colours of two regions meet.
-                last = min(run[-1] + 1, len(pixels) - 1)
-                run = pixels[run[0] : last + 1]
-                bone_lines.append((name, run[:, 0] + 0.5, run[:, 1] + 0.5))
-        return {"spans": spans, "centre": centre, "top": top, "bone_lines": bone_lines}
-
-    def _centre_marker_hit(self, pos):
-        overlay = self._region_overlay
-        if not self.region_view or overlay is None or overlay["centre"] is None:
-            return False
-        scale, offset_x, offset_y = self._current_view()
-        centre_x, centre_y = overlay["centre"]
-        return (
-            abs(pos.x() - (offset_x + centre_x * scale)) <= 10
-            and abs(pos.y() - (offset_y + centre_y * scale)) <= 10
-        )
 
     def start_calibration(self):
         if self.image is None:
@@ -661,25 +663,6 @@ class Canvas(QWidget):
             raise ValueError(f"Unsupported image format: {file_path}")
         return image
 
-    def _read_mask(self, file_path):
-        lower_path = file_path.lower()
-        if lower_path.endswith((".tif", ".tiff")):
-            mask = read_tiff_frame(file_path, 0)
-        else:
-            mask = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-            if mask is None:
-                raise ValueError(f"Unsupported mask format: {file_path}")
-        if mask is None:
-            raise ValueError(f"Unsupported mask format: {file_path}")
-        if mask.ndim == 3:
-            if mask.shape[-1] in (3, 4):
-                mask = mask[:, :, 0]
-            else:
-                mask = mask[0]
-        while mask.ndim > 2:
-            mask = mask[0]
-        return mask
-
     def _to_pixmap(self, image):
         if image.ndim == 2:
             display = np.ascontiguousarray(self._normalize_gray(image))
@@ -709,77 +692,34 @@ class Canvas(QWidget):
             return QPixmap.fromImage(q_image)
         raise ValueError(f"Unsupported image layout: {image.shape}")
 
-    def _normalize_mask(self, mask):
-        data = np.asarray(mask)
-        if data.ndim == 4:
-            data = data[0]
-        if data.ndim == 3 and data.shape[0] == 1:
-            data = data[0]
-        if data.ndim == 3 and data.shape[2] == 1:
-            data = data[:, :, 0]
-        if data.ndim != 2:
-            raise ValueError(f"Unsupported mask layout: {data.shape}")
-        if self.image is not None and data.shape[:2] != self.image.shape[:2]:
-            data = cv2.resize(
-                data, (self.image.shape[1], self.image.shape[0]), interpolation=cv2.INTER_NEAREST
-            )
-        if data.dtype != np.float32:
-            data = data.astype(np.float32, copy=False)
-        if data.max() > 1.0:
-            data = data / 255.0
-        return np.clip(data, 0.0, 1.0)
-
     def _refresh_mask_pixmap(self):
         self.mask_changed.emit()
-        if self.mask is None:
+        if self.image is None:
             self.mask_pixmap = None
-            self._region_overlay = None
+            self._label_anchors = []
             return
-        height, width = self.mask.shape
-        shown = self.visible_mask()
-        binary = (shown > 0).astype(np.uint8)
-        self._region_overlay = self._build_region_overlay(binary)
-        if self.region_view and self._region_overlay is not None:
-            colored_spans = [
-                (region_color(name), span)
-                for name, span in self._region_overlay["spans"].items()
-            ]
-        else:
-            colored_spans = [(WHOLE_MASK_COLOR, (0, width))]
+        height, width = self.image.shape[:2]
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
-        for color, (start, stop) in colored_spans:
-            if stop <= start:
-                continue
+        alpha = int(255 * self.mask_opacity)
+        self._label_anchors = []
+        for instance in self.visible_instances():
+            color = self.color_of(instance["class"])
+            mask = instance["mask"]
             if self.show_contour_only:
-                region = np.zeros_like(binary)
-                region[:, start:stop] = binary[:, start:stop]
                 contours, _ = cv2.findContours(
-                    region, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                 )
                 cv2.drawContours(
-                    rgba,
-                    contours,
-                    -1,
-                    (*color, int(255 * self.mask_opacity)),
-                    self._roi_outline_thickness_px(),
+                    rgba, contours, -1, (*color, alpha), self._roi_outline_thickness_px()
                 )
             else:
-                level = shown[:, start:stop]
-                for channel in range(3):
-                    rgba[:, start:stop, channel] = (level * color[channel]).astype(
-                        np.uint8
-                    )
-                rgba[:, start:stop, 3] = (level * 255.0 * self.mask_opacity).astype(
-                    np.uint8
-                )
+                rgba[mask > 0] = (*color, alpha)
+            anchor = label_anchor(mask)
+            if anchor is not None:
+                self._label_anchors.append((instance, anchor))
         rgba = np.ascontiguousarray(rgba)
-        bytes_per_line = rgba.strides[0]
         q_image = QImage(
-            rgba.tobytes(),
-            width,
-            height,
-            bytes_per_line,
-            QImage.Format.Format_RGBA8888,
+            rgba.tobytes(), width, height, rgba.strides[0], QImage.Format.Format_RGBA8888
         ).copy()
         self.mask_pixmap = QPixmap.fromImage(q_image)
 
@@ -799,14 +739,6 @@ class Canvas(QWidget):
         scaled = (image_float - min_val) / (max_val - min_val)
         scaled = np.clip(scaled, 0.0, 1.0)
         return (scaled * 255.0).astype(np.uint8)
-
-    def _ensure_mask(self):
-        if self.image is None:
-            return
-        if self.mask is None:
-            height, width = self.image.shape[:2]
-            self.mask = np.zeros((height, width), dtype=np.float32)
-            self._reset_history()
 
     def _current_view(self):
         if self.pixmap is None:
@@ -863,20 +795,54 @@ class Canvas(QWidget):
         width = int(round(thickness_px * max(0.6, self.scale)))
         return max(1, min(8, width))
 
-    def _draw_point(self, point, value):
-        if self.mask is None:
-            return
-        cv2.circle(self.mask, (point.x(), point.y()), self.brush_radius, value, -1)
+    def _brush_target(self):
+        """The mask a brush stroke paints into: the selected mask when it has the
+        active label or no label is picked, otherwise a new mask of the active
+        label. None, with a notice, when there is neither."""
+        selected = self._selected_instance()
+        if selected is not None and self.active_class in (None, selected["class"]):
+            return selected
+        if self.active_class is None:
+            self.notice.emit("Pick a nerve or anatomy label before painting a mask")
+            return None
+        height, width = self.image.shape[:2]
+        instance = make_instance(
+            self.active_class,
+            next_instance_id(self.instances, self.active_class),
+            np.zeros((height, width), dtype=np.uint8),
+        )
+        self.instances.append(instance)
+        self.selected_index = len(self.instances) - 1
+        return instance
 
-    def _draw_line(self, start, end, value):
-        if self.mask is None:
+    def _paint(self, start, end):
+        """Paint with the brush, or erase from every mask with the eraser, along a
+        stroke from start to end (a point when both are the same)."""
+        if self.tool == "eraser":
+            targets, value = self.instances, 0
+        elif self._stroke_target is not None:
+            targets, value = [self._stroke_target], 1
+        else:
             return
-        cv2.line(
-            self.mask,
-            (start.x(), start.y()),
-            (end.x(), end.y()),
-            value,
-            self._brush_thickness(),
+        for instance in targets:
+            if start == end:
+                cv2.circle(
+                    instance["mask"], (start.x(), start.y()), self.brush_radius, value, -1
+                )
+            else:
+                cv2.line(
+                    instance["mask"],
+                    (start.x(), start.y()),
+                    (end.x(), end.y()),
+                    value,
+                    self._brush_thickness(),
+                )
+
+    def _drop_empty_instances(self):
+        selected = self._selected_instance()
+        self.instances = [i for i in self.instances if i["mask"].any()]
+        self.selected_index = next(
+            (n for n, i in enumerate(self.instances) if i is selected), None
         )
 
     def _finish_polyline(self):
@@ -885,15 +851,7 @@ class Canvas(QWidget):
             self.update()
             return
         if self.fill_mask:
-            self._ensure_mask()
-            points = np.array(
-                [[p.x(), p.y()] for p in self._poly_points],
-                dtype=np.int32,
-            ).reshape((-1, 1, 2))
-            cv2.fillPoly(self.mask, [points], 1.0)
-            self._refresh_mask_pixmap()
-            self._push_history()
-            self._mask_touched = True
+            self._add_polygon(self._poly_points)
         else:
             self._last_outline = list(self._poly_points)
         self._poly_points = []
@@ -914,23 +872,19 @@ class Canvas(QWidget):
                 return
             if self.tool == "select":
                 pos = event.position().toPoint()
-                self._centre_drag = self._centre_marker_hit(pos)
-                if not self._centre_drag:
-                    self._roi_drag = self._roi_grips_at(pos) or None
-                    if self._roi_drag is not None:
-                        self.selection = "roi"
-                    elif self._inside_roi(pos):
-                        self._roi_move = {
-                            "press": pos,
-                            "v": list(self._roi["v"]),
-                            "h": list(self._roi["h"]),
-                            "moved": False,
-                        }
-                    elif self._mask_at(pos):
-                        self.selection = "mask"
-                    else:
-                        self.selection = None
-                    self.update()
+                self._roi_drag = self._roi_grips_at(pos) or None
+                if self._roi_drag is not None:
+                    self.selection = "roi"
+                elif self._inside_roi(pos):
+                    self._roi_move = {
+                        "press": pos,
+                        "v": list(self._roi["v"]),
+                        "h": list(self._roi["h"]),
+                        "moved": False,
+                    }
+                else:
+                    self._select_instance_at(pos)
+                self.update()
             elif self.tool == "roi":
                 # On the box already there the ROI tool adjusts it; anywhere else
                 # it starts a box that replaces it.
@@ -954,18 +908,15 @@ class Canvas(QWidget):
                 self._freehand_points = [point]
                 self._last_outline = []
                 self.update()
-            elif self.tool == "brush":
-                self._ensure_mask()
+            elif self.tool in ("brush", "eraser"):
+                self._stroke_target = (
+                    self._brush_target() if self.tool == "brush" else None
+                )
+                if self.tool == "brush" and self._stroke_target is None:
+                    return
                 self._drawing = True
                 self._last_point = point
-                self._draw_point(point, 1.0)
-                self._refresh_mask_pixmap()
-                self.update()
-            elif self.tool == "eraser":
-                self._ensure_mask()
-                self._drawing = True
-                self._last_point = point
-                self._draw_point(point, 0.0)
+                self._paint(point, point)
                 self._refresh_mask_pixmap()
                 self.update()
             elif self.tool == "polyline":
@@ -974,6 +925,12 @@ class Canvas(QWidget):
         elif event.button() == Qt.MouseButton.RightButton:
             if self.tool == "polyline":
                 self._finish_polyline()
+
+    def _select_instance_at(self, pos):
+        self.selected_index = self._instance_at(pos)
+        self.selection = None if self.selected_index is None else "mask"
+        if self.selected_index is not None:
+            self.notice.emit(f"Selected {instance_title(self.instances[self.selected_index])}")
 
     def mouseMoveEvent(self, event):
         if self.image is None:
@@ -988,11 +945,7 @@ class Canvas(QWidget):
         self._cursor_pos = self._screen_to_image(event.position().toPoint())
         if self.tool == "select":
             pos = event.position().toPoint()
-            if self._centre_drag:
-                scale, offset_x, _ = self._current_view()
-                width = self.image.shape[1]
-                self.set_centre_x(max(0.0, min(float(width), (pos.x() - offset_x) / scale)))
-            elif self._roi_drag is not None:
+            if self._roi_drag is not None:
                 x, y = self._image_position(pos)
                 for axis, index in self._roi_drag:
                     self._roi[axis][index] = x if axis == "v" else y
@@ -1000,8 +953,6 @@ class Canvas(QWidget):
                 self.update()
             elif self._roi_move is not None:
                 self._move_roi(pos)
-            elif self._centre_marker_hit(pos):
-                self.setCursor(Qt.CursorShape.SizeHorCursor)
             elif not self._roi_grips_at(pos) and self._inside_roi(pos):
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
             else:
@@ -1040,10 +991,8 @@ class Canvas(QWidget):
             return
         if self._last_point is None:
             return
-        if self.tool == "brush":
-            self._draw_line(self._last_point, point, 1.0)
-        elif self.tool == "eraser":
-            self._draw_line(self._last_point, point, 0.0)
+        if self.tool in ("brush", "eraser"):
+            self._paint(self._last_point, point)
         self._last_point = point
         self._refresh_mask_pixmap()
         self.update()
@@ -1052,7 +1001,6 @@ class Canvas(QWidget):
         if self._calibrating:
             self._calibration_drag = None
             return
-        self._centre_drag = False
         if self._roi_drag is not None:
             self._roi_drag = None
             self._push_history()
@@ -1066,8 +1014,10 @@ class Canvas(QWidget):
             else:
                 # A click inside the ROI picks the mask when it lands on it.
                 pos = event.position().toPoint()
-                on_mask = self.tool == "select" and self._mask_at(pos)
-                self.selection = "mask" if on_mask else "roi"
+                if self.tool == "select" and self._mask_at(pos):
+                    self._select_instance_at(pos)
+                else:
+                    self.selection = "roi"
                 self.update()
         if self._roi_draft is not None:
             (x0, y0), (x1, y1) = self._roi_draft
@@ -1080,22 +1030,17 @@ class Canvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "freehand":
                 if self.fill_mask and len(self._freehand_points) > 2:
-                    self._ensure_mask()
-                    points = np.array(
-                        [[p.x(), p.y()] for p in self._freehand_points],
-                        dtype=np.int32,
-                    ).reshape((-1, 1, 2))
-                    cv2.fillPoly(self.mask, [points], 1.0)
-                    self._refresh_mask_pixmap()
-                    self._push_history()
-                    self._mask_touched = True
+                    self._add_polygon(self._freehand_points)
                 elif len(self._freehand_points) > 1:
                     self._last_outline = list(self._freehand_points)
                 self._freehand_points = []
             elif self.tool in ("brush", "eraser"):
                 if self._drawing:
+                    self._drop_empty_instances()
+                    self._refresh_mask_pixmap()
                     self._push_history()
                     self._mask_touched = True
+                self._stroke_target = None
             self._drawing = False
             self._last_point = None
             self.update()
@@ -1117,16 +1062,36 @@ class Canvas(QWidget):
         kinds = self.deletable_at(event.pos())
         if not kinds:
             return
-        titles = {"outline": "Delete outline", "mask": "Delete mask", "roi": "Delete ROI"}
         menu = QMenu(self)
-        for kind in kinds:
-            menu.addAction(titles[kind]).setData(kind)
+        if "outline" in kinds:
+            menu.addAction("Delete outline").setData("outline")
+        if "mask" in kinds:
+            self._select_instance_at(event.pos())
+            self.update()
+            instance = self._selected_instance()
+            label_menu = menu.addMenu(f"Label of {instance_title(instance)}")
+            nerves, anatomy = self.label_choices
+            for group_index, group in enumerate((nerves, anatomy)):
+                if group_index and group:
+                    label_menu.addSeparator()
+                for name in group:
+                    action = label_menu.addAction(display_class(name))
+                    action.setCheckable(True)
+                    action.setChecked(name == instance["class"])
+                    action.setData(("label", name))
+            menu.addAction("Delete mask").setData("mask")
         if "roi" in kinds:
+            menu.addAction("Delete ROI").setData("roi")
             menu.addAction("Apply ROI to all").setData("apply_roi")
             menu.addAction("Clear all ROIs").setData("all_rois")
         chosen = menu.exec(event.globalPos())
-        if chosen is not None:
-            self.request_delete(chosen.data())
+        if chosen is None:
+            return
+        data = chosen.data()
+        if isinstance(data, tuple) and data[0] == "label":
+            self.relabel_selected_instance(data[1])
+        else:
+            self.request_delete(data)
 
     def mouseDoubleClickEvent(self, event):
         if self.tool == "polyline":
@@ -1151,9 +1116,9 @@ class Canvas(QWidget):
         if self.mask_pixmap is not None:
             painter.drawPixmap(target, self.mask_pixmap)
 
-        self._paint_region_overlay(painter, scale, offset_x, offset_y)
         self._paint_roi(painter, scale, offset_x, offset_y, draw_w, draw_h)
         self._paint_selected_mask(painter, scale, offset_x, offset_y)
+        self._paint_labels(painter, scale, offset_x, offset_y, draw_w, draw_h)
 
         if self.tool == "polyline" and self._poly_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
@@ -1233,13 +1198,14 @@ class Canvas(QWidget):
             )
 
     def _paint_selected_mask(self, painter, scale, offset_x, offset_y):
-        if self.selection != "mask":
+        instance = self._selected_instance()
+        if self.selection != "mask" or instance is None:
             return
-        mask = self.visible_mask()
-        if mask is None:
+        shown = clip_instances([instance], self.roi_box())
+        if not shown:
             return
         contours, _ = cv2.findContours(
-            (mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            shown[0]["mask"], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         painter.setPen(QPen(QColor(255, 255, 255), 2, Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1253,66 +1219,39 @@ class Canvas(QWidget):
                 )
             )
 
-    def _paint_region_overlay(self, painter, scale, offset_x, offset_y):
-        overlay = self._region_overlay
-        if overlay is None or self.mask_opacity <= 0:
+    def _paint_labels(self, painter, scale, offset_x, offset_y, draw_w, draw_h):
+        """A tag naming each mask, on the mask and kept inside the image."""
+        if not self._label_anchors or self.mask_opacity <= 0:
             return
+        selected = self._selected_instance() if self.selection == "mask" else None
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        # The bone line follows the mask outline, so it is drawn as coloured dots
-        # on a dark line to stay visible on top of an outline of the same colour.
-        for name, xs, ys in overlay["bone_lines"]:
-            polygon = QPolygonF(
-                [
-                    QPointF(offset_x + x * scale, offset_y + y * scale)
-                    for x, y in zip(xs, ys)
-                ]
-            )
-            color = region_color(name)
-            painter.setPen(QPen(QColor(0, 0, 0), 4, Qt.PenStyle.SolidLine))
-            painter.drawPolyline(polygon)
-            dotted = QPen(QColor(*color), 3, Qt.PenStyle.DotLine)
-            dotted.setCapStyle(Qt.PenCapStyle.RoundCap)
-            painter.setPen(dotted)
-            painter.drawPolyline(polygon)
-        if self.region_view and overlay["centre"] is not None:
-            font = painter.font()
-            font.setBold(True)
-            painter.setFont(font)
-            metrics = painter.fontMetrics()
-            columns, top = overlay["top"]
-            for name, (start, stop) in overlay["spans"].items():
-                inside = (columns >= start) & (columns < stop)
-                if name not in REGION_LABELS or not inside.any():
-                    continue
-                label = REGION_LABELS[name]
-                middle = columns[inside].mean()
-                label_width = metrics.horizontalAdvance(label)
-                # The name sits just above the top surface under its own width,
-                # not above the highest point of the whole region.
-                under = inside & (np.abs(columns - middle) * scale <= label_width / 2)
-                if not under.any():
-                    under = inside
-                middle_x = offset_x + (middle + 0.5) * scale
-                label_y = offset_y + top[under].min() * scale - 8
-                painter.setPen(QColor(255, 255, 255))
-                painter.drawText(QPointF(middle_x - label_width / 2, label_y), label)
-            centre_x, centre_y = overlay["centre"]
-            x = offset_x + centre_x * scale
-            y = offset_y + centre_y * scale
-            size = 7
-            painter.setPen(QPen(QColor(0, 0, 0), 1))
-            painter.setBrush(QColor(*CENTRE_MARKER_COLOR))
-            painter.drawPolygon(
-                QPolygonF(
-                    [
-                        QPointF(x, y - size),
-                        QPointF(x + size, y),
-                        QPointF(x, y + size),
-                        QPointF(x - size, y),
-                    ]
+        font = QFont(painter.font())
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        for instance, (x, y) in self._label_anchors:
+            text = instance_title(instance)
+            width = metrics.horizontalAdvance(text) + 14
+            height = metrics.height() + 6
+            centre_x = offset_x + (x + 0.5) * scale
+            centre_y = offset_y + (y + 0.5) * scale
+            if draw_w >= width:
+                centre_x = max(offset_x + width / 2, min(offset_x + draw_w - width / 2, centre_x))
+            if draw_h >= height:
+                centre_y = max(offset_y + height / 2, min(offset_y + draw_h - height / 2, centre_y))
+            rect = QRectF(centre_x - width / 2, centre_y - height / 2, width, height)
+            is_selected = selected is not None and instance["class"] == selected["class"] and instance["id"] == selected["id"]
+            painter.setPen(
+                QPen(
+                    QColor(255, 255, 255) if is_selected else QColor(*self.color_of(instance["class"])),
+                    2 if is_selected else 1.5,
                 )
             )
+            painter.setBrush(QColor(20, 27, 34, 230))
+            painter.drawRoundedRect(rect, 5, 5)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
     def undo(self):
@@ -1330,8 +1269,11 @@ class Canvas(QWidget):
         self._restore_history_entry(state)
 
     def _restore_history_entry(self, entry):
-        mask, box = entry
-        self.mask = np.copy(mask)
+        instances, box = entry
+        self.instances = copy_instances(instances)
+        self.selected_index = None
+        if self.selection == "mask":
+            self.selection = None
         if box != self.roi_box():
             self._apply_roi(box)
             self.roi_changed.emit()
@@ -1343,18 +1285,18 @@ class Canvas(QWidget):
         self._undo_stack = []
         self._redo_stack = []
         self.history_resets += 1
-        if self.mask is not None:
-            self._undo_stack.append((np.copy(self.mask), self.roi_box()))
+        if self.image is not None:
+            self._undo_stack.append((copy_instances(self.instances), self.roi_box()))
 
     def _push_history(self):
-        if self.mask is None:
+        if self.image is None:
             return
-        self._undo_stack.append((np.copy(self.mask), self.roi_box()))
+        self._undo_stack.append((copy_instances(self.instances), self.roi_box()))
         self._redo_stack = []
         self.edit_count += 1
 
     def has_mask_data(self):
-        return self.mask is not None and self._mask_touched
+        return self.image is not None and self._mask_touched
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
