@@ -3215,6 +3215,8 @@ class MainWindow(QMainWindow):
         frame = self._decode_video_frame(frame_index)
         if frame is None:
             self._stop_playback()
+            if self._end_video_at_last_decoded_frame(frame_index):
+                return
             QMessageBox.warning(self, "Frame error", f"Could not decode frame {frame_index}.")
             return
         self._video_frame_index = frame_index
@@ -3348,6 +3350,20 @@ class MainWindow(QMainWindow):
         self.frame_prev_btn.setEnabled(False)
         self.frame_next_btn.setEnabled(False)
         self.frame_last_btn.setEnabled(False)
+
+    def _end_video_at_last_decoded_frame(self, failed_index):
+        """Shorten the video to the frames that decode and show the last one.
+
+        Some containers report more frames than they hold. When a sequential
+        read stops before ``failed_index``, the stream ends there.
+        """
+        last_decoded = self._video_decode_pos
+        if last_decoded < 0 or last_decoded >= failed_index:
+            return False
+        self._video_frame_count = last_decoded + 1
+        self._set_slider_state(0, last_decoded, enabled=True)
+        self._set_video_frame_index(last_decoded, force=True)
+        return True
 
     def _set_slider_state(self, minimum, maximum, enabled):
         self.frame_slider.blockSignals(True)
@@ -4927,9 +4943,12 @@ class VideoBatchInferenceWorker(QObject):
                         output_path = video_output_dir / f"frame_{frame_index:06d}.png"
                         success, frame = capture.read()
                         if not success or frame is None:
-                            raise RuntimeError(
-                                f"Could not decode {video_name} frame {frame_index}."
-                            )
+                            # Some containers report more frames than they
+                            # hold; nothing past a failed sequential read can
+                            # be decoded, so the video ends here.
+                            total_frames -= frame_count - frame_index
+                            self.progress.emit(processed + skipped, total_frames)
+                            break
                         if not self._overwrite_existing and output_path.exists():
                             skipped += 1
                             self.progress.emit(processed + skipped, total_frames)
