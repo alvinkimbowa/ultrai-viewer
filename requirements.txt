@@ -5,4 +5,5 @@ opencv-python
 numpy
 pyinstaller
 scikit-image
+scipy
 PyQt6

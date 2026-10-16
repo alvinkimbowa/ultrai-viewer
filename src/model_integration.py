@@ -8,6 +8,8 @@ import contextlib
 import numpy as np
 import cv2
 
+from .monogenic import split_monogenic
+
 
 GPU_FALLBACK_WARNING = (
     "GPU selected but could not be used. Falling back to CPU.\n\n"
@@ -22,6 +24,7 @@ class ModelIntegration:
     def __init__(self, model_path: str | None = None):
         self._model_path = model_path or self._locate_model()
         self._session = None
+        self._monogenic = None
         self._device_provider = "CPUExecutionProvider"
         self._device_warning = None
 
@@ -120,6 +123,12 @@ class ModelIntegration:
             return None
         import onnxruntime as ort
 
+        model_source = self._model_path
+        self._monogenic = None
+        split = split_monogenic(self._model_path)
+        if split is not None:
+            model_source, self._monogenic = split
+
         self._device_warning = None
         providers = ort.get_available_providers()
         selected = self._device_provider
@@ -132,7 +141,7 @@ class ModelIntegration:
         try:
             with self._redirect_stderr_to_log():
                 self._session = ort.InferenceSession(
-                    self._model_path,
+                    model_source,
                     providers=provider_list,
                 )
         except Exception as exc:
@@ -142,7 +151,7 @@ class ModelIntegration:
                 )
                 with self._redirect_stderr_to_log():
                     self._session = ort.InferenceSession(
-                        self._model_path,
+                        model_source,
                         providers=["CPUExecutionProvider"],
                     )
             else:
@@ -255,7 +264,10 @@ class ModelIntegration:
             raise RuntimeError("Inference canceled.")
         input_name = session.get_inputs()[0].name
         with self._redirect_stderr_to_log():
-            outputs = session.run(None, {input_name: model_input})
+            feed = {input_name: model_input}
+            if self._monogenic is not None:
+                feed.update(self._monogenic.features(model_input))
+            outputs = session.run(None, feed)
         if not outputs:
             raise RuntimeError("Model returned no outputs.")
         if cancel_event is not None and cancel_event.is_set():
