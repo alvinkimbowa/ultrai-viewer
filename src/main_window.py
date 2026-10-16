@@ -218,7 +218,7 @@ def merge_predicted(kept, predicted):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self._base_title = "UltAI Viewer"
+        self._base_title = "UltrAi Nerve Viewer"
         self.setWindowTitle(self._base_title)
         self._sidebar_width = 340
         self._measurements_sidebar_width = 280
@@ -526,7 +526,7 @@ class MainWindow(QMainWindow):
         return str(results_dir)
 
     def _settings(self):
-        return QSettings("UltAI", "UltAI Viewer")
+        return QSettings("UltrAi", "UltrAi Nerve Viewer")
 
     def _load_persisted_paths(self):
         settings = self._settings()

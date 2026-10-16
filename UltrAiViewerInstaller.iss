@@ -1,4 +1,4 @@
-#define MyAppName "UltrAi Viewer"
+#define MyAppName "UltrAi Nerve Viewer"
 #define MyAppPublisher "UltrAi"
 #define MyAppExeName GetEnv("APP_NAME") + ".exe"
 #define MyAppVersion GetEnv("ULTAI_VERSION")
@@ -6,7 +6,7 @@
 #define MyAppOutputBaseFilename GetEnv("APP_NAME") + "-installer"
 
 [Setup]
-AppId={{A367C46C-A3CD-4C76-9959-B4A62F8C6285}
+AppId={{59AEE3D2-4AC1-4C7A-A3A7-57D5049119AE}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -26,8 +26,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 [InstallDelete]
 ; Clear the previous version's files so old exes and models don't linger after an upgrade
 Type: filesandordirs; Name: "{app}\_internal"
-Type: files; Name: "{app}\UltrAiViewer-v*.exe"
-Type: files; Name: "{app}\UltrAi Viewer-v*.exe"
+Type: files; Name: "{app}\UltrAiNerveViewer-v*.exe"
 
 [Files]
 Source: "{#MyAppDistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

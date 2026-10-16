@@ -4,7 +4,7 @@ setlocal
 set /p VERSION=<VERSION
 set "OS=windows"
 set "ARCH=x64"
-set "APP_NAME=UltrAiViewer-v%VERSION%-%OS%-%ARCH%"
+set "APP_NAME=UltrAiNerveViewer-v%VERSION%-%OS%-%ARCH%"
 set "ARCHIVE_NAME=dist\\%APP_NAME%.zip"
 set "INSTALLER_NAME=%APP_NAME%-installer.exe"
 set "USER_GUIDE=User Guide - UltrAi Viewer.pdf"

@@ -5,7 +5,7 @@ set /p VERSION=<VERSION
 set "ULTAI_VERSION=%VERSION%"
 set "ULTAI_OS=windows"
 set "ULTAI_ARCH=x64"
-set "APP_NAME=UltrAiViewer-v%VERSION%-%ULTAI_OS%-%ULTAI_ARCH%"
+set "APP_NAME=UltrAiNerveViewer-v%VERSION%-%ULTAI_OS%-%ULTAI_ARCH%"
 
 .venv\Scripts\python.exe -m PyInstaller --noconfirm --clean UltrAiViewer.spec
 if errorlevel 1 exit /b 1

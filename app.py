@@ -17,7 +17,7 @@ from src.theme import apply_theme
 def main():
     app = QApplication(sys.argv)
     apply_theme(app)
-    app.setApplicationName("UltAI Viewer")
+    app.setApplicationName("UltrAi Nerve Viewer")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
