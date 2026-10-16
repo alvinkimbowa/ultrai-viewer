@@ -30,6 +30,9 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QToolTip,
+    QStackedWidget,
+    QListWidget,
+    QListWidgetItem,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import (
@@ -43,6 +46,7 @@ from PyQt6.QtGui import (
 )
 
 from .canvas import Canvas, REGION_COLORS
+from .compare_grid import CompareGrid
 from .theme import TEXT, TEXT_DISABLED
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
 from .rois import RoiStore
@@ -260,7 +264,12 @@ class MainWindow(QMainWindow):
         canvas_layout = QVBoxLayout(canvas_panel)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
         canvas_layout.setSpacing(0)
-        canvas_layout.addWidget(self.canvas, stretch=1)
+        self.compare_grid = CompareGrid()
+        self.compare_grid.navigation_requested.connect(self._on_canvas_navigation_requested)
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.canvas)
+        self.view_stack.addWidget(self.compare_grid)
+        canvas_layout.addWidget(self.view_stack, stretch=1)
         canvas_layout.addSpacing(6)
         frame_nav_row = QHBoxLayout()
         frame_nav_row.setContentsMargins(0, 0, 0, 0)
@@ -432,6 +441,22 @@ class MainWindow(QMainWindow):
         # run saved its result for the image or frame on screen.
         self._shows_run_result = False
         self._gpu_warning = None
+        # Model compare mode: one session per compared model, separate from the
+        # selected model's, and the segmentation running over them (see
+        # _segment_compare), or None.
+        self._compare_sessions = {}
+        self._compare_run = None
+        self._inference_model_name = None
+        self._inference_label = "Running segmentation..."
+        # Several changes of the image, mask or ROI on screen come one after
+        # another; the grid is redrawn once they are done.
+        self._compare_timer = QTimer(self)
+        self._compare_timer.setSingleShot(True)
+        self._compare_timer.setInterval(0)
+        self._compare_timer.timeout.connect(self._refresh_compare_grid)
+        self.canvas.image_loaded.connect(self._schedule_compare_refresh)
+        self.canvas.roi_changed.connect(self._schedule_compare_refresh)
+        self.canvas.mask_changed.connect(self._schedule_compare_refresh)
         self._init_device_picker()
         self._preload_model()
         self._init_model_picker()
@@ -496,9 +521,12 @@ class MainWindow(QMainWindow):
         The subfolder "<model>_predictions" of the selected output folder, or the
         output folder itself when no model is selected.
         """
+        return self._results_dir_for(base_dir, self._model.current_model())
+
+    @staticmethod
+    def _results_dir_for(base_dir, model):
         if not base_dir:
             return None
-        model = self._model.current_model()
         if not model:
             return str(base_dir)
         return str(Path(base_dir) / f"{model}{PREDICTIONS_SUFFIX}")
@@ -665,12 +693,8 @@ class MainWindow(QMainWindow):
         self.canvas.set_region_view(region_view)
         self.knee_picker.setEnabled(region_view)
         self.reset_centre_btn.setEnabled(region_view)
-        for region in self._result_columns:
-            visible = (region != "whole") if region_view else (region == "whole")
-            self._result_headers[region].setVisible(visible and region_view)
-            for (value_region, _), label in self._result_values.items():
-                if value_region == region:
-                    label.setVisible(visible)
+        for table in (self.results_table, *self._compare_tables.values()):
+            table.show_view(region_view)
         self._update_measurements()
 
     def _on_knee_side_changed(self):
@@ -905,6 +929,7 @@ class MainWindow(QMainWindow):
 
     def _show_saved_mask(self):
         """Put the saved mask of the image or frame on screen on the canvas."""
+        self._schedule_compare_refresh()
         worker = self._batch_worker
         # Looked up before the file is read: a result listed as saved is complete.
         self._shows_run_result = worker is not None and self._run_key() in worker.saved
@@ -1505,8 +1530,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Removed {removed} ROIs")
 
     def _update_measurements(self):
-        mask = self.canvas.visible_mask()
-        result = measure(
+        self.results_table.show_result(self._measure_mask(self.canvas.visible_mask()))
+        self._update_compare_measurements()
+
+    def _measure_mask(self, mask):
+        """Measurements of a mask of the image on screen, with the calibration,
+        centre point, knee side and ROI on screen."""
+        return measure(
             self.canvas.image,
             None if mask is None else mask >= 0.5,
             self.px_per_mm_x_spin.value(),
@@ -1515,23 +1545,6 @@ class MainWindow(QMainWindow):
             self.canvas.knee_side,
             self.canvas.roi_box(),
         )
-        unit = result["unit"]
-        row_titles = {
-            "area": f"Area ({unit}²)",
-            "length": f"Length ({unit})",
-            "thickness": f"Thickness ({unit})",
-            "echo_mean": "Echo intensity (AU)",
-            "echo_sd": "Variation (AU)",
-        }
-        for measure_name, title in row_titles.items():
-            self._result_row_labels[measure_name].setText(title)
-        for (region, measure_name), label in self._result_values.items():
-            value = result["regions"][region][measure_name]
-            if np.isnan(value):
-                label.setText("–")
-            else:
-                decimals = 1 if measure_name in ("echo_mean", "echo_sd") else 2
-                label.setText(f"{value:.{decimals}f}")
 
     def _measurement_log(self, output_dir):
         # Logs are kept in memory so that stepping through video frames does not
@@ -1867,6 +1880,14 @@ class MainWindow(QMainWindow):
         model_row.addWidget(self.device_picker)
         layout.addLayout(model_row)
 
+        self.compare_btn = QPushButton("Compare models...")
+        self.compare_btn.setToolTip(
+            "Show the results of several models side by side for the image or "
+            "frame on screen"
+        )
+        configure_button(self.compare_btn)
+        layout.addWidget(self.compare_btn)
+
         segment_row = QHBoxLayout()
         self.segment_btn = QPushButton("Segment image")
         self.segment_btn.setToolTip("Segment the image or video frame on screen")
@@ -2049,42 +2070,17 @@ class MainWindow(QMainWindow):
         configure_button(self.reset_centre_btn)
         layout.addWidget(self.reset_centre_btn)
 
-        # One column of values per region; the view decides which columns show.
-        results_grid = QGridLayout()
-        results_grid.setHorizontalSpacing(8)
-        self._result_columns = ("whole",) + REGION_NAMES
-        column_titles = {
-            "whole": "Whole",
-            "lateral": "Lateral",
-            "intercondylar": "Notch",
-            "medial": "Medial",
-        }
-        self._result_headers = {}
-        self._result_row_labels = {}
-        self._result_values = {}
-        for column, region in enumerate(self._result_columns, start=1):
-            header = QLabel(column_titles[region])
-            header.setAlignment(Qt.AlignmentFlag.AlignRight)
-            if region in REGION_COLORS:
-                red, green, blue = REGION_COLORS[region]
-                header.setStyleSheet(
-                    f"color: rgb({red}, {green}, {blue}); font-weight: bold;"
-                )
-            results_grid.addWidget(header, 0, column)
-            self._result_headers[region] = header
-        for row, measure_name in enumerate(
-            ("area", "length", "thickness", "echo_mean", "echo_sd"), start=1
-        ):
-            row_label = QLabel()
-            results_grid.addWidget(row_label, row, 0)
-            self._result_row_labels[measure_name] = row_label
-            for column, region in enumerate(self._result_columns, start=1):
-                value = QLabel("–")
-                value.setAlignment(Qt.AlignmentFlag.AlignRight)
-                results_grid.addWidget(value, row, column)
-                self._result_values[(region, measure_name)] = value
-        results_grid.setColumnStretch(0, 1)
-        layout.addLayout(results_grid)
+        self.results_table = ResultsTable()
+        layout.addWidget(self.results_table)
+        # While models are compared: one table per model, in the order of the
+        # panels, in place of the table above.
+        self.compare_results = QWidget()
+        self._compare_results_layout = QVBoxLayout(self.compare_results)
+        self._compare_results_layout.setContentsMargins(0, 0, 0, 0)
+        self._compare_results_layout.setSpacing(4)
+        self.compare_results.hide()
+        layout.addWidget(self.compare_results)
+        self._compare_tables = {}
 
         layout.addStretch()
 
@@ -2112,10 +2108,13 @@ class MainWindow(QMainWindow):
         self.brush_radius.valueChanged.connect(self._on_brush_radius_changed)
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
+        self.fit_btn.clicked.connect(self.compare_grid.fit_to_window)
+        self.compare_btn.clicked.connect(self._toggle_compare)
         self.rotate_btn.clicked.connect(self._rotate_dialog)
         self.auto_roi_btn.clicked.connect(self._auto_roi)
         self.rotate_action.triggered.connect(self._rotate_dialog)
         self.fill_mask_checkbox.toggled.connect(self.canvas.set_fill_mask)
+        self.fill_mask_checkbox.toggled.connect(self._schedule_compare_refresh)
         self.undo_btn.clicked.connect(self._undo)
         self.redo_btn.clicked.connect(self._redo)
         self.undo_action.triggered.connect(self._undo)
@@ -2375,6 +2374,7 @@ class MainWindow(QMainWindow):
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
+        self._schedule_compare_refresh()
 
     def _on_brush_radius_changed(self, value):
         self.canvas.set_brush_radius(value)
@@ -2803,7 +2803,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No files", "Load files first.")
 
     def _segment_current(self):
-        if self._mode == "video":
+        if self._comparing():
+            self._segment_compare()
+        elif self._mode == "video":
             self._run_current_video_frame_inference()
         else:
             self._run_current_image_inference()
@@ -3311,8 +3313,8 @@ class MainWindow(QMainWindow):
 
     def _update_navigation_buttons(self):
         is_video = self._mode == "video"
-        self.segment_video_btn.setEnabled(is_video)
-        self.segment_video_action.setEnabled(is_video)
+        self.segment_video_btn.setEnabled(is_video and not self._comparing())
+        self.segment_video_action.setEnabled(is_video and not self._comparing())
         if is_video:
             can_prev = self._video_list_index > 0
             can_next = 0 <= self._video_list_index < len(self._video_paths) - 1
@@ -3848,6 +3850,346 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Model error", str(exc))
         self._show_saved_result()
 
+    def _comparing(self):
+        return self.view_stack.currentWidget() is self.compare_grid
+
+    def _compare_controls(self):
+        """Controls that edit or segment through the single canvas, off while
+        models are compared."""
+        return (
+            self.model_picker,
+            self.segment_video_btn,
+            self.segment_video_action,
+            self.segment_all_btn,
+            self.segment_all_action,
+            self.save_btn,
+            self.save_mask_action,
+            self.delete_mask_btn,
+            self.delete_mask_action,
+            self.tool_picker,
+            self.fill_mask_checkbox,
+            self.brush_radius,
+            self.rotate_btn,
+            self.rotate_action,
+            self.auto_roi_btn,
+            self.clear_rois_action,
+            self.undo_btn,
+            self.undo_action,
+            self.redo_btn,
+            self.redo_action,
+            self.calibrate_btn,
+            self.select_pan_action,
+            self.freehand_action,
+            self.polyline_action,
+            self.paint_action,
+            self.eraser_action,
+        )
+
+    def _toggle_compare(self):
+        if self._comparing():
+            self._stop_comparing()
+        else:
+            self._start_comparing()
+
+    def _choose_compare_models(self):
+        """Ask which models to compare; their names, or None when canceled."""
+        models = self._model.list_models()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Compare models")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Tick the models to show side by side:"))
+        listing = QListWidget(dialog)
+        previous = set(self.compare_grid.models())
+        for name in models:
+            item = QListWidgetItem(name, listing)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = name in previous if previous else True
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+        layout.addWidget(listing)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            dialog,
+        )
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+        def chosen():
+            return [
+                listing.item(row).text()
+                for row in range(listing.count())
+                if listing.item(row).checkState() == Qt.CheckState.Checked
+            ]
+
+        def update_ok():
+            ok_button.setEnabled(len(chosen()) >= 2)
+
+        listing.itemChanged.connect(update_ok)
+        update_ok()
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return chosen()
+
+    def _start_comparing(self):
+        if len(self._model.list_models()) < 2:
+            QMessageBox.information(
+                self, "Compare models", "At least two models are needed to compare."
+            )
+            return
+        if self.canvas.is_calibrating():
+            QMessageBox.information(
+                self, "Compare models", "Finish the calibration first."
+            )
+            return
+        if self._inference_thread and self._inference_thread.isRunning():
+            self.statusBar().showMessage("Segmentation already running...")
+            return
+        names = self._choose_compare_models()
+        if not names:
+            return
+        # The panels read each model's saved result, so what is on screen is
+        # saved first.
+        self._stop_playback()
+        if self._mode == "video":
+            self._stash_video_mask_for_current_frame()
+        elif self._mode == "sequence":
+            self._save_sequence_mask_if_needed()
+        self.view_stack.setCurrentWidget(self.compare_grid)
+        self.compare_grid.set_models(names)
+        self._build_compare_tables(names)
+        for control in self._compare_controls():
+            control.setEnabled(False)
+        self.compare_btn.setText("Stop comparing")
+        self.segment_btn.setToolTip(
+            "Segment the image or frame on screen with every compared model"
+        )
+        self._refresh_compare_grid()
+        self.statusBar().showMessage(f"Comparing {len(names)} models")
+
+    def _stop_comparing(self):
+        if self._compare_run is not None:
+            self.statusBar().showMessage("Segmentation already running...")
+            return
+        self.view_stack.setCurrentWidget(self.canvas)
+        self.compare_grid.clear()
+        self.compare_results.hide()
+        self.results_table.show()
+        for control in self._compare_controls():
+            control.setEnabled(True)
+        self.model_picker.setEnabled(self.model_picker.count() > 1)
+        self._update_navigation_buttons()
+        self.compare_btn.setText("Compare models...")
+        self.segment_btn.setToolTip("Segment the image or video frame on screen")
+        self._show_saved_result()
+        self.statusBar().showMessage("Ready")
+
+    def _schedule_compare_refresh(self, *_args):
+        if self._comparing():
+            self._compare_timer.start()
+
+    def _compare_base_dir(self):
+        if self._mode == "video":
+            return self._video_base_dir
+        if self._mode == "sequence":
+            return self._sequence_base_dir
+        return None
+
+    def _compare_mask_target(self, model):
+        """File a model's mask of the image or frame on screen is saved to, or None."""
+        results_dir = self._results_dir_for(self._compare_base_dir(), model)
+        if results_dir is None:
+            return None
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            return (
+                Path(results_dir)
+                / Path(self._video_path).stem
+                / f"frame_{int(self._video_frame_index):06d}.png"
+            )
+        if self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            return Path(results_dir) / f"{Path(self._sequence_paths[self._sequence_index]).stem}.png"
+        return None
+
+    def _compare_mask_path(self, model):
+        """A model's saved mask file of the image or frame on screen, or None.
+
+        Only the model's own results folder counts: a mask kept in the output
+        folder itself belongs to no particular model.
+        """
+        if self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            results_dir = self._results_dir_for(self._compare_base_dir(), model)
+            if results_dir is None:
+                return None
+            found = find_mask_files(
+                results_dir,
+                Path(self._sequence_paths[self._sequence_index]),
+                self._sequence_paths,
+            )
+            return found[0] if found else None
+        target = self._compare_mask_target(model)
+        return target if target is not None and target.is_file() else None
+
+    def _refresh_compare_grid(self):
+        if not self._comparing():
+            return
+        image = self.canvas.image
+        if image is None:
+            self.compare_grid.clear()
+            return
+        self.compare_grid.set_image(
+            image,
+            self.canvas.roi_box(),
+            self.canvas.mask_opacity,
+            self.canvas.show_contour_only,
+        )
+        self.compare_grid.set_regions(
+            self.canvas.region_view, self.canvas.knee_side, self.canvas.centre_x
+        )
+        for model in self.compare_grid.models():
+            path = self._compare_mask_path(model)
+            mask = None
+            if path is not None:
+                try:
+                    mask = self._read_saved_mask(path, self._shown_angle)
+                except Exception:
+                    mask = None
+            if mask is not None and mask.shape[:2] != image.shape[:2]:
+                mask = None
+            self.compare_grid.set_mask(
+                model, None if mask is None else mask.astype(np.float32)
+            )
+        self._update_compare_measurements()
+
+    def _build_compare_tables(self, names):
+        while self._compare_results_layout.count():
+            widget = self._compare_results_layout.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._compare_tables = {}
+        region_view = bool(self.view_picker.currentData())
+        for name in names:
+            title = QLabel(name)
+            title.setStyleSheet("font-weight: bold;")
+            self._compare_results_layout.addSpacing(6)
+            self._compare_results_layout.addWidget(title)
+            table = ResultsTable()
+            table.show_view(region_view)
+            self._compare_results_layout.addWidget(table)
+            self._compare_tables[name] = table
+        self.results_table.hide()
+        self.compare_results.show()
+
+    def _update_compare_measurements(self):
+        if not self._comparing() or self.canvas.image is None:
+            for table in self._compare_tables.values():
+                table.show_result(None)
+            return
+        for name, table in self._compare_tables.items():
+            panel_mask = self.compare_grid.visible_mask(name)
+            table.show_result(None if panel_mask is None else self._measure_mask(panel_mask))
+
+    def _compare_session(self, model):
+        """The compared model's own session, on the device selected."""
+        session = self._compare_sessions.get(model)
+        if session is None:
+            session = ModelIntegration()
+            session.set_model(model)
+            self._compare_sessions[model] = session
+        if session.current_device() != self._model.current_device():
+            session.set_device(self._model.current_device())
+        return session
+
+    def _segment_compare(self):
+        """Segment the image or frame on screen with each compared model that has
+        no saved result for it, or with all of them if the user overwrites."""
+        if self.canvas.image is None:
+            QMessageBox.warning(self, "No image", "Load an image before running segmentation.")
+            return
+        if self._inference_thread and self._inference_thread.isRunning():
+            self.statusBar().showMessage("Segmentation already running...")
+            return
+        if self._batch_thread and self._batch_thread.isRunning():
+            self.statusBar().showMessage("Batch segmentation already running...")
+            return
+        models = self.compare_grid.models()
+        targets = {model: self._compare_mask_target(model) for model in models}
+        if any(target is None for target in targets.values()):
+            QMessageBox.information(self, "No output folder", "Select an output folder first.")
+            return
+        saved = [model for model in models if self._compare_mask_path(model) is not None]
+        queue = [model for model in models if model not in saved]
+        if saved:
+            overwrite = self._confirm_overwrite_existing(len(saved))
+            if overwrite is None:
+                return
+            if overwrite:
+                queue = list(models)
+        if not queue:
+            self.statusBar().showMessage("Every compared model already has a result")
+            return
+        box = box_to_segment(self.canvas.image, self.canvas.roi_box())
+        # The result is saved for the image it was run on, also if another image
+        # is on screen by the time it is ready.
+        self._compare_run = {
+            "queue": queue,
+            "total": len(queue),
+            "image": self.canvas.image,
+            "box": box,
+            "crop": crop_to_box(self.canvas.image, box),
+            "targets": targets,
+            "angle": self._shown_angle,
+            "original_shape": self._original_shape,
+            "run_key": self._run_key(),
+        }
+        self.statusBar().showMessage("Running segmentation...")
+        self._run_next_compare_model(show_dialog=True)
+
+    def _run_next_compare_model(self, show_dialog=False):
+        run = self._compare_run
+        model = run["queue"].pop(0)
+        self._inference_model_name = model
+        number = run["total"] - len(run["queue"])
+        self._inference_label = f"Running {model} ({number} of {run['total']})..."
+        try:
+            session = self._compare_session(model)
+        except Exception as exc:
+            self._on_inference_error(str(exc))
+            return
+        if show_dialog:
+            self._show_inference_dialog()
+        else:
+            self._inference_started = time.monotonic()
+            self._show_inference_time_left()
+        self._start_inference_worker(session, run["crop"], self._on_compare_model_finished)
+
+    def _on_compare_model_finished(self, prediction):
+        model = self._inference_model_name
+        self._inference_seconds[model] = time.monotonic() - self._inference_started
+        run = self._compare_run
+        if run is None or prediction is None:
+            return
+        mask = place_prediction(prediction, run["image"], run["box"])
+        try:
+            write_mask_file(
+                run["targets"][model], mask >= 0.5, run["angle"], run["original_shape"]
+            )
+        except Exception as exc:
+            self._on_inference_error(str(exc))
+            return
+        if run["run_key"] == self._run_key():
+            if model == self._model.current_model():
+                # The hidden single canvas would otherwise save its older mask
+                # over this one when the image is left.
+                self._show_saved_mask()
+            self._schedule_compare_refresh()
+
     def _on_device_changed(self, index):
         if not self.device_picker.isEnabled():
             return
@@ -3897,16 +4239,24 @@ class MainWindow(QMainWindow):
             return
 
         self.statusBar().showMessage("Running segmentation...")
+        self._inference_model_name = self._model.current_model()
+        self._inference_label = "Running segmentation..."
         self._show_inference_dialog()
-
-        self._inference_thread = QThread(self)
         self._inference_box = box_to_segment(self.canvas.image, self.canvas.roi_box())
-        self._inference_worker = InferenceWorker(
-            self._model, crop_to_box(self.canvas.image, self._inference_box)
+        self._start_inference_worker(
+            self._model,
+            crop_to_box(self.canvas.image, self._inference_box),
+            self._on_inference_finished,
         )
+
+    def _start_inference_worker(self, model, image, on_finished):
+        """Run a model on an image in a background thread; on_finished gets the
+        prediction."""
+        self._inference_thread = QThread(self)
+        self._inference_worker = InferenceWorker(model, image)
         self._inference_worker.moveToThread(self._inference_thread)
         self._inference_thread.started.connect(self._inference_worker.run)
-        self._inference_worker.finished.connect(self._on_inference_finished)
+        self._inference_worker.finished.connect(on_finished)
         self._inference_worker.canceled.connect(self._on_inference_canceled)
         self._inference_worker.error.connect(self._on_inference_error)
         self._inference_worker.finished.connect(self._inference_thread.quit)
@@ -3942,13 +4292,13 @@ class MainWindow(QMainWindow):
     def _show_inference_time_left(self):
         if self._inference_dialog is None:
             return
-        expected = self._inference_seconds.get(self._model.current_model())
+        expected = self._inference_seconds.get(self._inference_model_name)
         if expected is None:
             note = "Estimating time left..."
         else:
             left = expected - (time.monotonic() - self._inference_started)
             note = f"About {format_duration(left)} left" if left >= 1 else "Finishing..."
-        self._inference_dialog.setLabelText(f"Running segmentation...\n{note}")
+        self._inference_dialog.setLabelText(f"{self._inference_label}\n{note}")
 
     def _close_inference_dialog(self):
         self._inference_clock.stop()
@@ -3965,7 +4315,7 @@ class MainWindow(QMainWindow):
             self._inference_dialog.setLabelText("Canceling segmentation...")
 
     def _on_inference_finished(self, prediction):
-        self._inference_seconds[self._model.current_model()] = (
+        self._inference_seconds[self._inference_model_name] = (
             time.monotonic() - self._inference_started
         )
         self._last_prediction = prediction
@@ -3979,10 +4329,12 @@ class MainWindow(QMainWindow):
         self._close_inference_dialog()
 
     def _on_inference_canceled(self):
+        self._compare_run = None
         self.statusBar().showMessage("Segmentation canceled")
         self._close_inference_dialog()
 
     def _on_inference_error(self, message):
+        self._compare_run = None
         QMessageBox.warning(self, "Model error", message)
         self.statusBar().showMessage("Segmentation failed")
         self._close_inference_dialog()
@@ -3990,6 +4342,14 @@ class MainWindow(QMainWindow):
     def _on_inference_thread_done(self):
         self._inference_thread = None
         self._inference_worker = None
+        if self._compare_run is not None:
+            if self._compare_run["queue"]:
+                self._run_next_compare_model()
+                return
+            self._compare_run = None
+            self._close_inference_dialog()
+            self.statusBar().showMessage("Segmentation complete")
+            return
         self.statusBar().showMessage("Ready")
 
     def closeEvent(self, event):
@@ -4010,6 +4370,78 @@ class MainWindow(QMainWindow):
                 thread.wait(5000)
         self._clear_video_state()
         super().closeEvent(event)
+
+
+class ResultsTable(QWidget):
+    """Measurements of one mask: a row per measure, a column per region."""
+
+    COLUMNS = ("whole",) + REGION_NAMES
+    COLUMN_TITLES = {
+        "whole": "Whole",
+        "lateral": "Lateral",
+        "intercondylar": "Notch",
+        "medial": "Medial",
+    }
+    MEASURES = ("area", "length", "thickness", "echo_mean", "echo_sd")
+
+    def __init__(self):
+        super().__init__()
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        self._headers = {}
+        self._row_labels = {}
+        self._values = {}
+        for column, region in enumerate(self.COLUMNS, start=1):
+            header = QLabel(self.COLUMN_TITLES[region])
+            header.setAlignment(Qt.AlignmentFlag.AlignRight)
+            if region in REGION_COLORS:
+                red, green, blue = REGION_COLORS[region]
+                header.setStyleSheet(
+                    f"color: rgb({red}, {green}, {blue}); font-weight: bold;"
+                )
+            grid.addWidget(header, 0, column)
+            self._headers[region] = header
+        for row, measure_name in enumerate(self.MEASURES, start=1):
+            row_label = QLabel()
+            grid.addWidget(row_label, row, 0)
+            self._row_labels[measure_name] = row_label
+            for column, region in enumerate(self.COLUMNS, start=1):
+                value = QLabel("–")
+                value.setAlignment(Qt.AlignmentFlag.AlignRight)
+                grid.addWidget(value, row, column)
+                self._values[(region, measure_name)] = value
+        grid.setColumnStretch(0, 1)
+        self.show_result(None)
+
+    def show_view(self, region_view):
+        """Show the region columns in the per-region view, otherwise the whole one."""
+        for region in self.COLUMNS:
+            visible = (region != "whole") if region_view else (region == "whole")
+            self._headers[region].setVisible(visible and region_view)
+            for (value_region, _), label in self._values.items():
+                if value_region == region:
+                    label.setVisible(visible)
+
+    def show_result(self, result):
+        """Show what measure() returned, or dashes for None."""
+        unit = result["unit"] if result is not None else "mm"
+        row_titles = {
+            "area": f"Area ({unit}²)",
+            "length": f"Length ({unit})",
+            "thickness": f"Thickness ({unit})",
+            "echo_mean": "Echo intensity (AU)",
+            "echo_sd": "Variation (AU)",
+        }
+        for measure_name, title in row_titles.items():
+            self._row_labels[measure_name].setText(title)
+        for (region, measure_name), label in self._values.items():
+            value = np.nan if result is None else result["regions"][region][measure_name]
+            if np.isnan(value):
+                label.setText("–")
+            else:
+                decimals = 1 if measure_name in ("echo_mean", "echo_sd") else 2
+                label.setText(f"{value:.{decimals}f}")
 
 
 class WorkProgressDialog(QDialog):

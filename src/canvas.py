@@ -49,6 +49,8 @@ class Canvas(QWidget):
     roi_drawn = pyqtSignal()
     roi_changed = pyqtSignal()
     delete_requested = pyqtSignal(str)
+    # (scale, horizontal scroll, vertical scroll) after a zoom or scroll.
+    view_changed = pyqtSignal(float, int, int)
 
     def __init__(self):
         super().__init__()
@@ -126,8 +128,44 @@ class Canvas(QWidget):
         self.h_scrollbar.raise_()
         self.v_scrollbar.raise_()
 
+        # A read-only canvas only shows: the mouse zooms, scrolls and navigates
+        # but edits nothing.
+        self.read_only = False
+        # While a read-only canvas is dragged: where the press landed and the
+        # scroll position at that moment.
+        self._pan_start = None
+        self.title = ""
+        self._applying_view = False
+
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_read_only(self, read_only):
+        self.read_only = bool(read_only)
+        self.set_tool("select")
+
+    def set_title(self, title):
+        """Text shown in the top-left corner over the image."""
+        self.title = title
+        self.update()
+
+    def set_view(self, scale, scroll_x, scroll_y):
+        """Zoom and scroll to a view another canvas reported, without reporting it back."""
+        if self.pixmap is None:
+            return
+        self._applying_view = True
+        try:
+            self.scale = max(self.min_scale, min(self.max_scale, float(scale)))
+            self._update_scrollbars()
+            self.h_scrollbar.setValue(int(scroll_x))
+            self.v_scrollbar.setValue(int(scroll_y))
+        finally:
+            self._applying_view = False
+        self.update()
+
+    def _report_view(self):
+        if not self._applying_view and self.pixmap is not None:
+            self.view_changed.emit(float(self.scale), int(self._scroll_x), int(self._scroll_y))
 
     def load_image_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -641,6 +679,7 @@ class Canvas(QWidget):
         self._scroll_y = 0
         self._update_scrollbars()
         self.update()
+        self._report_view()
 
 
     def _read_image(self, file_path):
@@ -900,6 +939,11 @@ class Canvas(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
+        if self.read_only:
+            if event.button() == Qt.MouseButton.LeftButton and self.pixmap is not None:
+                self._pan_start = (event.position().toPoint(), self._scroll_x, self._scroll_y)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
         if self.image is None:
             return
         if self._calibrating:
@@ -976,6 +1020,13 @@ class Canvas(QWidget):
                 self._finish_polyline()
 
     def mouseMoveEvent(self, event):
+        if self.read_only:
+            if self._pan_start is not None:
+                start, scroll_x, scroll_y = self._pan_start
+                moved = event.position().toPoint() - start
+                self.h_scrollbar.setValue(scroll_x - moved.x())
+                self.v_scrollbar.setValue(scroll_y - moved.y())
+            return
         if self.image is None:
             return
         if self._calibrating:
@@ -1049,6 +1100,10 @@ class Canvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
+        if self.read_only:
+            self._pan_start = None
+            self.unsetCursor()
+            return
         if self._calibrating:
             self._calibration_drag = None
             return
@@ -1105,12 +1160,17 @@ class Canvas(QWidget):
         self.update()
 
     def keyPressEvent(self, event):
+        if self.read_only:
+            super().keyPressEvent(event)
+            return
         if event.key() == Qt.Key.Key_Delete and self.selection is not None:
             self.request_delete(self.selection)
             return
         super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
+        if self.read_only:
+            return
         # A right-click with the Segmented Line tool finishes the line instead.
         if self.tool == "polyline" or self._calibrating:
             return
@@ -1129,6 +1189,8 @@ class Canvas(QWidget):
             self.request_delete(chosen.data())
 
     def mouseDoubleClickEvent(self, event):
+        if self.read_only:
+            return
         if self.tool == "polyline":
             self._finish_polyline()
 
@@ -1198,6 +1260,18 @@ class Canvas(QWidget):
             for x in self._calibration_lines["v"]:
                 screen_x = int(offset_x + x * scale)
                 painter.drawLine(screen_x, offset_y, screen_x, offset_y + draw_h)
+
+        self._paint_title(painter)
+
+    def _paint_title(self, painter):
+        if not self.title:
+            return
+        metrics = painter.fontMetrics()
+        rect = metrics.boundingRect(self.title).adjusted(-6, -3, 6, 3)
+        rect.moveTopLeft(QPoint(6, 6))
+        painter.fillRect(rect, QColor(0, 0, 0, 160))
+        painter.setPen(Qt.GlobalColor.white)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.title)
 
     def _paint_roi(self, painter, scale, offset_x, offset_y, draw_w, draw_h):
         if self._roi is not None:
@@ -1398,6 +1472,7 @@ class Canvas(QWidget):
         self.scale = max(self.min_scale, min(self.max_scale, self.scale * factor))
         self._update_scrollbars()
         self.update()
+        self._report_view()
 
     def _update_scrollbars(self):
         if self.pixmap is None:
@@ -1463,7 +1538,9 @@ class Canvas(QWidget):
     def _on_h_scroll(self, value):
         self._scroll_x = value
         self.update()
+        self._report_view()
 
     def _on_v_scroll(self, value):
         self._scroll_y = value
         self.update()
+        self._report_view()

@@ -20,6 +20,15 @@ Scroll, use the arrow keys, or **Prev** / **Next** to move between images.
 
 Masks are saved automatically as you go to `<output folder>/<model_name>_predictions/<image name>.png`.
 
+## Compare models
+
+1. Click **Compare models...** and tick two or more models. Their saved masks are shown side by side: 2 models in a row, 3 as two above one, 4 as a 2×2 grid, and so on.
+2. Click **Segment image** to run every compared model on the image on screen. If some already have a mask, you are asked whether to overwrite them or run only the others.
+3. All panels move together: changing image or frame, zooming (Ctrl+scroll) and dragging the image apply to every panel.
+4. The **Measurements** panel shows the results of each model, in the same order as the panels.
+
+Masks cannot be edited while comparing; click **Stop comparing** to edit again.
+
 ## Measurements
 
 1. **Calibrate:** enter **Pixels per mm**, or click **Calibrate** and drag the lines onto a known distance. Until then the default of 1.00 is used, so the results are not real mm.
