@@ -34,6 +34,22 @@ Scroll, use the arrow keys, or **Prev** / **Next** to move between images and fr
 
 A model that segments one structure labels its masks with the nerve picked, or **Median** when none is picked. The model's masks replace masks of the same label; masks of other labels stay.
 
+## Propagate masks with SAM 3.1
+
+**SAM 3.1** appears under **Model** on a computer set up with Meta's SAM 3 code and an NVIDIA GPU. It spreads the masks of a few frames of a video over the rest of it.
+
+1. Choose **SAM 3.1** under **Model**. The SAM controls take the place of the Segment buttons, and **SAM Point** and **SAM Box** are added under **Tools**.
+2. Give SAM masks to start from, on as many frames as you like:
+   - Masks already drawn or annotated are used as they are.
+   - **SAM Point**: left-click to include a spot, right-click to exclude one. **SAM Box**: drag a box around the structure. Each click updates the mask. Press **New object** before prompting the next structure. To redo a mask, select it first.
+   - **Text prompt** and **Find** add a mask for each match of a phrase.
+   - Masks get the label picked under **Labels**. A mask with the same label and number on several frames (such as **Median #1**) is followed as one structure.
+3. Go to the frame to start from and click **Propagate video**. **Both directions** fills the frames before and after it. Untick it to choose **Forward** or **Backward**.
+   - **Propagate all videos** does every loaded video in turn, each through all its frames from its first prompt frame. Videos without masks are skipped. Cancel keeps the videos already finished.
+4. Check the result, then trim it with **Delete before** / **Delete after**, or correct a frame by hand. A corrected frame is used as a prompt the next time you propagate.
+
+SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation files are not changed. The first prompt or propagation loads the model, which takes about half a minute.
+
 ## Measurements
 
 1. **Calibrate:** enter **Pixels per mm**, or click **Calibrate** and drag the lines onto a known distance. Until then, areas are in pixels.

@@ -66,6 +66,17 @@ def unrotate_mask(mask, angle, original_shape):
     return turned > 0
 
 
+def unrotate_point(x, y, angle, original_shape):
+    """Bring a point (x, y) on a turned image back onto the image as stored,
+    whose (height, width) is original_shape."""
+    if not angle:
+        return float(x), float(y)
+    matrix, _ = _transform(original_shape, angle)
+    inverse = cv2.invertAffineTransform(matrix)
+    stored = inverse @ np.array([x, y, 1.0])
+    return float(stored[0]), float(stored[1])
+
+
 class RotationStore:
     """The rotations.csv of one output folder, one row per rotated image or video.
 

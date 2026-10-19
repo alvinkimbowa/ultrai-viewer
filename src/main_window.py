@@ -32,7 +32,9 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QToolTip,
 )
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QSize, QEvent, QSettings, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import (
+    Qt, QObject, QThread, QTimer, QSize, QEvent, QEventLoop, QSettings, pyqtSignal, pyqtSlot,
+)
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -68,8 +70,18 @@ from .measurements import (
     to_grayscale,
 )
 from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
-from .rotations import RotationStore, rotate_image, rotate_mask
-from threading import Event
+from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_point
+from .sam_integration import (
+    SAM_MODEL_LABEL,
+    SAM_MODEL_NAME,
+    PROMPTS_FILE_NAME,
+    SamCanceled,
+    SamTracker,
+    load_prompt_frames,
+    sam_available,
+    save_prompt_frames,
+)
+from threading import Event, Thread
 from collections import OrderedDict
 import html
 import time
@@ -86,6 +98,8 @@ DEFAULT_MODEL_CLASS = "median"
 
 NO_MODEL_LABEL = "No model"
 PREDICTIONS_SUFFIX = "_predictions"
+TOOL_NAMES = ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser", "ROI Box"]
+SAM_TOOL_NAMES = ["SAM Point", "SAM Box"]
 
 
 def format_duration(seconds):
@@ -317,6 +331,17 @@ class MainWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
         self._wire_actions()
         self._model = ModelIntegration()
+        self._sam = SamTracker() if sam_available() else None
+        self._sam_selected = False
+        # Set while a SAM request is being answered; prompts made meanwhile are
+        # sent once it is.
+        self._sam_busy = False
+        self._sam_rerun = False
+        # The (label, number) of the mask SAM Point and SAM Box prompts shape, and
+        # those prompts, in pixels of the frame as viewed.
+        self._sam_object = None
+        self._sam_points = []
+        self._sam_box = None
         self._inference_thread = None
         self._inference_worker = None
         self._inference_box = None
@@ -488,10 +513,15 @@ class MainWindow(QMainWindow):
         """
         if not base_dir:
             return None
-        model = self._model.current_model()
+        model = self._selected_model_name()
         if not model:
             return str(base_dir)
         return str(Path(base_dir) / f"{model}{PREDICTIONS_SUFFIX}")
+
+    def _selected_model_name(self):
+        if self._sam_selected:
+            return SAM_MODEL_NAME
+        return self._model.current_model()
 
     def _measurement_file(self, results_dir):
         """(folder, file name) of the measurements file that goes with a results
@@ -924,6 +954,7 @@ class MainWindow(QMainWindow):
         """Put an image as stored on the canvas, turned by its file's angle."""
         self._original_shape = image.shape[:2]
         self._shown_angle = self._current_angle()
+        self._reset_sam_prompts()
         self.canvas.load_image_array(rotate_image(image, self._shown_angle), source_name)
 
     def _run_key(self):
@@ -1621,10 +1652,16 @@ class MainWindow(QMainWindow):
         return same_instances(turned, shown)
 
     def _write_shown_masks(self, mask_set):
-        """Save the masks on screen so that they line up with the stored image."""
+        """Save the masks on screen so that they line up with the stored image.
+
+        A video frame saved while SAM is selected holds masks drawn or prompted
+        by hand, so it becomes one SAM propagates from.
+        """
         mask_set.write(
             self.canvas.visible_instances(), self._shown_angle, self._original_shape
         )
+        if self._sam_selected and mask_set.frame is not None:
+            self._change_sam_prompt_frames(mask_set.folder, add={mask_set.frame})
 
     def _measurement_is_current(self, output_dir, file_name, frame=""):
         """True when the saved rows were measured with the inputs on screen."""
@@ -1854,7 +1891,8 @@ class MainWindow(QMainWindow):
         model_row.addSpacing(8)
         self.device_picker = QComboBox()
         self.device_picker.setEnabled(False)
-        model_row.addWidget(QLabel("Device:"))
+        self.device_label = QLabel("Device:")
+        model_row.addWidget(self.device_label)
         model_row.addWidget(self.device_picker)
         layout.addLayout(model_row)
 
@@ -1872,6 +1910,66 @@ class MainWindow(QMainWindow):
         self.segment_all_btn = QPushButton("Segment all files")
         configure_button(self.segment_all_btn)
         layout.addWidget(self.segment_all_btn)
+
+        self.sam_panel = QWidget()
+        sam_layout = QVBoxLayout(self.sam_panel)
+        sam_layout.setContentsMargins(0, 0, 0, 0)
+        sam_hint = QLabel(
+            "Prompt a mask with SAM Point or SAM Box under Tools: left-click to "
+            "include, right-click to exclude."
+        )
+        sam_hint.setWordWrap(True)
+        sam_layout.addWidget(sam_hint)
+        sam_text_row = QHBoxLayout()
+        self.sam_text = QLineEdit()
+        self.sam_text.setPlaceholderText("Text prompt")
+        self.sam_text.setToolTip(
+            "Find every match of a phrase on the frame on screen; each becomes a "
+            "mask of the picked label."
+        )
+        sam_text_row.addWidget(self.sam_text, stretch=1)
+        self.sam_find_btn = QPushButton("Find")
+        configure_button(self.sam_find_btn)
+        sam_text_row.addWidget(self.sam_find_btn)
+        sam_layout.addLayout(sam_text_row)
+        self.sam_new_object_btn = QPushButton("New object")
+        self.sam_new_object_btn.setToolTip(
+            "Start a new mask: the next points and box prompt a new mask of the "
+            "picked label instead of the one just prompted."
+        )
+        configure_button(self.sam_new_object_btn)
+        sam_layout.addWidget(self.sam_new_object_btn)
+        sam_direction_row = QHBoxLayout()
+        self.sam_both_checkbox = QCheckBox("Both directions")
+        self.sam_both_checkbox.setChecked(True)
+        self.sam_both_checkbox.setToolTip(
+            "Propagate to the frames before and after the frame on screen."
+        )
+        sam_direction_row.addWidget(self.sam_both_checkbox)
+        self.sam_direction_picker = QComboBox()
+        self.sam_direction_picker.addItems(["Forward", "Backward"])
+        self.sam_direction_picker.setVisible(False)
+        sam_direction_row.addWidget(self.sam_direction_picker)
+        sam_direction_row.addStretch(1)
+        sam_layout.addLayout(sam_direction_row)
+        sam_propagate_row = QHBoxLayout()
+        self.sam_propagate_btn = QPushButton("Propagate video")
+        self.sam_propagate_btn.setToolTip(
+            "Track the masks of every prompted or annotated frame through the "
+            "video on screen, starting at the frame on screen."
+        )
+        configure_button(self.sam_propagate_btn)
+        sam_propagate_row.addWidget(self.sam_propagate_btn)
+        self.sam_propagate_all_btn = QPushButton("Propagate all videos")
+        self.sam_propagate_all_btn.setToolTip(
+            "Track the masks of the prompted or annotated frames of each loaded "
+            "video through the whole of it, one video after another."
+        )
+        configure_button(self.sam_propagate_all_btn)
+        sam_propagate_row.addWidget(self.sam_propagate_all_btn)
+        sam_layout.addLayout(sam_propagate_row)
+        self.sam_panel.setVisible(False)
+        layout.addWidget(self.sam_panel)
 
         mask_row = QHBoxLayout()
         self.delete_mask_btn = QPushButton("Delete masks")
@@ -1913,16 +2011,7 @@ class MainWindow(QMainWindow):
         tools_row = QHBoxLayout()
         tools_row.addWidget(QLabel("Tools:"))
         self.tool_picker = QComboBox()
-        self.tool_picker.addItems(
-            [
-                "Select",
-                "Freehand Line",
-                "Segmented Line",
-                "Paint Brush",
-                "Eraser",
-                "ROI Box",
-            ]
-        )
+        self.tool_picker.addItems(TOOL_NAMES)
         self.tool_picker.setToolTip(
             "ROI Box: drag a box on the image to segment only inside it. Drag its "
             "edges or corners to resize it, or inside it to move it. Right-click, "
@@ -2129,6 +2218,15 @@ class MainWindow(QMainWindow):
         self.undo_action.triggered.connect(self._undo)
         self.redo_action.triggered.connect(self._redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
+        self.canvas.sam_prompt_added.connect(self._on_sam_prompt)
+        self.sam_find_btn.clicked.connect(self._sam_find_text)
+        self.sam_text.returnPressed.connect(self._sam_find_text)
+        self.sam_new_object_btn.clicked.connect(self._new_sam_object)
+        self.sam_both_checkbox.toggled.connect(
+            lambda both: self.sam_direction_picker.setVisible(not both)
+        )
+        self.sam_propagate_btn.clicked.connect(self._sam_propagate)
+        self.sam_propagate_all_btn.clicked.connect(self._sam_propagate_all)
         self.device_picker.currentIndexChanged.connect(self._on_device_changed)
         self.clear_files_btn.clicked.connect(self._clear_sequence)
         self.file_combo.currentIndexChanged.connect(self._on_file_selected)
@@ -2283,6 +2381,10 @@ class MainWindow(QMainWindow):
                 Path(self._video_path).name,
                 self._video_frame_index,
             )
+            if mask_set is not None:
+                self._change_sam_prompt_frames(
+                    mask_set.folder, remove={self._video_frame_index}
+                )
         elif self._mode == "sequence" and self._sequence_output_dir:
             self._forget_measurement(
                 result_dir,
@@ -2344,6 +2446,7 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "Delete error", str(exc))
         for output_dir, output_frames in removed.items():
+            self._change_sam_prompt_frames(roots[output_dir], remove=set(output_frames))
             try:
                 log = self._measurement_log(output_dir)
                 for frame in output_frames:
@@ -2353,6 +2456,437 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Could not save measurements: {exc}")
         count = sum(len(output_frames) for output_frames in removed.values())
         self.statusBar().showMessage(f"Deleted the masks of {count} frame(s) of {name}")
+
+    def _update_sam_controls(self):
+        """Show the SAM controls and tools in place of the segmenting ones while
+        SAM is the model selected."""
+        sam = self._sam_selected
+        for widget in (
+            self.segment_btn,
+            self.segment_video_btn,
+            self.segment_all_btn,
+            self.device_label,
+            self.device_picker,
+        ):
+            widget.setVisible(not sam)
+        for action in (self.segment_action, self.segment_video_action, self.segment_all_action):
+            action.setVisible(not sam)
+        self.sam_panel.setVisible(sam)
+        has_sam_tools = self.tool_picker.count() > len(TOOL_NAMES)
+        if sam and not has_sam_tools:
+            self.tool_picker.addItems(SAM_TOOL_NAMES)
+            self.tool_picker.setCurrentIndex(len(TOOL_NAMES))
+        elif not sam and has_sam_tools:
+            if self.tool_picker.currentIndex() >= len(TOOL_NAMES):
+                self.tool_picker.setCurrentIndex(0)
+            for _ in SAM_TOOL_NAMES:
+                self.tool_picker.removeItem(len(TOOL_NAMES))
+        self._reset_sam_prompts()
+        self._update_sam_enabled()
+
+    def _update_sam_enabled(self):
+        enabled = (
+            self._sam_selected and self._mode == "video" and self._video_frame_index >= 0
+        )
+        for widget in (
+            self.sam_text,
+            self.sam_find_btn,
+            self.sam_new_object_btn,
+            self.sam_both_checkbox,
+            self.sam_direction_picker,
+            self.sam_propagate_btn,
+            self.sam_propagate_all_btn,
+        ):
+            widget.setEnabled(enabled)
+
+    def _reset_sam_prompts(self):
+        self._sam_object = None
+        self._sam_points = []
+        self._sam_box = None
+        self.canvas.set_sam_prompts([], None)
+
+    def _new_sam_object(self):
+        self._reset_sam_prompts()
+        self.canvas.selected_index = None
+        self.canvas.update()
+        self.statusBar().showMessage("The next SAM prompt starts a new mask")
+
+    def _sam_call(self, text, work, cancelable=False):
+        """Run work(progress) on a thread, keeping the window drawn, and return
+        (True, its result), or (False, None) when it failed or was canceled.
+
+        A box with text, and Cancel when cancelable, shows when the work takes
+        more than a moment; progress(done, total) fills its bar.
+        """
+        self._sam_busy = True
+        outcome = {}
+        latest = {}
+
+        def run():
+            try:
+                outcome["value"] = work(lambda done, total: latest.update(value=(done, total)))
+            except SamCanceled:
+                outcome["canceled"] = True
+            except Exception as exc:
+                outcome["error"] = str(exc)
+
+        dialog = QProgressDialog(text, "Cancel", 0, 0, self)
+        dialog.setWindowTitle("SAM 3.1")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumWidth(420)
+        dialog.setMinimumDuration(400)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        if cancelable:
+            dialog.canceled.connect(self._sam.cancel)
+        else:
+            dialog.setCancelButton(None)
+        worker = Thread(target=run, daemon=True)
+        worker.start()
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(50)
+
+        def poll():
+            if not worker.is_alive():
+                loop.quit()
+                return
+            if "value" in latest:
+                done, total = latest["value"]
+                dialog.setMaximum(max(1, total))
+                dialog.setValue(min(done, total - 1))
+
+        timer.timeout.connect(poll)
+        timer.start()
+        loop.exec()
+        timer.stop()
+        dialog.hide()
+        dialog.deleteLater()
+        self._sam_busy = False
+        if "error" in outcome:
+            QMessageBox.warning(self, "SAM 3.1", outcome["error"])
+            return False, None
+        if outcome.get("canceled"):
+            self.statusBar().showMessage("SAM 3.1 canceled")
+            return False, None
+        return True, outcome.get("value")
+
+    def _on_sam_prompt(self, prompt):
+        """Add a point or box to the prompts of the mask being prompted, and show
+        the mask SAM makes of them."""
+        if not self._sam_selected or self._mode != "video" or self._video_frame_index < 0:
+            return
+        if self._sam_object is None:
+            index = self.canvas.selected_index
+            if index is not None and index < len(self.canvas.instances):
+                instance = self.canvas.instances[index]
+                self._sam_object = (instance["class"], instance["id"])
+            else:
+                label = clean_class(self._model_default_class())
+                self._sam_object = (label, next_instance_id(self.canvas.instances, label))
+        if prompt[0] == "point":
+            self._sam_points.append(tuple(prompt[1:]))
+        else:
+            self._sam_box = tuple(prompt[1:])
+        self.canvas.set_sam_prompts(self._sam_points, self._sam_box)
+        self._run_sam_prompts()
+
+    def _run_sam_prompts(self):
+        if self._sam_busy:
+            self._sam_rerun = True
+            return
+        angle, shape = self._shown_angle, self._original_shape
+        points, labels = [], []
+        if self._sam_box is not None:
+            left, top, right, bottom = self._sam_box
+            corners = [
+                unrotate_point(x, y, angle, shape)
+                for x, y in ((left, top), (right, top), (left, bottom), (right, bottom))
+            ]
+            xs, ys = zip(*corners)
+            points += [(min(xs), min(ys)), (max(xs), max(ys))]
+            labels += [2, 3]
+        for x, y, include in self._sam_points:
+            points.append(unrotate_point(x, y, angle, shape))
+            labels.append(1 if include else 0)
+        target = (self._video_path, self._video_frame_index, self._sam_object)
+        video, frame, _ = target
+        ok, mask = self._sam_call(
+            "Segmenting with SAM 3.1...",
+            lambda progress: self._sam.segment_points(video, frame, points, labels),
+        )
+        rerun, self._sam_rerun = self._sam_rerun, False
+        current = (self._video_path, self._video_frame_index, self._sam_object)
+        if not ok or current != target:
+            return
+        label, number = target[2]
+        self.canvas.put_instance(
+            make_instance(label, number, rotate_mask(mask, angle) if angle else mask)
+        )
+        if rerun:
+            self._run_sam_prompts()
+        else:
+            self.statusBar().showMessage(f"SAM 3.1: {instance_title(self.canvas.instances[-1])}")
+
+    def _sam_find_text(self):
+        text = self.sam_text.text().strip()
+        if not text or self._sam_busy:
+            return
+        if not self._sam_selected or self._mode != "video" or self._video_frame_index < 0:
+            return
+        video, frame, angle = self._video_path, self._video_frame_index, self._shown_angle
+        ok, masks = self._sam_call(
+            f'Finding "{text}" with SAM 3.1...',
+            lambda progress: self._sam.find_text(video, frame, text),
+        )
+        if not ok or (self._video_path, self._video_frame_index) != (video, frame):
+            return
+        label = clean_class(self._model_default_class())
+        found = [
+            make_instance(label, 0, rotate_mask(mask, angle) if angle else mask)
+            for mask in masks
+            if mask.any()
+        ]
+        if not found:
+            self.statusBar().showMessage(f'SAM 3.1 found nothing matching "{text}"')
+            return
+        self._reset_sam_prompts()
+        self.canvas.add_instances(found)
+        self.statusBar().showMessage(f'SAM 3.1 found {len(found)} match(es) for "{text}"')
+
+    def _change_sam_prompt_frames(self, folder, add=(), remove=()):
+        """Add frames to, or drop them from, the frames SAM propagates from, as
+        kept in a video's SAM results folder."""
+        if not self._video_base_dir or not self._video_path:
+            return
+        sam_dir = Path(self._video_base_dir) / f"{SAM_MODEL_NAME}{PREDICTIONS_SUFFIX}"
+        if Path(folder).parent != sam_dir:
+            return
+        frames = load_prompt_frames(folder)
+        if frames is None:
+            if not add:
+                return
+            base_root = Path(self._video_base_dir) / Path(folder).name
+            frames = annotated_frames(base_root) | annotated_frames(folder)
+        updated = (frames | set(add)) - set(remove)
+        if updated != frames or not (Path(folder) / PROMPTS_FILE_NAME).exists():
+            try:
+                save_prompt_frames(folder, updated)
+            except OSError as exc:
+                self.statusBar().showMessage(f"Could not save the SAM prompt frames: {exc}")
+
+    def _sam_prompts_of(self, video):
+        """(SAM results folder, {frame: mask set} of the prompt frames,
+        {(label, number): {frame: mask}}) of a video.
+
+        The prompt frames are those annotated in the selected output folder, until
+        the video is first propagated, and then those kept in the SAM results
+        folder, which gains every frame saved by hand while SAM is selected.
+        """
+        stem = Path(video).stem
+        sam_root = Path(self._video_output_dir) / stem
+        base_root = Path(self._video_base_dir) / stem
+        prompt_frames = load_prompt_frames(sam_root)
+        if prompt_frames is None:
+            prompt_frames = annotated_frames(base_root) | annotated_frames(sam_root)
+        sources = {}
+        prompts = {}
+        for frame in sorted(prompt_frames):
+            for root in (sam_root, base_root):
+                mask_set = MaskSet(root, frame)
+                if mask_set.exists():
+                    break
+            else:
+                continue
+            sources[frame] = mask_set
+            for instance in mask_set.read():
+                if instance["mask"].any():
+                    key = (instance["class"], instance["id"])
+                    prompts.setdefault(key, {})[frame] = instance["mask"] > 0
+        return sam_root, sources, prompts
+
+    def _can_propagate(self):
+        if self._sam_busy or not self._sam_selected:
+            return False
+        if self._mode != "video" or not self._video_path or self._video_frame_index < 0:
+            return False
+        if not self._video_base_dir:
+            QMessageBox.information(self, "No output folder", "Select an output folder first.")
+            return False
+        self._stop_playback()
+        self._stash_video_mask_for_current_frame()
+        return True
+
+    def _sam_propagate(self):
+        """Track the masks of the prompt frames through the video on screen with
+        SAM 3.1, from the frame on screen, and save what it finds on the other
+        frames."""
+        if not self._can_propagate():
+            return
+        video = self._video_path
+        name = Path(video).name
+        sam_root, sources, prompts = self._sam_prompts_of(video)
+        if not prompts:
+            QMessageBox.information(
+                self,
+                "No masks to propagate",
+                "Draw or prompt the masks of at least one frame first.",
+            )
+            return
+        start = self._video_frame_index
+        if self.sam_both_checkbox.isChecked():
+            direction, span = "both", range(self._video_frame_count)
+        elif self.sam_direction_picker.currentText() == "Forward":
+            direction, span = "forward", range(start, self._video_frame_count)
+        else:
+            direction, span = "backward", range(0, start + 1)
+        replaced = [
+            frame for frame in annotated_frames(sam_root)
+            if frame in span and frame not in sources
+        ]
+        if replaced:
+            choice = QMessageBox.question(
+                self,
+                "Propagate with SAM 3.1",
+                f"{len(replaced)} frame(s) of {name} already hold masks SAM 3.1 found "
+                "before. They will be replaced.\n\nContinue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                return
+        ok, results = self._sam_call(
+            f"Propagating {len(prompts)} mask(s) through {name} with SAM 3.1...",
+            lambda progress: self._sam.propagate(video, prompts, start, direction, progress),
+            cancelable=True,
+        )
+        if not ok or self._video_path != video:
+            return
+        count = self._save_sam_results(video, results, sources, sam_root)
+        self._show_saved_mask()
+        self.statusBar().showMessage(
+            f"SAM 3.1 propagated {len(prompts)} mask(s) over {count} frame(s) of {name}"
+        )
+
+    def _sam_propagate_all(self):
+        """Propagate each loaded video that has prompt frames through the whole
+        of it, both ways from its first prompt frame, one video after another.
+
+        Each video is saved as soon as it is done, so Cancel keeps the videos
+        finished before it.
+        """
+        if not self._can_propagate():
+            return
+        jobs = []
+        for video in self._video_paths:
+            sam_root, sources, prompts = self._sam_prompts_of(video)
+            if prompts:
+                jobs.append((video, sam_root, sources, prompts))
+        skipped = len(self._video_paths) - len(jobs)
+        if not jobs:
+            QMessageBox.information(
+                self,
+                "No masks to propagate",
+                "None of the loaded videos has masks to propagate from.",
+            )
+            return
+        replaced = sum(
+            1 for _, sam_root, sources, _ in jobs
+            if annotated_frames(sam_root) - set(sources)
+        )
+        message = (
+            f"Propagate the masks of {len(jobs)} video(s) through every frame with "
+            "SAM 3.1, both ways from each video's first prompt frame?"
+        )
+        if skipped:
+            message += f"\n\n{skipped} video(s) without masks will be skipped."
+        if replaced:
+            message += (
+                f"\n\n{replaced} video(s) already hold masks SAM 3.1 found before. "
+                "They will be replaced."
+            )
+        choice = QMessageBox.question(
+            self,
+            "Propagate all videos",
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        done = 0
+        for number, (video, sam_root, sources, prompts) in enumerate(jobs, start=1):
+            name = Path(video).name
+            start = min(min(frames) for frames in prompts.values())
+            ok, results = self._sam_call(
+                f"Video {number} of {len(jobs)}: propagating {len(prompts)} mask(s) "
+                f"through {name} with SAM 3.1...",
+                lambda progress, video=video, prompts=prompts, start=start: (
+                    self._sam.propagate(video, prompts, start, "both", progress)
+                ),
+                cancelable=True,
+            )
+            if not ok:
+                break
+            self._save_sam_results(video, results, sources, sam_root)
+            done += 1
+        self._show_saved_mask()
+        self.statusBar().showMessage(
+            f"SAM 3.1 propagated {done} of {len(jobs)} video(s)"
+        )
+
+    def _save_sam_results(self, video, results, sources, sam_root):
+        """Save the masks SAM found on each frame it tracked, with their
+        measurements, and copy in the prompt frames it does not hold yet.
+        Returns the number of frames saved."""
+        name = Path(video).name
+        output_dir = self._video_output_dir
+        angle = self._angle_of(output_dir, name)
+        side, location = self._file_labels(name, True)
+        px_per_mm = (self.px_per_mm_x_spin.value(), self.px_per_mm_y_spin.value())
+        rois = self._roi_store(output_dir)
+        log = self._measurement_log(output_dir)
+        shape = next(iter(sources.values())).stored_shape()
+        count = 0
+        try:
+            sam_root.mkdir(parents=True, exist_ok=True)
+            for frame in sorted(set(results) | set(sources)):
+                if frame in sources:
+                    if sources[frame].folder == sam_root:
+                        continue
+                    instances = sources[frame].read(angle)
+                else:
+                    instances = [
+                        make_instance(label, number, rotate_mask(mask, angle) if angle else mask)
+                        for (label, number), mask in sorted(results[frame].items())
+                    ]
+                box = rois.get(name, str(frame))
+                instances = clip_instances(instances, box)
+                mask_set = MaskSet(sam_root, frame)
+                if instances:
+                    mask_set.write(instances, angle, shape)
+                    log.set(
+                        name,
+                        frame,
+                        instances,
+                        *px_per_mm,
+                        side=side,
+                        location=location,
+                        limits=box,
+                        rotation=angle,
+                    )
+                else:
+                    mask_set.remove()
+                    log.remove(name, frame)
+                count += 1
+            save_prompt_frames(sam_root, set(sources))
+        except OSError as exc:
+            QMessageBox.warning(self, "Save error", str(exc))
+        try:
+            log.save()
+        except OSError as exc:
+            self.statusBar().showMessage(f"Could not save measurements: {exc}")
+        return count
 
     def _close_current_file(self):
         if self._mode == "video":
@@ -2426,6 +2960,8 @@ class MainWindow(QMainWindow):
             3: "brush",
             4: "eraser",
             5: "roi",
+            6: "sam_point",
+            7: "sam_box",
         }
         tool = tool_map.get(index, "select")
         self.canvas.set_tool(tool)
@@ -3329,11 +3865,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Save error", str(exc))
                 return
             self._forget_measurement(self._video_output_dir, name, frame)
+            self._change_sam_prompt_frames(mask_set.folder, remove={frame})
 
     def _update_navigation_buttons(self):
         is_video = self._mode == "video"
         self.segment_video_btn.setEnabled(is_video)
         self.segment_video_action.setEnabled(is_video)
+        self._update_sam_enabled()
         for widget in (
             self.delete_masks_before_btn,
             self.delete_masks_before_action,
@@ -3752,6 +4290,8 @@ class MainWindow(QMainWindow):
 
     def _init_model_picker(self):
         models = self._model.list_models()
+        if self._sam is not None:
+            models.append(SAM_MODEL_LABEL)
         if not models:
             self.model_picker.clear()
             self.model_picker.addItem("No models loaded")
@@ -3805,11 +4345,13 @@ class MainWindow(QMainWindow):
             self._stash_video_mask_for_current_frame()
         elif self._mode == "sequence":
             self._save_sequence_mask_if_needed()
+        self._sam_selected = name == SAM_MODEL_LABEL
         try:
-            self._model.set_model("" if name == NO_MODEL_LABEL else name)
+            self._model.set_model("" if name in (NO_MODEL_LABEL, SAM_MODEL_LABEL) else name)
             self.statusBar().showMessage(f"Model selected: {name}")
         except Exception as exc:
             QMessageBox.warning(self, "Model error", str(exc))
+        self._update_sam_controls()
         self._show_saved_result()
 
     def _on_device_changed(self, index):
@@ -3986,6 +4528,8 @@ class MainWindow(QMainWindow):
                 thread.quit()
                 thread.wait(5000)
         self._clear_video_state()
+        if self._sam is not None:
+            self._sam.close()
         super().closeEvent(event)
 
 

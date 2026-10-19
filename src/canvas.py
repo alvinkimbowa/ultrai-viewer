@@ -41,6 +41,9 @@ class Canvas(QWidget):
     delete_requested = pyqtSignal(str)
     # A message for the status bar, such as why a drawing was not made.
     notice = pyqtSignal(str)
+    # A SAM prompt, in image pixels: ("point", x, y, include) or
+    # ("box", left, top, right, bottom).
+    sam_prompt_added = pyqtSignal(tuple)
 
     def __init__(self):
         super().__init__()
@@ -98,6 +101,12 @@ class Canvas(QWidget):
         self._roi_draft = None
         # What a click with the Select tool picked for deletion: "roi", "mask" or None.
         self.selection = None
+        # Opposite corners (x, y) of a box being drawn with the SAM Box tool.
+        self._sam_box_draft = None
+        # The SAM prompts of the object being prompted, drawn over the image:
+        # points (x, y, include) and a box (left, top, right, bottom) or None.
+        self._sam_points = []
+        self._sam_box = None
 
         # Calibration lines in image pixels: "h" holds the y positions of the two
         # horizontal lines, "v" the x positions of the two vertical lines. They
@@ -240,6 +249,45 @@ class Canvas(QWidget):
         self._mask_touched = True
         self.update()
 
+    def put_instance(self, instance):
+        """Show a mask in place of the one with its label and number, or add it,
+        as a step Undo takes back."""
+        if self.image is None:
+            return
+        key = (clean_class(instance["class"]), int(instance["id"]))
+        kept = [i for i in self.instances if (i["class"], i["id"]) != key]
+        kept.append(make_instance(key[0], key[1], instance["mask"]))
+        self.instances = kept
+        self.selected_index = len(kept) - 1
+        self._refresh_mask_pixmap()
+        self._push_history()
+        self._mask_touched = True
+        self.update()
+
+    def add_instances(self, instances):
+        """Add masks, numbered on from those of their label, as a step Undo takes
+        back."""
+        if self.image is None or not instances:
+            return
+        for instance in instances:
+            self.instances.append(
+                make_instance(
+                    instance["class"],
+                    next_instance_id(self.instances, instance["class"]),
+                    instance["mask"],
+                )
+            )
+        self.selected_index = None
+        self._refresh_mask_pixmap()
+        self._push_history()
+        self._mask_touched = True
+        self.update()
+
+    def set_sam_prompts(self, points, box):
+        self._sam_points = list(points)
+        self._sam_box = box
+        self.update()
+
     def set_class_order(self, order):
         self.class_order = [clean_class(c) for c in order]
         self._refresh_mask_pixmap()
@@ -270,8 +318,9 @@ class Canvas(QWidget):
         self._poly_points = []
         self._freehand_points = []
         self._roi_draft = None
+        self._sam_box_draft = None
         self.selection = None
-        if tool_name == "roi":
+        if tool_name in ("roi", "sam_point", "sam_box"):
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.unsetCursor()
@@ -922,9 +971,18 @@ class Canvas(QWidget):
             elif self.tool == "polyline":
                 self._poly_points.append(point)
                 self.update()
+            elif self.tool == "sam_point":
+                self.sam_prompt_added.emit(("point", point.x(), point.y(), True))
+            elif self.tool == "sam_box":
+                self._sam_box_draft = [point, point]
+                self.update()
         elif event.button() == Qt.MouseButton.RightButton:
             if self.tool == "polyline":
                 self._finish_polyline()
+            elif self.tool == "sam_point":
+                point = self._screen_to_image(event.position().toPoint())
+                if point is not None:
+                    self.sam_prompt_added.emit(("point", point.x(), point.y(), False))
 
     def _select_instance_at(self, pos):
         self.selected_index = self._instance_at(pos)
@@ -978,6 +1036,12 @@ class Canvas(QWidget):
             else:
                 self.setCursor(Qt.CursorShape.CrossCursor)
             return
+        if self._sam_box_draft is not None:
+            point = self._screen_to_image(event.position().toPoint())
+            if point is not None:
+                self._sam_box_draft[1] = point
+                self.update()
+            return
         if not self._drawing:
             if self.tool in ("brush", "eraser"):
                 self.update()
@@ -1019,6 +1083,15 @@ class Canvas(QWidget):
                 else:
                     self.selection = "roi"
                 self.update()
+        if self._sam_box_draft is not None:
+            first, second = self._sam_box_draft
+            self._sam_box_draft = None
+            self.update()
+            left, right = sorted((first.x(), second.x()))
+            top, bottom = sorted((first.y(), second.y()))
+            if right - left >= 2 and bottom - top >= 2:
+                self.sam_prompt_added.emit(("box", left, top, right, bottom))
+            return
         if self._roi_draft is not None:
             (x0, y0), (x1, y1) = self._roi_draft
             self._roi_draft = None
@@ -1056,8 +1129,9 @@ class Canvas(QWidget):
         super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
-        # A right-click with the Segmented Line tool finishes the line instead.
-        if self.tool == "polyline" or self._calibrating:
+        # A right-click with the Segmented Line tool finishes the line instead, and
+        # with the SAM Point tool adds an exclude point.
+        if self.tool in ("polyline", "sam_point") or self._calibrating:
             return
         kinds = self.deletable_at(event.pos())
         if not kinds:
@@ -1146,6 +1220,8 @@ class Canvas(QWidget):
                 end = self._image_to_screen(self._last_outline[0])
                 painter.drawLine(start, end)
 
+        self._paint_sam_prompts(painter)
+
         if self._cursor_pos is not None and self.tool in ("brush", "eraser"):
             scale, _, _ = self._current_view()
             radius = max(1, int(self.brush_radius * scale))
@@ -1163,6 +1239,35 @@ class Canvas(QWidget):
             for x in self._calibration_lines["v"]:
                 screen_x = int(offset_x + x * scale)
                 painter.drawLine(screen_x, offset_y, screen_x, offset_y + draw_h)
+
+    def _paint_sam_prompts(self, painter):
+        width = self._roi_outline_pen_width()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        boxes = [self._sam_box]
+        if self._sam_box_draft is not None:
+            first, second = self._sam_box_draft
+            boxes.append((first.x(), first.y(), second.x(), second.y()))
+        painter.setPen(QPen(QColor(255, 220, 0), width, Qt.PenStyle.DashLine))
+        for box in boxes:
+            if box is None:
+                continue
+            start = self._image_to_screen(QPoint(box[0], box[1]))
+            end = self._image_to_screen(QPoint(box[2], box[3]))
+            painter.drawRect(QRect(start, end).normalized())
+        for x, y, include in self._sam_points:
+            center = self._image_to_screen(QPoint(int(x), int(y)))
+            painter.setPen(QPen(QColor(0, 0, 0), width + 3))
+            self._draw_sam_marker(painter, center, include)
+            painter.setPen(QPen(QColor(0, 230, 0) if include else QColor(255, 60, 60), width + 1))
+            self._draw_sam_marker(painter, center, include)
+
+    @staticmethod
+    def _draw_sam_marker(painter, center, include):
+        """A plus for an include point, a minus for an exclude point."""
+        arm = 7
+        painter.drawLine(center.x() - arm, center.y(), center.x() + arm, center.y())
+        if include:
+            painter.drawLine(center.x(), center.y() - arm, center.x(), center.y() + arm)
 
     def _paint_roi(self, painter, scale, offset_x, offset_y, draw_w, draw_h):
         if self._roi is not None:
