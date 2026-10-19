@@ -443,6 +443,12 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_mask_action)
         self.delete_mask_action = QAction("Delete all masks", self)
         file_menu.addAction(self.delete_mask_action)
+        self.delete_masks_before_action = QAction("Delete masks up to this frame", self)
+        self.delete_masks_before_action.setEnabled(False)
+        file_menu.addAction(self.delete_masks_before_action)
+        self.delete_masks_after_action = QAction("Delete masks from this frame on", self)
+        self.delete_masks_after_action.setEnabled(False)
+        file_menu.addAction(self.delete_masks_after_action)
         self.close_file_action = QAction("Close file", self)
         file_menu.addAction(self.close_file_action)
         file_menu.addSeparator()
@@ -1880,6 +1886,23 @@ class MainWindow(QMainWindow):
         mask_row.addWidget(self.save_btn)
         layout.addLayout(mask_row)
 
+        range_row = QHBoxLayout()
+        self.delete_masks_before_btn = QPushButton("Delete before")
+        self.delete_masks_before_btn.setToolTip(
+            "Delete the masks of every frame up to and including the frame on screen."
+        )
+        self.delete_masks_before_btn.setEnabled(False)
+        configure_button(self.delete_masks_before_btn)
+        range_row.addWidget(self.delete_masks_before_btn)
+        self.delete_masks_after_btn = QPushButton("Delete after")
+        self.delete_masks_after_btn.setToolTip(
+            "Delete the masks of the frame on screen and every frame after it."
+        )
+        self.delete_masks_after_btn.setEnabled(False)
+        configure_button(self.delete_masks_after_btn)
+        range_row.addWidget(self.delete_masks_after_btn)
+        layout.addLayout(range_row)
+
         layout.addSpacing(16)
         sep4 = QFrame()
         sep4.setFrameShape(QFrame.Shape.HLine)
@@ -2078,6 +2101,18 @@ class MainWindow(QMainWindow):
         self.save_mask_action.triggered.connect(self._save_current_mask)
         self.delete_mask_btn.clicked.connect(self._delete_current_mask)
         self.delete_mask_action.triggered.connect(self._delete_current_mask)
+        self.delete_masks_before_btn.clicked.connect(
+            lambda: self._delete_video_masks_in_range(after=False)
+        )
+        self.delete_masks_before_action.triggered.connect(
+            lambda: self._delete_video_masks_in_range(after=False)
+        )
+        self.delete_masks_after_btn.clicked.connect(
+            lambda: self._delete_video_masks_in_range(after=True)
+        )
+        self.delete_masks_after_action.triggered.connect(
+            lambda: self._delete_video_masks_in_range(after=True)
+        )
         self.clear_rois_action.triggered.connect(self._clear_all_rois)
         self.close_btn.clicked.connect(self._close_current_file)
         self.close_file_action.triggered.connect(self._close_current_file)
@@ -2255,6 +2290,69 @@ class MainWindow(QMainWindow):
             )
         if mask_set is not None:
             self.statusBar().showMessage("Masks deleted from the output folder")
+
+    def _delete_video_masks_in_range(self, after):
+        """Delete the masks of every frame from the frame on screen to the end of
+        the video (after) or from the start up to it, after asking.
+
+        Each frame loses the masks it shows: those of the model's results folder
+        when it has any, else those of the selected output folder.
+        """
+        if self._mode != "video" or not self._video_path or self._video_frame_index < 0:
+            return
+        self._stop_playback()
+        self._commit_pending_outline()
+        current = self._video_frame_index
+        roots = {
+            folder: Path(folder) / Path(self._video_path).stem
+            for folder in (self._video_output_dir, self._video_base_dir)
+            if folder
+        }
+        frames = set()
+        for root in roots.values():
+            frames |= annotated_frames(root)
+        frames = sorted(f for f in frames if (f >= current if after else f <= current))
+        if not frames and not self.canvas.has_visible_mask():
+            QMessageBox.information(self, "No masks", "No frames in that range have masks.")
+            return
+        if after:
+            span = f"frames {current + 1} to {self._video_frame_count}"
+        else:
+            span = f"frames 1 to {current + 1}"
+        choice = QMessageBox.question(
+            self,
+            "Delete masks",
+            f"Delete the masks of {span} of {Path(self._video_path).name}, "
+            f"including the frame on screen?\n\n{len(frames)} frame(s) with saved "
+            "masks will be permanently deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            return
+        self.canvas.clear_mask()
+        name = Path(self._video_path).name
+        removed = {}
+        try:
+            for frame in frames:
+                for output_dir, root in roots.items():
+                    mask_set = MaskSet(root, frame)
+                    if mask_set.exists():
+                        mask_set.remove()
+                        removed.setdefault(output_dir, []).append(frame)
+                        break
+        except OSError as exc:
+            QMessageBox.warning(self, "Delete error", str(exc))
+        for output_dir, output_frames in removed.items():
+            try:
+                log = self._measurement_log(output_dir)
+                for frame in output_frames:
+                    log.remove(name, frame)
+                log.save()
+            except OSError as exc:
+                self.statusBar().showMessage(f"Could not save measurements: {exc}")
+        count = sum(len(output_frames) for output_frames in removed.values())
+        self.statusBar().showMessage(f"Deleted the masks of {count} frame(s) of {name}")
 
     def _close_current_file(self):
         if self._mode == "video":
@@ -3236,6 +3334,13 @@ class MainWindow(QMainWindow):
         is_video = self._mode == "video"
         self.segment_video_btn.setEnabled(is_video)
         self.segment_video_action.setEnabled(is_video)
+        for widget in (
+            self.delete_masks_before_btn,
+            self.delete_masks_before_action,
+            self.delete_masks_after_btn,
+            self.delete_masks_after_action,
+        ):
+            widget.setEnabled(is_video and self._video_frame_index >= 0)
         if is_video:
             can_prev = self._video_list_index > 0
             can_next = 0 <= self._video_list_index < len(self._video_paths) - 1
