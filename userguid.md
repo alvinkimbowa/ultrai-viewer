@@ -15,7 +15,7 @@ Runs on the CPU; a 4-core CPU and 8 GB of RAM are recommended. macOS is not supp
 2. Under **Labels**, pick the **Location** the file was scanned at. Use **+ Add location** for a site that is not listed.
 3. Pick the **Nerve** or **Other anatomy** label that new masks get. **+ Add nerve** and **+ Add anatomy** add labels of your own.
 
-Scroll, use the arrow keys, or **Prev** / **Next** to move between images and frames.
+Scroll, use the arrow keys, or **Prev** / **Next** to move between images and frames. **N** and **P** go to the next and previous file.
 
 ## Draw and edit masks
 

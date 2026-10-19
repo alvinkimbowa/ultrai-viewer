@@ -2267,6 +2267,19 @@ class MainWindow(QMainWindow):
                 return True
             return False
         if event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_N, Qt.Key.Key_P):
+                # Typed into a text box, N and P are letters.
+                focus = QApplication.focusWidget()
+                if (
+                    event.modifiers() != Qt.KeyboardModifier.NoModifier
+                    or not self.isActiveWindow()
+                    or isinstance(focus, (QLineEdit, QAbstractSpinBox))
+                    or (isinstance(focus, QComboBox) and focus.isEditable())
+                ):
+                    return False
+                if not event.isAutoRepeat():
+                    (self.next_btn if event.key() == Qt.Key.Key_N else self.prev_btn).click()
+                return True
             if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
                 if event.modifiers() != Qt.KeyboardModifier.NoModifier:
                     return False
