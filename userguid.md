@@ -43,7 +43,7 @@ A model that segments one structure labels its masks with the nerve picked, or *
    - Masks already drawn or annotated are used as they are.
    - **SAM Point**: left-click to include a spot, right-click to exclude one. **SAM Box**: drag a box around the structure. Each click updates the mask. Press **New object** before prompting the next structure. To redo a mask, select it first.
    - **Text prompt** and **Find** add a mask for each match of a phrase.
-   - Masks get the label picked under **Labels**. A mask with the same label and number on several frames (such as **Median #1**) is followed as one structure.
+   - Masks get the label picked under **Labels**; pick one before drawing or prompting, or select the mask to change. A mask with the same label and number on several frames (such as **Median #1**) is followed as one structure.
 3. Go to the frame to start from and click **Propagate video**. **Both directions** fills the frames before and after it. Untick it to choose **Forward** or **Backward**.
    - **Propagate all videos** does every loaded video in turn, each through all its frames from its first prompt frame. Videos without masks are skipped.
    - A video is saved only once it is finished, so Cancel keeps the videos already done and leaves the one in progress as it was. The next Propagate all videos asks whether to propagate the finished videos again; **No** skips them and carries on with the rest. A video whose prompt frames changed since counts as not finished.

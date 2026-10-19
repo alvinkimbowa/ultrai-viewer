@@ -21,6 +21,10 @@ from .instances import (
 from .labels import class_color
 from .theme import CANVAS
 
+# Tools that make or change a mask of a label, and so need a label picked or a
+# mask selected before they start.
+LABELLED_TOOLS = ("freehand", "polyline", "brush", "sam_point", "sam_box")
+
 
 def label_anchor(mask):
     """The mask pixel (x, y) nearest the mask's centroid, so that a label put
@@ -44,6 +48,8 @@ class Canvas(QWidget):
     # A SAM prompt, in image pixels: ("point", x, y, include) or
     # ("box", left, top, right, bottom).
     sam_prompt_added = pyqtSignal(tuple)
+    # Why a drawing tool was not started: no label is picked and no mask selected.
+    label_needed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -372,7 +378,7 @@ class Canvas(QWidget):
                 self._selected_instance()["mask"], [outline.reshape((-1, 1, 2))], 1
             )
         else:
-            self.notice.emit("Pick a nerve or anatomy label before drawing a mask")
+            self.label_needed.emit("Pick a nerve or anatomy label before drawing a mask.")
             return False
         self._refresh_mask_pixmap()
         self._push_history()
@@ -852,7 +858,7 @@ class Canvas(QWidget):
         if selected is not None and self.active_class in (None, selected["class"]):
             return selected
         if self.active_class is None:
-            self.notice.emit("Pick a nerve or anatomy label before painting a mask")
+            self.label_needed.emit("Pick a nerve or anatomy label before painting a mask.")
             return None
         height, width = self.image.shape[:2]
         instance = make_instance(
@@ -915,6 +921,17 @@ class Canvas(QWidget):
                     event.position().toPoint()
                 )
             return
+        if self.tool in LABELLED_TOOLS and event.button() in (
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.RightButton,
+        ):
+            if self.active_class is None and self._selected_instance() is None:
+                if event.button() == Qt.MouseButton.LeftButton or self.tool == "sam_point":
+                    self.label_needed.emit(
+                        "Pick a nerve or anatomy label under Labels before drawing "
+                        "or prompting a mask, or select the mask to change."
+                    )
+                    return
         if event.button() == Qt.MouseButton.LeftButton:
             point = self._screen_to_image(event.position().toPoint())
             if point is None:

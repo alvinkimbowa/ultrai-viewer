@@ -2221,6 +2221,11 @@ class MainWindow(QMainWindow):
         self.redo_action.triggered.connect(self._redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.canvas.sam_prompt_added.connect(self._on_sam_prompt)
+        self.canvas.label_needed.connect(
+            lambda text: QTimer.singleShot(
+                0, lambda: QMessageBox.information(self, "Pick a label", text)
+            )
+        )
         self.sam_find_btn.clicked.connect(self._sam_find_text)
         self.sam_text.returnPressed.connect(self._sam_find_text)
         self.sam_new_object_btn.clicked.connect(self._new_sam_object)
@@ -2648,6 +2653,13 @@ class MainWindow(QMainWindow):
         if not text or self._sam_busy:
             return
         if not self._sam_selected or self._mode != "video" or self._video_frame_index < 0:
+            return
+        if self.canvas.active_class is None:
+            QMessageBox.information(
+                self,
+                "Pick a label",
+                "Pick a nerve or anatomy label under Labels for the masks SAM finds.",
+            )
             return
         video, frame, angle = self._video_path, self._video_frame_index, self._shown_angle
         ok, masks = self._sam_call(
