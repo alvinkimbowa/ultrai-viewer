@@ -21,6 +21,7 @@ Scroll, use the arrow keys, or **Prev** / **Next** to move between images and fr
 
 - **Freehand Line** and **Segmented Line** draw an outline. With **Fill mask** ticked, each outline becomes a new mask of the picked label.
 - **Paint Brush** paints into the selected mask, or starts a new one. **Eraser** erases from the selected mask only, or from every mask shown when none is selected. A mask stays selected when you change tools; press Esc to deselect it.
+- With **Paint Brush** or **Eraser**, click a mask's name tag to select it, and click it again to deselect it. A stroke that starts off a tag paints or erases across tags as usual.
 - **Masks shown**, at the end of **Edit**, lists the masks on screen. Untick one to hide it, or use **Select all** to show or hide them all. A hidden mask stays hidden on the other frames of the video, is still saved and measured, and cannot be selected or erased.
 - With **Select**, drag a mask to move it. Inside an ROI box, drag off the masks to move the box.
 - Each mask is tagged with its label and number, such as **Median #1**.

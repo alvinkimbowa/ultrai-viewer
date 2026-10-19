@@ -72,6 +72,9 @@ class Canvas(QWidget):
         self.label_choices = ([], [])
         self.mask_pixmap = None
         self._label_anchors = []
+        # The screen rectangle of each mask's name tag as last drawn, with the
+        # mask's (label, number); later ones are drawn on top.
+        self._label_rects = []
         self.mask_opacity = 0.5
         self.show_contour_only = True
         # Each history entry is (instances, ROI box): the state after one edit.
@@ -979,6 +982,11 @@ class Canvas(QWidget):
                     event.position().toPoint()
                 )
             return
+        if self.tool in ("brush", "eraser") and event.button() == Qt.MouseButton.LeftButton:
+            index = self._label_at(event.position().toPoint())
+            if index is not None:
+                self._select_by_label(index)
+                return
         if self.tool in LABELLED_TOOLS and event.button() in (
             Qt.MouseButton.LeftButton,
             Qt.MouseButton.RightButton,
@@ -1066,6 +1074,30 @@ class Canvas(QWidget):
                 if point is not None:
                     self.sam_prompt_added.emit(("point", point.x(), point.y(), False))
 
+    def _label_at(self, pos):
+        """Index in self.instances of the mask whose name tag is at a widget
+        position, or None."""
+        point = QPointF(pos)
+        for rect, key in reversed(self._label_rects):
+            if rect.contains(point):
+                for index, instance in enumerate(self.instances):
+                    if (instance["class"], instance["id"]) == key:
+                        return index
+        return None
+
+    def _select_by_label(self, index):
+        """Select the mask of a name tag clicked, or deselect it when it is
+        selected already."""
+        if self.selection == "mask" and self.selected_index == index:
+            self.selected_index = None
+            self.selection = None
+            self.notice.emit("No mask selected")
+        else:
+            self.selected_index = index
+            self.selection = "mask"
+            self.notice.emit(f"Selected {instance_title(self.instances[index])}")
+        self.update()
+
     def _select_instance_at(self, pos):
         self.selected_index = self._instance_at(pos)
         self.selection = None if self.selected_index is None else "mask"
@@ -1128,6 +1160,10 @@ class Canvas(QWidget):
             return
         if not self._drawing:
             if self.tool in ("brush", "eraser"):
+                if self._label_at(event.position().toPoint()) is not None:
+                    self.setCursor(Qt.CursorShape.PointingHandCursor)
+                else:
+                    self.unsetCursor()
                 self.update()
             return
         point = self._screen_to_image(event.position().toPoint())
@@ -1425,6 +1461,7 @@ class Canvas(QWidget):
 
     def _paint_labels(self, painter, scale, offset_x, offset_y, draw_w, draw_h):
         """A tag naming each mask, on the mask and kept inside the image."""
+        self._label_rects = []
         if not self._label_anchors or self.mask_opacity <= 0:
             return
         selected = self._selected_instance() if self.selection == "mask" else None
@@ -1445,6 +1482,7 @@ class Canvas(QWidget):
             if draw_h >= height:
                 centre_y = max(offset_y + height / 2, min(offset_y + draw_h - height / 2, centre_y))
             rect = QRectF(centre_x - width / 2, centre_y - height / 2, width, height)
+            self._label_rects.append((rect, (instance["class"], instance["id"])))
             is_selected = selected is not None and instance["class"] == selected["class"] and instance["id"] == selected["id"]
             painter.setPen(
                 QPen(
