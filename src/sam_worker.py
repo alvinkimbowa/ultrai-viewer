@@ -18,7 +18,8 @@ Requests:
     propagate  {"objects", "start", "direction", "out_dir"}  tracks each object
                from its prompt masks ({frame: png path}) through the video, from
                frame start "both", "forward" or "backward", and saves the masks
-               found as <out_dir>/<frame>_<object index>.png
+               found as <out_dir>/<frame>_<object index>.png; its progress
+               lines are [done, total, object index, frame]
     cancel     stops a running propagation
     quit
 """
@@ -55,13 +56,18 @@ def send(message):
     PROTOCOL.flush()
 
 
-def open_capture(path):
+def viewer_module(name):
+    """One of the viewer's modules, loaded from its file."""
     spec = importlib.util.spec_from_file_location(
-        "ultrai_tiff_stack", os.path.join(SCRIPT_DIR, "tiff_stack.py")
+        f"ultrai_{name}", os.path.join(SCRIPT_DIR, f"{name}.py")
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.open_capture(path)
+    return module
+
+
+def open_capture(path):
+    return viewer_module("tiff_stack").open_capture(path)
 
 
 def checkpoint_path():
@@ -255,77 +261,81 @@ class Sam:
     @torch.inference_mode()
     def propagate(self, objects, start, direction, out_dir, reply_id):
         """Track each object on its own, so objects first seen on later frames
-        need no slot in tracks begun before them.
+        need no slot in tracks begun before them, in the stretches sam_plan
+        gives.
 
-        The tracker takes a mask on a frame only once that frame is tracked: the
-        track is run forward from one prompt frame to the next, adding each
-        frame's mask on arrival, and then from start in the chosen direction.
+        The tracker takes a mask on a frame only once that frame is tracked: a
+        stretch is run forward from one prompt frame to the next, adding each
+        frame's mask on arrival, and then through the frames it saves.
         """
+        plan_module = viewer_module("sam_plan")
         model = self.tracker()
         count = len(self._frames)
-        reverse_passes = {"both": [False, True], "forward": [False], "backward": [True]}[
-            direction
-        ]
         prompts = [
             {int(frame): read_mask(path) for frame, path in obj["prompts"].items()}
             for obj in objects
         ]
-        output_frames = set()
-        for reverse in reverse_passes:
-            output_frames.update(range(start, -1, -1) if reverse else range(start, count))
-        total = sum(max(masks) - min(masks) for masks in prompts) + len(prompts) * len(
-            output_frames
-        )
+        plans = [plan_module.track_plan(masks, start, direction, count) for masks in prompts]
+        total = sum(plan_module.stretch_steps(st) for plan in plans for st in plan)
         done = 0
         os.makedirs(out_dir, exist_ok=True)
         found = {}
+        saved_frames = set()
+
+        def step(index, frame):
+            nonlocal done
+            self._check_cancel()
+            done += 1
+            send({"id": reply_id, "progress": [done, total, index, frame]})
+
         with self.autocast():
-            for index, masks in enumerate(prompts):
-                state = self._new_state(0, count)
+            for index, (masks, plan) in enumerate(zip(prompts, plans)):
+                for stretch in plan:
+                    state = self._new_state(0, count)
 
-                def add(frame):
-                    model.add_new_masks(
-                        state,
-                        frame,
-                        [1],
-                        torch.from_numpy(masks[frame][None]).float().to(self.device()),
-                    )
-                    model.propagate_in_video_preflight(state, run_mem_encoder=True)
+                    def add(frame):
+                        model.add_new_masks(
+                            state,
+                            frame,
+                            [1],
+                            torch.from_numpy(masks[frame][None]).float().to(self.device()),
+                        )
+                        model.propagate_in_video_preflight(state, run_mem_encoder=True)
 
-                frames = sorted(masks)
-                add(frames[0])
-                for previous, following in zip(frames, frames[1:]):
-                    for _ in model.propagate_in_video(
-                        state,
-                        start_frame_idx=previous,
-                        max_frame_num_to_track=following - previous,
-                        reverse=False,
-                        tqdm_disable=True,
-                    ):
-                        self._check_cancel()
-                        done += 1
-                        send({"id": reply_id, "progress": [done, total]})
-                    add(following)
-                for reverse in reverse_passes:
-                    for frame, _, _, video_masks, _ in model.propagate_in_video(
-                        state,
-                        start_frame_idx=start,
-                        max_frame_num_to_track=None,
-                        reverse=reverse,
-                        tqdm_disable=True,
-                    ):
-                        self._check_cancel()
-                        mask = (video_masks[0, 0] > 0).cpu().numpy()
-                        if mask.any():
-                            write_mask(os.path.join(out_dir, f"{frame}_{index}.png"), mask)
-                            found.setdefault(frame, []).append(index)
-                        done += 1
-                        send({"id": reply_id, "progress": [done, total]})
-                del state
-                if self.device() == "cuda":
-                    torch.cuda.empty_cache()
+                    frames = stretch["prompts"]
+                    add(frames[0])
+                    for previous, following in zip(frames, frames[1:]):
+                        for tracked in model.propagate_in_video(
+                            state,
+                            start_frame_idx=previous,
+                            max_frame_num_to_track=following - previous,
+                            reverse=False,
+                            tqdm_disable=True,
+                        ):
+                            step(index, tracked[0])
+                        add(following)
+                    saved = set(stretch["saved"])
+                    for first, last, reverse in stretch["passes"]:
+                        for frame, _, _, video_masks, _ in model.propagate_in_video(
+                            state,
+                            start_frame_idx=first,
+                            max_frame_num_to_track=abs(last - first),
+                            reverse=reverse,
+                            tqdm_disable=True,
+                        ):
+                            step(index, frame)
+                            if frame not in saved:
+                                continue
+                            mask = (video_masks[0, 0] > 0).cpu().numpy()
+                            if mask.any():
+                                write_mask(os.path.join(out_dir, f"{frame}_{index}.png"), mask)
+                                found.setdefault(frame, []).append(index)
+                    saved_frames |= saved
+                    del state
+                    if self.device() == "cuda":
+                        torch.cuda.empty_cache()
         return {
-            "frames": sorted(output_frames),
+            "frames": sorted(saved_frames),
             "found": {str(frame): indices for frame, indices in found.items()},
         }
 

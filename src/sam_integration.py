@@ -46,25 +46,45 @@ def sam_available():
 PROMPTS_FILE_NAME = "sam_prompts.json"
 
 
+def _read_prompts_file(folder):
+    try:
+        return json.loads((Path(folder) / PROMPTS_FILE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def load_prompt_frames(folder):
     """The frames of a video whose masks SAM propagates from, as kept in its
-    results folder, or None before the video was first propagated.
+    results folder, or None while none are kept.
 
     The other frames there hold what SAM found, which must not prompt it again.
     """
-    try:
-        data = json.loads((Path(folder) / PROMPTS_FILE_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    data = _read_prompts_file(folder)
+    if data is None:
         return None
     return {int(frame) for frame in data.get("frames", [])}
 
 
-def save_prompt_frames(folder, frames):
+def load_propagated_frames(folder):
+    """The prompt frames of the last propagation of a video that was saved in
+    full, or None when none was."""
+    data = _read_prompts_file(folder)
+    if data is None or "propagated" not in data:
+        return None
+    return {int(frame) for frame in data["propagated"]}
+
+
+def save_prompt_frames(folder, frames, propagated=None):
+    """Keep a video's prompt frames, and, given propagated, the prompt frames of
+    a propagation just saved in full; otherwise those kept stay."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / PROMPTS_FILE_NAME).write_text(
-        json.dumps({"frames": sorted(int(f) for f in frames)}), encoding="utf-8"
-    )
+    data = {"frames": sorted(int(f) for f in frames)}
+    if propagated is None:
+        propagated = load_propagated_frames(folder)
+    if propagated is not None:
+        data["propagated"] = sorted(int(f) for f in propagated)
+    (folder / PROMPTS_FILE_NAME).write_text(json.dumps(data), encoding="utf-8")
 
 
 class SamCanceled(Exception):
@@ -198,7 +218,8 @@ class SamTracker:
     def propagate(self, video, prompts, start, direction, on_progress=None):
         """Track objects through a video.
 
-        prompts maps each object's key to {frame: mask}. Returns the frames
+        prompts maps each object's key to {frame: mask}. on_progress gets
+        (done, total, index of the object in prompts, frame). Returns the frames
         tracked and, for each of them, {key: mask} of the objects found there.
         """
         self.open(video)

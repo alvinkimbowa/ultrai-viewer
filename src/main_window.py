@@ -78,9 +78,11 @@ from .sam_integration import (
     SamCanceled,
     SamTracker,
     load_prompt_frames,
+    load_propagated_frames,
     sam_available,
     save_prompt_frames,
 )
+from .sam_plan import propagation_steps
 from threading import Event, Thread
 from collections import OrderedDict
 import html
@@ -2511,12 +2513,14 @@ class MainWindow(QMainWindow):
         self.canvas.update()
         self.statusBar().showMessage("The next SAM prompt starts a new mask")
 
-    def _sam_call(self, text, work, cancelable=False):
+    def _sam_call(self, text, work, cancelable=False, dialog=None, on_progress=None):
         """Run work(progress) on a thread, keeping the window drawn, and return
         (True, its result), or (False, None) when it failed or was canceled.
 
-        A box with text, and Cancel when cancelable, shows when the work takes
-        more than a moment; progress(done, total) fills its bar.
+        Without a dialog, a box with text, and Cancel when cancelable, shows when
+        the work takes more than a moment, and progress(done, total, ...) fills
+        its bar. With one, the caller shows it, and on_progress gets the
+        progress values on the window's thread.
         """
         self._sam_busy = True
         outcome = {}
@@ -2524,44 +2528,55 @@ class MainWindow(QMainWindow):
 
         def run():
             try:
-                outcome["value"] = work(lambda done, total: latest.update(value=(done, total)))
+                outcome["value"] = work(lambda *values: latest.update(value=values))
             except SamCanceled:
                 outcome["canceled"] = True
             except Exception as exc:
                 outcome["error"] = str(exc)
 
-        dialog = QProgressDialog(text, "Cancel", 0, 0, self)
-        dialog.setWindowTitle("SAM 3.1")
-        dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setMinimumWidth(420)
-        dialog.setMinimumDuration(400)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        if cancelable:
-            dialog.canceled.connect(self._sam.cancel)
-        else:
-            dialog.setCancelButton(None)
+        box = None
+        if dialog is None:
+            box = QProgressDialog(text, "Cancel", 0, 0, self)
+            box.setWindowTitle("SAM 3.1")
+            # A modal box is attached to the window by some desktops, so that
+            # dragging it drags the whole app.
+            box.setWindowModality(Qt.WindowModality.NonModal)
+            box.setMinimumWidth(420)
+            box.setMinimumDuration(400)
+            box.setAutoClose(False)
+            box.setAutoReset(False)
+            if cancelable:
+                box.canceled.connect(self._sam.cancel)
+            else:
+                box.setCancelButton(None)
         worker = Thread(target=run, daemon=True)
         worker.start()
         loop = QEventLoop()
         timer = QTimer()
         timer.setInterval(50)
+        shown = {}
 
         def poll():
             if not worker.is_alive():
                 loop.quit()
+            values = latest.get("value")
+            if values is None or values == shown.get("value"):
                 return
-            if "value" in latest:
-                done, total = latest["value"]
-                dialog.setMaximum(max(1, total))
-                dialog.setValue(min(done, total - 1))
+            shown["value"] = values
+            if on_progress is not None:
+                on_progress(*values)
+            if box is not None:
+                done, total = values[:2]
+                box.setMaximum(max(1, total))
+                box.setValue(min(done, total - 1))
 
         timer.timeout.connect(poll)
         timer.start()
         loop.exec()
         timer.stop()
-        dialog.hide()
-        dialog.deleteLater()
+        if box is not None:
+            box.hide()
+            box.deleteLater()
         self._sam_busy = False
         if "error" in outcome:
             QMessageBox.warning(self, "SAM 3.1", outcome["error"])
@@ -2755,17 +2770,8 @@ class MainWindow(QMainWindow):
             )
             if choice != QMessageBox.StandardButton.Yes:
                 return
-        ok, results = self._sam_call(
-            f"Propagating {len(prompts)} mask(s) through {name} with SAM 3.1...",
-            lambda progress: self._sam.propagate(video, prompts, start, direction, progress),
-            cancelable=True,
-        )
-        if not ok or self._video_path != video:
-            return
-        count = self._save_sam_results(video, results, sources, sam_root)
-        self._show_saved_mask()
-        self.statusBar().showMessage(
-            f"SAM 3.1 propagated {len(prompts)} mask(s) over {count} frame(s) of {name}"
+        self._run_sam_propagations(
+            "Propagate video", [(video, sam_root, sources, prompts, start, direction)]
         )
 
     def _sam_propagate_all(self):
@@ -2790,54 +2796,151 @@ class MainWindow(QMainWindow):
                 "None of the loaded videos has masks to propagate from.",
             )
             return
-        replaced = sum(
-            1 for _, sam_root, sources, _ in jobs
-            if annotated_frames(sam_root) - set(sources)
-        )
-        message = (
-            f"Propagate the masks of {len(jobs)} video(s) through every frame with "
-            "SAM 3.1, both ways from each video's first prompt frame?"
+        finished = [
+            job for job in jobs if load_propagated_frames(job[1]) == set(job[2])
+        ]
+        if finished:
+            again = self._confirm_propagate_again(len(finished), len(jobs), skipped)
+            if again is None:
+                return
+            if not again:
+                jobs = [job for job in jobs if job not in finished]
+                skipped += len(finished)
+        else:
+            message = (
+                f"Propagate the masks of {len(jobs)} video(s) through every frame "
+                "with SAM 3.1, both ways from each video's first prompt frame?"
+            )
+            if skipped:
+                message += f"\n\n{skipped} video(s) without masks will be skipped."
+            choice = QMessageBox.question(
+                self,
+                "Propagate all videos",
+                message,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if choice != QMessageBox.StandardButton.Yes:
+                return
+        if not jobs:
+            self.statusBar().showMessage(
+                f"SAM 3.1: every video was already propagated; {skipped} skipped"
+            )
+            return
+        runs = [
+            (video, sam_root, sources, prompts,
+             min(min(frames) for frames in prompts.values()), "both")
+            for video, sam_root, sources, prompts in jobs
+        ]
+        done = self._run_sam_propagations("Propagate all videos", runs)
+        message = f"SAM 3.1 propagated {done} of {len(runs)} video(s)"
+        if skipped:
+            message += f"; {skipped} skipped"
+        self.statusBar().showMessage(message)
+
+    def _confirm_propagate_again(self, finished, count, skipped):
+        """Ask whether videos already propagated with their present prompt frames
+        are propagated again: True for Yes, False for No (skip them), None for
+        Cancel."""
+        text = (
+            f"{finished} of {count} video(s) were already propagated with the "
+            "prompt frames they have now. Propagate them again?\n\n"
+            "No skips them and propagates the others."
         )
         if skipped:
-            message += f"\n\n{skipped} video(s) without masks will be skipped."
-        if replaced:
-            message += (
-                f"\n\n{replaced} video(s) already hold masks SAM 3.1 found before. "
-                "They will be replaced."
-            )
-        choice = QMessageBox.question(
-            self,
+            text += f"\n\n{skipped} video(s) without masks will be skipped."
+        question = QMessageBox(
+            QMessageBox.Icon.Question,
             "Propagate all videos",
-            message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
+            text,
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            self,
         )
-        if choice != QMessageBox.StandardButton.Yes:
-            return
-        done = 0
-        for number, (video, sam_root, sources, prompts) in enumerate(jobs, start=1):
-            name = Path(video).name
-            start = min(min(frames) for frames in prompts.values())
-            ok, results = self._sam_call(
-                f"Video {number} of {len(jobs)}: propagating {len(prompts)} mask(s) "
-                f"through {name} with SAM 3.1...",
-                lambda progress, video=video, prompts=prompts, start=start: (
-                    self._sam.propagate(video, prompts, start, "both", progress)
-                ),
-                cancelable=True,
-            )
-            if not ok:
-                break
-            self._save_sam_results(video, results, sources, sam_root)
-            done += 1
-        self._show_saved_mask()
-        self.statusBar().showMessage(
-            f"SAM 3.1 propagated {done} of {len(jobs)} video(s)"
-        )
+        question.setDefaultButton(QMessageBox.StandardButton.No)
+        choice = question.exec()
+        if choice == QMessageBox.StandardButton.Cancel:
+            return None
+        return choice == QMessageBox.StandardButton.Yes
 
-    def _save_sam_results(self, video, results, sources, sam_root):
+    def _run_sam_propagations(self, title, runs):
+        """Propagate videos one after another in a box with a bar for the videos,
+        one for the video being tracked and the time left, saving each video
+        when it is done. Each run is (video, SAM results folder, prompt mask sets,
+        prompts, start frame, direction). Returns the number of videos saved."""
+        frame_counts = []
+        for video, *_ in runs:
+            capture = open_capture(video)
+            frame_counts.append(max(1, int(capture.get(cv2.CAP_PROP_FRAME_COUNT))))
+            capture.release()
+        steps = [
+            propagation_steps(
+                [list(frames) for frames in prompts.values()], start, direction, count
+            )
+            for (_, _, _, prompts, start, direction), count in zip(runs, frame_counts)
+        ]
+        dialog = VideoBatchProgressDialog(len(runs), title, self)
+        dialog.canceled.connect(self._sam.cancel)
+        # The box is left free to move on its own, so the window is locked
+        # instead while the videos are tracked and saved.
+        self.centralWidget().setEnabled(False)
+        self.menuBar().setEnabled(False)
+        dialog.show()
+        # Started at the first step tracked, so that loading the model and the
+        # video does not count as tracking time.
+        clock = {}
+        steps_before = 0
+        saved = 0
+        try:
+            for number, ((video, sam_root, sources, prompts, start, direction), count) in enumerate(
+                zip(runs, frame_counts), start=1
+            ):
+                name = Path(video).name
+                keys = list(prompts)
+                dialog.start_video(name, number, len(runs), steps[number - 1], verb="Propagating")
+                dialog.set_frame_text("Loading SAM 3.1 and the video...")
+
+                def show_progress(done, total, index, frame, offset=steps_before, keys=keys, count=count):
+                    label, mask_number = keys[index]
+                    dialog.set_frame_progress(done, total)
+                    dialog.set_frame_text(
+                        f"{instance_title({'class': label, 'id': mask_number})} "
+                        f"(mask {index + 1} of {len(keys)}), frame {frame + 1}/{count}"
+                    )
+                    overall = offset + done
+                    if "time_left" not in clock:
+                        clock["base"] = overall
+                        clock["time_left"] = TimeLeft(sum(steps) - clock["base"])
+                    dialog.set_time_left(clock["time_left"].text(overall - clock["base"]))
+
+                ok, results = self._sam_call(
+                    "",
+                    lambda progress, video=video, prompts=prompts, start=start, direction=direction: (
+                        self._sam.propagate(video, prompts, start, direction, progress)
+                    ),
+                    dialog=dialog,
+                    on_progress=show_progress,
+                )
+                if not ok:
+                    break
+                self._save_sam_results(video, results, sources, sam_root, complete=direction == "both")
+                saved += 1
+                steps_before += steps[number - 1]
+                dialog.set_video_progress(number, len(runs))
+        finally:
+            dialog.mark_stopped()
+            dialog.close()
+            self.centralWidget().setEnabled(True)
+            self.menuBar().setEnabled(True)
+        self._show_saved_mask()
+        return saved
+
+    def _save_sam_results(self, video, results, sources, sam_root, complete):
         """Save the masks SAM found on each frame it tracked, with their
         measurements, and copy in the prompt frames it does not hold yet.
+        complete marks a propagation over the whole video, which a later
+        Propagate all videos may skip while the prompt frames stay the same.
         Returns the number of frames saved."""
         name = Path(video).name
         output_dir = self._video_output_dir
@@ -2879,7 +2982,9 @@ class MainWindow(QMainWindow):
                     mask_set.remove()
                     log.remove(name, frame)
                 count += 1
-            save_prompt_frames(sam_root, set(sources))
+            save_prompt_frames(
+                sam_root, set(sources), propagated=set(sources) if complete else None
+            )
         except OSError as exc:
             QMessageBox.warning(self, "Save error", str(exc))
         try:
@@ -4699,9 +4804,9 @@ class VideoBatchProgressDialog(QDialog):
     def set_time_left(self, text):
         self.time_label.setText(text)
 
-    def start_video(self, video_name, video_number, video_count, frame_count):
+    def start_video(self, video_name, video_number, video_count, frame_count, verb="Segmenting"):
         self._video_count = max(1, int(video_count))
-        self.status_label.setText(f"Segmenting {video_name}")
+        self.status_label.setText(f"{verb} {video_name}")
         self.video_label.setText(f"Videos: {video_number}/{video_count}")
         self.video_progress.setRange(0, self._video_count)
         self.video_progress.setValue(max(0, int(video_number) - 1))
@@ -4711,6 +4816,9 @@ class VideoBatchProgressDialog(QDialog):
 
     def start_frame(self, frame_number, frame_count):
         self.frame_label.setText(f"Frames: {frame_number}/{frame_count}")
+
+    def set_frame_text(self, text):
+        self.frame_label.setText(text)
 
     def set_frame_progress(self, frame_number, frame_count):
         self.frame_progress.setRange(0, max(1, int(frame_count)))
@@ -4722,7 +4830,7 @@ class VideoBatchProgressDialog(QDialog):
 
     def mark_canceling(self):
         self._cancel_requested = True
-        self.status_label.setText("Canceling video segmentation...")
+        self.status_label.setText("Canceling...")
         self.cancel_btn.setEnabled(False)
 
     def mark_complete(self):

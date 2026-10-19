@@ -45,7 +45,8 @@ A model that segments one structure labels its masks with the nerve picked, or *
    - **Text prompt** and **Find** add a mask for each match of a phrase.
    - Masks get the label picked under **Labels**. A mask with the same label and number on several frames (such as **Median #1**) is followed as one structure.
 3. Go to the frame to start from and click **Propagate video**. **Both directions** fills the frames before and after it. Untick it to choose **Forward** or **Backward**.
-   - **Propagate all videos** does every loaded video in turn, each through all its frames from its first prompt frame. Videos without masks are skipped. Cancel keeps the videos already finished.
+   - **Propagate all videos** does every loaded video in turn, each through all its frames from its first prompt frame. Videos without masks are skipped.
+   - A video is saved only once it is finished, so Cancel keeps the videos already done and leaves the one in progress as it was. The next Propagate all videos asks whether to propagate the finished videos again; **No** skips them and carries on with the rest. A video whose prompt frames changed since counts as not finished.
 4. Check the result, then trim it with **Delete before** / **Delete after**, or correct a frame by hand. A corrected frame is used as a prompt the next time you propagate.
 
 SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation files are not changed. The first prompt or propagation loads the model, which takes about half a minute.
