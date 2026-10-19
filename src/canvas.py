@@ -105,6 +105,10 @@ class Canvas(QWidget):
         self._roi_move = None
         # Opposite corners (x, y) of a box being drawn with the ROI tool.
         self._roi_draft = None
+        # While a mask is being dragged with the Select tool: where the press
+        # landed, the mask at that moment, and whether the pointer has moved far
+        # enough for the press to count as a drag instead of a click.
+        self._mask_move = None
         # What a click with the Select tool picked for deletion: "roi", "mask" or None.
         self.selection = None
         # Opposite corners (x, y) of a box being drawn with the SAM Box tool.
@@ -161,6 +165,7 @@ class Canvas(QWidget):
         self._roi_drag = None
         self._roi_move = None
         self._roi_draft = None
+        self._mask_move = None
         self.selection = None
         self._refresh_mask_pixmap()
         self._last_outline = []
@@ -514,6 +519,32 @@ class Canvas(QWidget):
             low, high = min(move[axis]), max(move[axis])
             delta = max(-low, min(float(extent) - high, delta))
             self._roi[axis] = [value + delta for value in move[axis]]
+        self._refresh_mask_pixmap()
+        self.update()
+
+    def _move_mask(self, pos):
+        """Slide the selected mask with the pointer by whole pixels; what is
+        pushed past the edge of the image is cut off."""
+        move = self._mask_move
+        instance = self._selected_instance()
+        if instance is None:
+            self._mask_move = None
+            return
+        if not move["moved"]:
+            if (pos - move["press"]).manhattanLength() < 4:
+                return
+            move["moved"] = True
+        scale = self._current_view()[0]
+        dx = int(round((pos.x() - move["press"].x()) / scale))
+        dy = int(round((pos.y() - move["press"].y()) / scale))
+        source = move["mask"]
+        height, width = source.shape[:2]
+        shifted = np.zeros_like(source)
+        if abs(dx) < width and abs(dy) < height:
+            shifted[max(0, dy):height + min(0, dy), max(0, dx):width + min(0, dx)] = source[
+                max(0, -dy):height + min(0, -dy), max(0, -dx):width + min(0, -dx)
+            ]
+        instance["mask"] = shifted
         self._refresh_mask_pixmap()
         self.update()
 
@@ -941,6 +972,13 @@ class Canvas(QWidget):
                 self._roi_drag = self._roi_grips_at(pos) or None
                 if self._roi_drag is not None:
                     self.selection = "roi"
+                elif self._mask_at(pos):
+                    self._select_instance_at(pos)
+                    self._mask_move = {
+                        "press": pos,
+                        "mask": self.instances[self.selected_index]["mask"].copy(),
+                        "moved": False,
+                    }
                 elif self._inside_roi(pos):
                     self._roi_move = {
                         "press": pos,
@@ -1020,7 +1058,9 @@ class Canvas(QWidget):
         self._cursor_pos = self._screen_to_image(event.position().toPoint())
         if self.tool == "select":
             pos = event.position().toPoint()
-            if self._roi_drag is not None:
+            if self._mask_move is not None:
+                self._move_mask(pos)
+            elif self._roi_drag is not None:
                 x, y = self._image_position(pos)
                 for axis, index in self._roi_drag:
                     self._roi[axis][index] = x if axis == "v" else y
@@ -1028,7 +1068,7 @@ class Canvas(QWidget):
                 self.update()
             elif self._roi_move is not None:
                 self._move_roi(pos)
-            elif not self._roi_grips_at(pos) and self._inside_roi(pos):
+            elif not self._roi_grips_at(pos) and (self._mask_at(pos) or self._inside_roi(pos)):
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
             else:
                 self._set_grip_cursor(self._roi_grips_at(pos))
@@ -1081,6 +1121,16 @@ class Canvas(QWidget):
     def mouseReleaseEvent(self, event):
         if self._calibrating:
             self._calibration_drag = None
+            return
+        if self._mask_move is not None:
+            moved = self._mask_move["moved"]
+            self._mask_move = None
+            if moved:
+                self._drop_empty_instances()
+                self._refresh_mask_pixmap()
+                self._push_history()
+                self._mask_touched = True
+            self.update()
             return
         if self._roi_drag is not None:
             self._roi_drag = None
