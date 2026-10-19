@@ -2718,7 +2718,7 @@ class MainWindow(QMainWindow):
                 if instance["mask"].any():
                     key = (instance["class"], instance["id"])
                     prompts.setdefault(key, {})[frame] = instance["mask"] > 0
-        return sam_root, sources, prompts
+        return sam_root, sources, merge_single_structures(prompts)
 
     def _can_propagate(self):
         if self._sam_busy or not self._sam_selected:
@@ -4851,6 +4851,36 @@ class VideoBatchProgressDialog(QDialog):
         if not self._finished and not self._cancel_requested:
             self._request_cancel()
         super().closeEvent(event)
+
+
+def merge_single_structures(prompts):
+    """Prompts {(label, number): {frame: mask}} with the numbers of a label put
+    together when no frame has more than one mask of it.
+
+    Annotations may number one structure differently on different frames
+    (Median #2 on one, Median #1 on the rest); a label never seen twice on a
+    frame is taken to be one structure, under the number most of its frames
+    use. Only labels seen twice on a frame are told apart by number.
+    """
+    per_frame = {}
+    for (label, _), frames in prompts.items():
+        for frame in frames:
+            per_frame[(label, frame)] = per_frame.get((label, frame), 0) + 1
+    repeated = {label for (label, _), count in per_frame.items() if count > 1}
+    merged = {}
+    single = {}
+    for (label, number), frames in prompts.items():
+        if label in repeated:
+            merged[(label, number)] = frames
+        else:
+            single.setdefault(label, []).append((number, frames))
+    for label, numbered in single.items():
+        number = min(numbered, key=lambda item: (-len(item[1]), item[0]))[0]
+        frames = {}
+        for _, masks in numbered:
+            frames.update(masks)
+        merged[(label, number)] = frames
+    return merged
 
 
 def segment_into(model, image, box, mask_set, angle, stored_shape, default_class, cancel_event):
