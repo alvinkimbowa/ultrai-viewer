@@ -61,6 +61,9 @@ class Canvas(QWidget):
         self.instances = []
         # Index in self.instances of the instance the Select tool picked, or None.
         self.selected_index = None
+        # (label, number) of the masks kept out of view. They are still saved and
+        # measured, but are not drawn, picked or erased.
+        self.hidden_keys = set()
         # The label new masks get, and the order of the labels, which gives each
         # its colour.
         self.active_class = None
@@ -330,7 +333,9 @@ class Canvas(QWidget):
         self._freehand_points = []
         self._roi_draft = None
         self._sam_box_draft = None
-        self.selection = None
+        # A selected mask stays selected, so that the brush and eraser keep to it.
+        if self.selection != "mask":
+            self.selection = None
         if tool_name in ("roi", "sam_point", "sam_box"):
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
@@ -442,6 +447,20 @@ class Canvas(QWidget):
         """The masks as shown, saved and measured: emptied outside the ROI, with
         those left empty dropped."""
         return clip_instances(self.instances, self.roi_box())
+
+    def is_shown(self, instance):
+        return (instance["class"], instance["id"]) not in self.hidden_keys
+
+    def set_hidden_keys(self, keys):
+        """Keep the masks of these (label, number) keys out of view."""
+        self.hidden_keys = set(keys)
+        selected = self._selected_instance()
+        if selected is not None and not self.is_shown(selected):
+            self.selected_index = None
+            if self.selection == "mask":
+                self.selection = None
+        self._refresh_mask_pixmap()
+        self.update()
 
     def has_visible_mask(self):
         return bool(self.visible_instances())
@@ -569,7 +588,7 @@ class Canvas(QWidget):
             if not (left <= x < right and top <= y < bottom):
                 return None
         for index in range(len(self.instances) - 1, -1, -1):
-            if self.instances[index]["mask"][y, x]:
+            if self.instances[index]["mask"][y, x] and self.is_shown(self.instances[index]):
                 return index
         return None
 
@@ -789,6 +808,8 @@ class Canvas(QWidget):
         alpha = int(255 * self.mask_opacity)
         self._label_anchors = []
         for instance in self.visible_instances():
+            if not self.is_shown(instance):
+                continue
             color = self.color_of(instance["class"])
             mask = instance["mask"]
             if self.show_contour_only:
@@ -902,10 +923,16 @@ class Canvas(QWidget):
         return instance
 
     def _paint(self, start, end):
-        """Paint with the brush, or erase from every mask with the eraser, along a
-        stroke from start to end (a point when both are the same)."""
+        """Paint with the brush, or erase with the eraser, along a stroke from
+        start to end (a point when both are the same). The eraser erases from the
+        selected mask alone when one is selected, else from every mask shown."""
         if self.tool == "eraser":
-            targets, value = self.instances, 0
+            selected = self._selected_instance() if self.selection == "mask" else None
+            if selected is not None and self.is_shown(selected):
+                targets = [selected]
+            else:
+                targets = [i for i in self.instances if self.is_shown(i)]
+            value = 0
         elif self._stroke_target is not None:
             targets, value = [self._stroke_target], 1
         else:
@@ -1193,6 +1220,11 @@ class Canvas(QWidget):
         if event.key() == Qt.Key.Key_Delete and self.selection is not None:
             self.request_delete(self.selection)
             return
+        if event.key() == Qt.Key.Key_Escape and self.selection == "mask":
+            self.selected_index = None
+            self.selection = None
+            self.update()
+            return
         super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
@@ -1371,7 +1403,7 @@ class Canvas(QWidget):
 
     def _paint_selected_mask(self, painter, scale, offset_x, offset_y):
         instance = self._selected_instance()
-        if self.selection != "mask" or instance is None:
+        if self.selection != "mask" or instance is None or not self.is_shown(instance):
             return
         shown = clip_instances([instance], self.roi_box())
         if not shown:

@@ -400,6 +400,7 @@ class MainWindow(QMainWindow):
         self._measurement_timer.setInterval(250)
         self._measurement_timer.timeout.connect(self._update_measurements)
         self.canvas.mask_changed.connect(self._measurement_timer.start)
+        self.canvas.mask_changed.connect(self._list_shown_masks)
         settings = self._settings()
         for spin, key in (
             (self.px_per_mm_x_spin, "measurements/px_per_mm_x"),
@@ -2087,6 +2088,25 @@ class MainWindow(QMainWindow):
         undo_redo_row.addWidget(self.redo_btn)
         layout.addLayout(undo_redo_row)
 
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("Masks shown:"))
+        self.show_all_masks_checkbox = QCheckBox("Select all")
+        self.show_all_masks_checkbox.setToolTip(
+            "Show every mask of the image or frame on screen, or hide them all. "
+            "Hidden masks are still saved and measured, but the eraser and Select "
+            "leave them alone."
+        )
+        layout.addWidget(self.show_all_masks_checkbox)
+        self.shown_masks_box = QWidget()
+        self.shown_masks_layout = QVBoxLayout(self.shown_masks_box)
+        self.shown_masks_layout.setContentsMargins(18, 0, 0, 0)
+        self.shown_masks_layout.setSpacing(2)
+        layout.addWidget(self.shown_masks_box)
+        # (label, number) of each mask listed, and the file they were listed for;
+        # masks hidden in one file are shown again in the next.
+        self._listed_mask_keys = None
+        self._listed_masks_file = None
+
         layout.addStretch()
 
         return panel
@@ -2195,6 +2215,7 @@ class MainWindow(QMainWindow):
         self.save_mask_action.triggered.connect(self._save_current_mask)
         self.delete_mask_btn.clicked.connect(self._delete_current_mask)
         self.delete_mask_action.triggered.connect(self._delete_current_mask)
+        self.show_all_masks_checkbox.clicked.connect(self._show_all_masks_clicked)
         self.delete_masks_before_btn.clicked.connect(
             lambda: self._delete_video_masks_in_range(after=False)
         )
@@ -2506,6 +2527,66 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Could not save measurements: {exc}")
         count = sum(len(output_frames) for output_frames in changed.values())
         self.statusBar().showMessage(f"Deleted {what} of {count} frame(s) of {name}")
+
+    def _list_shown_masks(self):
+        """List the masks of the image or frame on screen, each with a box that
+        shows or hides it."""
+        listed_file = self._video_path if self._mode == "video" else self.canvas.image_path
+        if listed_file != self._listed_masks_file:
+            self._listed_masks_file = listed_file
+            # Read by the canvas after this, as it draws the masks.
+            self.canvas.hidden_keys = set()
+        keys = sorted(
+            {(i["class"], i["id"]) for i in self.canvas.instances if i["mask"].any()},
+            key=lambda key: (display_class(key[0]).lower(), key[1]),
+        )
+        if keys != self._listed_mask_keys:
+            self._listed_mask_keys = keys
+            while self.shown_masks_layout.count():
+                self.shown_masks_layout.takeAt(0).widget().deleteLater()
+            for key in keys:
+                swatch = QPixmap(12, 12)
+                swatch.fill(QColor(*self.canvas.color_of(key[0])))
+                checkbox = QCheckBox(instance_title({"class": key[0], "id": key[1]}))
+                checkbox.setIcon(QIcon(swatch))
+                checkbox.setProperty("mask_key", key)
+                checkbox.toggled.connect(
+                    lambda shown, key=key: self._set_mask_shown(key, shown)
+                )
+                self.shown_masks_layout.addWidget(checkbox)
+        hidden = self.canvas.hidden_keys
+        for index in range(self.shown_masks_layout.count()):
+            checkbox = self.shown_masks_layout.itemAt(index).widget()
+            checkbox.blockSignals(True)
+            checkbox.setChecked(tuple(checkbox.property("mask_key")) not in hidden)
+            checkbox.blockSignals(False)
+        shown = sum(1 for key in keys if key not in hidden)
+        self.show_all_masks_checkbox.blockSignals(True)
+        self.show_all_masks_checkbox.setEnabled(bool(keys))
+        if keys and shown == len(keys):
+            self.show_all_masks_checkbox.setCheckState(Qt.CheckState.Checked)
+        elif shown:
+            self.show_all_masks_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
+        else:
+            self.show_all_masks_checkbox.setCheckState(Qt.CheckState.Unchecked)
+        self.show_all_masks_checkbox.blockSignals(False)
+
+    def _set_mask_shown(self, key, shown):
+        hidden = set(self.canvas.hidden_keys)
+        if shown:
+            hidden.discard(key)
+        else:
+            hidden.add(key)
+        self.canvas.set_hidden_keys(hidden)
+
+    def _show_all_masks_clicked(self):
+        """Show every mask listed unless all are shown, in which case hide them."""
+        keys = self._listed_mask_keys or []
+        if any(key in self.canvas.hidden_keys for key in keys):
+            self.canvas.set_hidden_keys(set())
+        else:
+            self.canvas.set_hidden_keys(set(self.canvas.hidden_keys) | set(keys))
+        self._list_shown_masks()
 
     def _update_sam_controls(self):
         """Show the SAM controls and tools in place of the segmenting ones while
