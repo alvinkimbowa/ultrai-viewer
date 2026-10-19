@@ -56,6 +56,7 @@ from .instances import (
     instances_from_labels,
     make_instance,
     next_instance_id,
+    safe_class,
     same_instances,
 )
 from .labels import LabelChips, NerveManifest
@@ -1989,14 +1990,16 @@ class MainWindow(QMainWindow):
         range_row = QHBoxLayout()
         self.delete_masks_before_btn = QPushButton("Delete before")
         self.delete_masks_before_btn.setToolTip(
-            "Delete the masks of every frame up to and including the frame on screen."
+            "Delete the masks of every frame up to and including the frame on screen; "
+            "with a mask selected, only the masks of its label and number."
         )
         self.delete_masks_before_btn.setEnabled(False)
         configure_button(self.delete_masks_before_btn)
         range_row.addWidget(self.delete_masks_before_btn)
         self.delete_masks_after_btn = QPushButton("Delete after")
         self.delete_masks_after_btn.setToolTip(
-            "Delete the masks of the frame on screen and every frame after it."
+            "Delete the masks of the frame on screen and every frame after it; "
+            "with a mask selected, only the masks of its label and number."
         )
         self.delete_masks_after_btn.setEnabled(False)
         configure_button(self.delete_masks_after_btn)
@@ -2415,7 +2418,8 @@ class MainWindow(QMainWindow):
 
     def _delete_video_masks_in_range(self, after):
         """Delete the masks of every frame from the frame on screen to the end of
-        the video (after) or from the start up to it, after asking.
+        the video (after) or from the start up to it, after asking. With a mask
+        selected, only the masks of its label and number are deleted.
 
         Each frame loses the masks it shows: those of the model's results folder
         when it has any, else those of the selected output folder.
@@ -2424,58 +2428,84 @@ class MainWindow(QMainWindow):
             return
         self._stop_playback()
         self._commit_pending_outline()
+        selected = self.canvas._selected_instance() if self.canvas.selection == "mask" else None
+        key = None if selected is None else (safe_class(selected["class"]), selected["id"])
         current = self._video_frame_index
         roots = {
             folder: Path(folder) / Path(self._video_path).stem
             for folder in (self._video_output_dir, self._video_base_dir)
             if folder
         }
+        # (output folder, frame) -> the mask files it loses
+        doomed = {}
         frames = set()
         for root in roots.values():
             frames |= annotated_frames(root)
-        frames = sorted(f for f in frames if (f >= current if after else f <= current))
-        if not frames and not self.canvas.has_visible_mask():
+        for frame in sorted(f for f in frames if (f >= current if after else f <= current)):
+            for output_dir, root in roots.items():
+                files = MaskSet(root, frame).files()
+                if files:
+                    if key is not None:
+                        files = [f for f in files if (safe_class(f[0]), f[1]) == key]
+                    if files:
+                        doomed[(output_dir, frame)] = [path for _, _, path in files]
+                    break
+        shown = selected is not None or self.canvas.has_visible_mask()
+        if not doomed and not shown:
             QMessageBox.information(self, "No masks", "No frames in that range have masks.")
             return
         if after:
             span = f"frames {current + 1} to {self._video_frame_count}"
         else:
             span = f"frames 1 to {current + 1}"
+        what = "the masks" if selected is None else f"{instance_title(selected)}"
         choice = QMessageBox.question(
             self,
             "Delete masks",
-            f"Delete the masks of {span} of {Path(self._video_path).name}, "
-            f"including the frame on screen?\n\n{len(frames)} frame(s) with saved "
-            "masks will be permanently deleted.",
+            f"Delete {what} of {span} of {Path(self._video_path).name}, "
+            f"including the frame on screen?\n\n{len(doomed)} frame(s) with saved "
+            "masks will be permanently changed.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if choice != QMessageBox.StandardButton.Yes:
             return
-        self.canvas.clear_mask()
+        if selected is None:
+            self.canvas.clear_mask()
+        else:
+            self.canvas.delete_selected_instance()
         name = Path(self._video_path).name
-        removed = {}
+        # output folder -> {frame: whether masks of other labels are left}
+        changed = {}
         try:
-            for frame in frames:
-                for output_dir, root in roots.items():
-                    mask_set = MaskSet(root, frame)
-                    if mask_set.exists():
-                        mask_set.remove()
-                        removed.setdefault(output_dir, []).append(frame)
-                        break
+            for (output_dir, frame), paths in doomed.items():
+                for path in paths:
+                    path.unlink(missing_ok=True)
+                left = MaskSet(roots[output_dir], frame).exists()
+                changed.setdefault(output_dir, {})[frame] = left
         except OSError as exc:
             QMessageBox.warning(self, "Delete error", str(exc))
-        for output_dir, output_frames in removed.items():
-            self._change_sam_prompt_frames(roots[output_dir], remove=set(output_frames))
+        for output_dir, output_frames in changed.items():
+            emptied = {frame for frame, left in output_frames.items() if not left}
+            if emptied:
+                self._change_sam_prompt_frames(roots[output_dir], remove=emptied)
             try:
                 log = self._measurement_log(output_dir)
                 for frame in output_frames:
-                    log.remove(name, frame)
+                    rows = log.get(name, frame)
+                    if key is not None and rows:
+                        rows = [
+                            row for row in rows
+                            if (safe_class(row.get("class", "")), int(row.get("instance_id") or -1)) != key
+                        ]
+                        log.put(name, frame, rows)
+                    else:
+                        log.remove(name, frame)
                 log.save()
             except OSError as exc:
                 self.statusBar().showMessage(f"Could not save measurements: {exc}")
-        count = sum(len(output_frames) for output_frames in removed.values())
-        self.statusBar().showMessage(f"Deleted the masks of {count} frame(s) of {name}")
+        count = sum(len(output_frames) for output_frames in changed.values())
+        self.statusBar().showMessage(f"Deleted {what} of {count} frame(s) of {name}")
 
     def _update_sam_controls(self):
         """Show the SAM controls and tools in place of the segmenting ones while

@@ -25,7 +25,7 @@ Scroll, use the arrow keys, or **Prev** / **Next** to move between images and fr
 - Each mask is tagged with its label and number, such as **Median #1**.
 - Right-click a mask to change its **Label** or to **Delete mask**. You can also click it with **Select** and press Delete.
 - **Delete masks** in the sidebar deletes every mask of the image or frame on screen.
-- In a video, **Delete before** deletes the masks of every frame up to and including the frame on screen, and **Delete after** deletes those of the frame on screen and every frame after it. Both ask before deleting.
+- In a video, **Delete before** deletes the masks of every frame up to and including the frame on screen, and **Delete after** deletes those of the frame on screen and every frame after it. With a mask selected, they delete only the masks of its label and number, such as every **Median #1**, and leave the rest. Both ask before deleting.
 - Ctrl+Z and Ctrl+Y undo and redo.
 
 ## Segment with a model
