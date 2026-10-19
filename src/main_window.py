@@ -3206,8 +3206,6 @@ class MainWindow(QMainWindow):
         }
         tool = tool_map.get(index, "select")
         self.canvas.set_tool(tool)
-        if tool in ("brush", "eraser"):
-            self.fill_mask_checkbox.setChecked(True)
 
     def _on_opacity_changed(self, value):
         self.canvas.set_mask_opacity(value / 100.0)
