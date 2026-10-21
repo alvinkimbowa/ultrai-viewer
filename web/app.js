@@ -77,7 +77,8 @@ function classOrder() { return [...state.nerves, ...state.anatomy]; }
 function classColor(name) {
   let index = classOrder().indexOf(cleanClass(name));
   if (index < 0) index = classOrder().length;
-  const hue = (index * 137.507764) % 360;
+  // Starts at yellow, so the first label (the median nerve) is drawn yellow.
+  const hue = (60 + index * 137.507764) % 360;
   return `hsl(${hue} 78% 55%)`;
 }
 function parseHslColor(name) {
