@@ -78,10 +78,10 @@ from .sam_integration import (
     PROMPTS_FILE_NAME,
     SamCanceled,
     SamTracker,
-    load_prompt_frames,
-    load_propagated_frames,
+    load_prompts,
+    load_propagated,
     sam_available,
-    save_prompt_frames,
+    save_prompts,
 )
 from .sam_plan import propagation_steps
 from threading import Event, Thread
@@ -1658,14 +1658,21 @@ class MainWindow(QMainWindow):
     def _write_shown_masks(self, mask_set):
         """Save the masks on screen so that they line up with the stored image.
 
-        A video frame saved while SAM is selected holds masks drawn or prompted
-        by hand, so it becomes one SAM propagates from.
+        On a video frame saved while SAM is selected, the masks changed by hand
+        become ones SAM propagates from; the others stay what SAM found.
         """
-        mask_set.write(
-            self.canvas.visible_instances(), self._shown_angle, self._original_shape
-        )
-        if self._sam_selected and mask_set.frame is not None:
-            self._change_sam_prompt_frames(mask_set.folder, add={mask_set.frame})
+        shown = self.canvas.visible_instances()
+        tracked = self._sam_selected and mask_set.frame is not None
+        # Compared as viewed, since turning a mask back is not exactly reversible.
+        before = stored_masks(mask_set, self._shown_angle) if tracked else None
+        mask_set.write(shown, self._shown_angle, self._original_shape)
+        if tracked:
+            after = {(i["class"], i["id"]): i["mask"] > 0 for i in shown if i["mask"].any()}
+            changed = {
+                key for key, mask in after.items()
+                if key not in before or not np.array_equal(before[key], mask)
+            }
+            self._sam_frame_saved(mask_set.folder, mask_set.frame, changed, set(after))
 
     def _measurement_is_current(self, output_dir, file_name, frame=""):
         """True when the saved rows were measured with the inputs on screen."""
@@ -2426,9 +2433,7 @@ class MainWindow(QMainWindow):
                 self._video_frame_index,
             )
             if mask_set is not None:
-                self._change_sam_prompt_frames(
-                    mask_set.folder, remove={self._video_frame_index}
-                )
+                self._drop_sam_prompts(mask_set.folder, {self._video_frame_index})
         elif self._mode == "sequence" and self._sequence_output_dir:
             self._forget_measurement(
                 result_dir,
@@ -2508,8 +2513,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Delete error", str(exc))
         for output_dir, output_frames in changed.items():
             emptied = {frame for frame, left in output_frames.items() if not left}
-            if emptied:
-                self._change_sam_prompt_frames(roots[output_dir], remove=emptied)
+            self._drop_sam_prompts(
+                roots[output_dir], emptied, key=key, frames=set(output_frames)
+            )
             try:
                 log = self._measurement_log(output_dir)
                 for frame in output_frames:
@@ -2805,55 +2811,110 @@ class MainWindow(QMainWindow):
         self.canvas.add_instances(found)
         self.statusBar().showMessage(f'SAM 3.1 found {len(found)} match(es) for "{text}"')
 
-    def _change_sam_prompt_frames(self, folder, add=(), remove=()):
-        """Add frames to, or drop them from, the frames SAM propagates from, as
-        kept in a video's SAM results folder."""
+    def _edit_sam_prompts(self, folder, edit):
+        """Change the prompts kept in a video's SAM results folder with
+        edit(prompts), which changes {frame: keys} in place; see load_prompts.
+
+        Until a video has a record, every mask annotated on a frame prompts.
+        """
         if not self._video_base_dir or not self._video_path:
             return
         sam_dir = Path(self._video_base_dir) / f"{SAM_MODEL_NAME}{PREDICTIONS_SUFFIX}"
         if Path(folder).parent != sam_dir:
             return
-        frames = load_prompt_frames(folder)
-        if frames is None:
-            if not add:
-                return
+        prompts = load_prompts(folder)
+        recorded = prompts is not None
+        if not recorded:
             base_root = Path(self._video_base_dir) / Path(folder).name
-            frames = annotated_frames(base_root) | annotated_frames(folder)
-        updated = (frames | set(add)) - set(remove)
-        if updated != frames or not (Path(folder) / PROMPTS_FILE_NAME).exists():
+            prompts = {
+                frame: None
+                for frame in annotated_frames(base_root) | annotated_frames(folder)
+            }
+        original = {frame: None if keys is None else set(keys) for frame, keys in prompts.items()}
+        edit(prompts)
+        if prompts != original or not recorded:
             try:
-                save_prompt_frames(folder, updated)
+                save_prompts(folder, prompts)
             except OSError as exc:
-                self.statusBar().showMessage(f"Could not save the SAM prompt frames: {exc}")
+                self.statusBar().showMessage(f"Could not save the SAM prompts: {exc}")
+
+    def _sam_frame_saved(self, folder, frame, changed, present):
+        """Record a frame saved by hand: the masks changed (label, number) become
+        prompts, and only masks still present (present) stay prompts. A frame
+        whose every mask prompts stays so."""
+
+        def edit(prompts):
+            keys = prompts.get(frame, set())
+            if keys is None:
+                if not present:
+                    del prompts[frame]
+                return
+            keys = (keys | changed) & present
+            if keys:
+                prompts[frame] = keys
+            else:
+                prompts.pop(frame, None)
+
+        self._edit_sam_prompts(folder, edit)
+
+    def _drop_sam_prompts(self, folder, emptied, key=None, frames=()):
+        """Stop frames left without masks (emptied) prompting, and, given the
+        (label, number) of a mask deleted from frames, stop that mask
+        prompting on them."""
+
+        def edit(prompts):
+            for frame in emptied:
+                prompts.pop(frame, None)
+            if key is None:
+                return
+            for frame in frames:
+                keys = prompts.get(frame)
+                if keys is not None and frame in prompts:
+                    keys = {k for k in keys if (safe_class(k[0]), k[1]) != key}
+                    if keys:
+                        prompts[frame] = keys
+                    else:
+                        del prompts[frame]
+
+        self._edit_sam_prompts(folder, edit)
 
     def _sam_prompts_of(self, video):
-        """(SAM results folder, {frame: mask set} of the prompt frames,
-        {(label, number): {frame: mask}}) of a video.
+        """(SAM results folder, {frame: (mask set, keys)} of the prompt frames,
+        {(label, number): {frame: mask}}) of a video. keys is None when every
+        mask of the frame prompts, else the set of (label, number) that do.
 
-        The prompt frames are those annotated in the selected output folder, until
+        The prompts are the masks annotated in the selected output folder, until
         the video is first propagated, and then those kept in the SAM results
-        folder, which gains every frame saved by hand while SAM is selected.
+        folder's record, which gains every mask changed by hand while SAM is
+        selected.
         """
         stem = Path(video).stem
         sam_root = Path(self._video_output_dir) / stem
         base_root = Path(self._video_base_dir) / stem
-        prompt_frames = load_prompt_frames(sam_root)
-        if prompt_frames is None:
-            prompt_frames = annotated_frames(base_root) | annotated_frames(sam_root)
+        record = load_prompts(sam_root)
+        if record is None:
+            record = {
+                frame: None
+                for frame in annotated_frames(base_root) | annotated_frames(sam_root)
+            }
         sources = {}
         prompts = {}
-        for frame in sorted(prompt_frames):
+        for frame in sorted(record):
+            keys = record[frame]
             for root in (sam_root, base_root):
                 mask_set = MaskSet(root, frame)
                 if mask_set.exists():
                     break
             else:
                 continue
-            sources[frame] = mask_set
+            found = set()
             for instance in mask_set.read():
-                if instance["mask"].any():
-                    key = (instance["class"], instance["id"])
+                key = (instance["class"], instance["id"])
+                if instance["mask"].any() and (keys is None or key in keys):
                     prompts.setdefault(key, {})[frame] = instance["mask"] > 0
+                    found.add(key)
+            if found:
+                sources[frame] = (mask_set, None if keys is None else found)
         return sam_root, sources, merge_single_structures(prompts)
 
     def _can_propagate(self):
@@ -2933,7 +2994,7 @@ class MainWindow(QMainWindow):
             )
             return
         finished = [
-            job for job in jobs if load_propagated_frames(job[1]) == set(job[2])
+            job for job in jobs if load_propagated(job[1]) == prompt_record(job[2])
         ]
         if finished:
             again = self._confirm_propagate_again(len(finished), len(jobs), skipped)
@@ -3085,20 +3146,30 @@ class MainWindow(QMainWindow):
         px_per_mm = (self.px_per_mm_x_spin.value(), self.px_per_mm_y_spin.value())
         rois = self._roi_store(output_dir)
         log = self._measurement_log(output_dir)
-        shape = next(iter(sources.values())).stored_shape()
+        shape = next(iter(sources.values()))[0].stored_shape()
         count = 0
         try:
             sam_root.mkdir(parents=True, exist_ok=True)
             for frame in sorted(set(results) | set(sources)):
+                found = [
+                    make_instance(label, number, rotate_mask(mask, angle) if angle else mask)
+                    for (label, number), mask in sorted(results.get(frame, {}).items())
+                ]
                 if frame in sources:
-                    if sources[frame].folder == sam_root:
-                        continue
-                    instances = sources[frame].read(angle)
+                    source, keys = sources[frame]
+                    if keys is None:
+                        # Every mask of the frame prompts: it is kept as it is.
+                        if source.folder == sam_root:
+                            continue
+                        instances = source.read(angle)
+                    else:
+                        # Its prompt masks stay, and SAM's masks of the others
+                        # are replaced by what it found now.
+                        instances = [
+                            i for i in source.read(angle) if (i["class"], i["id"]) in keys
+                        ] + [i for i in found if (i["class"], i["id"]) not in keys]
                 else:
-                    instances = [
-                        make_instance(label, number, rotate_mask(mask, angle) if angle else mask)
-                        for (label, number), mask in sorted(results[frame].items())
-                    ]
+                    instances = found
                 box = rois.get(name, str(frame))
                 instances = clip_instances(instances, box)
                 mask_set = MaskSet(sam_root, frame)
@@ -3118,9 +3189,8 @@ class MainWindow(QMainWindow):
                     mask_set.remove()
                     log.remove(name, frame)
                 count += 1
-            save_prompt_frames(
-                sam_root, set(sources), propagated=set(sources) if complete else None
-            )
+            record = prompt_record(sources)
+            save_prompts(sam_root, record, propagated=record if complete else None)
         except OSError as exc:
             QMessageBox.warning(self, "Save error", str(exc))
         try:
@@ -4104,7 +4174,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Save error", str(exc))
                 return
             self._forget_measurement(self._video_output_dir, name, frame)
-            self._change_sam_prompt_frames(mask_set.folder, remove={frame})
+            self._drop_sam_prompts(mask_set.folder, {frame})
 
     def _update_navigation_buttons(self):
         is_video = self._mode == "video"
@@ -4985,6 +5055,20 @@ class VideoBatchProgressDialog(QDialog):
         if not self._finished and not self._cancel_requested:
             self._request_cancel()
         super().closeEvent(event)
+
+
+def stored_masks(mask_set, angle=0.0):
+    """{(label, number): mask} of the saved files of a mask set, turned by angle."""
+    return {
+        (instance["class"], instance["id"]): instance["mask"] > 0
+        for instance in mask_set.read(angle)
+    }
+
+
+def prompt_record(sources):
+    """{frame: keys} of the sources _sam_prompts_of gives, as save_prompts
+    keeps them."""
+    return {frame: keys for frame, (_, keys) in sources.items()}
 
 
 def merge_single_structures(prompts):

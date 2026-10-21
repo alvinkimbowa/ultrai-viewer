@@ -17,6 +17,8 @@ from pathlib import Path
 
 import cv2
 
+from .instances import clean_class
+
 SAM_MODEL_NAME = "sam3.1"
 SAM_MODEL_LABEL = "SAM 3.1"
 WORKER = Path(__file__).with_name("sam_worker.py")
@@ -53,37 +55,62 @@ def _read_prompts_file(folder):
         return None
 
 
-def load_prompt_frames(folder):
-    """The frames of a video whose masks SAM propagates from, as kept in its
-    results folder, or None while none are kept.
+def _prompts_from(frames, masks):
+    """{frame: None, or the set of (label, number) of the masks that prompt}
+    from the lists kept in a prompts file."""
+    prompts = {}
+    for frame in frames:
+        keys = masks.get(str(int(frame)))
+        prompts[int(frame)] = (
+            None if keys is None else {(clean_class(label), int(number)) for label, number in keys}
+        )
+    return prompts
 
-    The other frames there hold what SAM found, which must not prompt it again.
+
+def _prompts_lists(prompts):
+    """The frames and masks lists of a prompts file, from {frame: keys}."""
+    frames = sorted(int(frame) for frame in prompts)
+    masks = {
+        str(frame): sorted([label, int(number)] for label, number in prompts[frame])
+        for frame in frames
+        if prompts[frame] is not None
+    }
+    return frames, masks
+
+
+def load_prompts(folder):
+    """The masks of a video that SAM propagates from, as kept in its results
+    folder: {frame: None when every mask on the frame prompts, else the set of
+    (label, number) of those that do}. None while none are kept.
+
+    The other masks there are what SAM found, which must not prompt it again.
     """
     data = _read_prompts_file(folder)
     if data is None:
         return None
-    return {int(frame) for frame in data.get("frames", [])}
+    return _prompts_from(data.get("frames", []), data.get("masks", {}))
 
 
-def load_propagated_frames(folder):
-    """The prompt frames of the last propagation of a video that was saved in
-    full, or None when none was."""
+def load_propagated(folder):
+    """The prompts, as load_prompts gives them, of the last propagation of a
+    video that was saved in full, or None when none was."""
     data = _read_prompts_file(folder)
     if data is None or "propagated" not in data:
         return None
-    return {int(frame) for frame in data["propagated"]}
+    return _prompts_from(data["propagated"], data.get("propagated_masks", {}))
 
 
-def save_prompt_frames(folder, frames, propagated=None):
-    """Keep a video's prompt frames, and, given propagated, the prompt frames of
-    a propagation just saved in full; otherwise those kept stay."""
+def save_prompts(folder, prompts, propagated=None):
+    """Keep a video's prompts, and, given propagated, the prompts of a
+    propagation just saved in full; otherwise those kept stay."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    data = {"frames": sorted(int(f) for f in frames)}
+    frames, masks = _prompts_lists(prompts)
+    data = {"frames": frames, "masks": masks}
     if propagated is None:
-        propagated = load_propagated_frames(folder)
+        propagated = load_propagated(folder)
     if propagated is not None:
-        data["propagated"] = sorted(int(f) for f in propagated)
+        data["propagated"], data["propagated_masks"] = _prompts_lists(propagated)
     (folder / PROMPTS_FILE_NAME).write_text(json.dumps(data), encoding="utf-8")
 
 
