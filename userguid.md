@@ -37,6 +37,8 @@ Scroll, use the arrow keys, or **Prev** / **Next** to move between images and fr
 
 A model that segments one structure labels its masks with the nerve picked, or **Median** when none is picked. The model's masks replace masks of the same label; masks of other labels stay.
 
+A video model, such as V-JEPA, reads 16 frames at a time, so a frame is segmented from the frames around it. Segmenting one frame reads its neighbours too, and gives the same masks as segmenting the whole video. On a single image, it treats the image as a still video.
+
 ## Propagate masks with SAM 3.1
 
 **SAM 3.1** appears under **Model** on a computer set up with Meta's SAM 3 code and an NVIDIA GPU. It spreads the masks of a few frames of a video over the rest of it.

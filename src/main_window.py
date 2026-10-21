@@ -61,7 +61,7 @@ from .instances import (
 )
 from .labels import LabelChips, NerveManifest
 from .theme import TEXT, TEXT_DISABLED
-from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
+from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING, clip_starts
 from .rois import RoiStore
 from .measurements import (
     MEASUREMENTS_FILE_NAME,
@@ -86,7 +86,7 @@ from .sam_integration import (
 from .sam_plan import propagation_steps
 from threading import Event, Thread
 from typing import NamedTuple
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import html
 import time
 from pathlib import Path
@@ -4864,8 +4864,17 @@ class MainWindow(QMainWindow):
         self._inference_target = self._frame_target()
         self._inference_classes = (self._model.class_names(), self._model_default_class())
         self._inference_box = box_to_segment(self.canvas.image, self.canvas.roi_box())
+        video = None
+        if self._mode == "video" and self._video_path:
+            video = (
+                self._video_path,
+                self._video_frame_index,
+                self._video_frame_count,
+                self._shown_angle,
+                self._inference_box,
+            )
         self._inference_worker = InferenceWorker(
-            self._model, crop_to_box(self.canvas.image, self._inference_box)
+            self._model, crop_to_box(self.canvas.image, self._inference_box), video
         )
         self._inference_worker.moveToThread(self._inference_thread)
         self._inference_thread.started.connect(self._inference_worker.run)
@@ -5264,13 +5273,18 @@ def merge_single_structures(prompts):
     return merged
 
 
-def segment_into(model, image, box, mask_set, angle, stored_shape, default_class, cancel_event):
+def segment_into(
+    model, image, box, mask_set, angle, stored_shape, default_class, cancel_event,
+    prediction=None,
+):
     """Segment an image as viewed and save the masks into a mask set.
 
     The masks of the labels the model segments replace those saved; masks of
-    other labels stay. Returns every mask the image or frame then has.
+    other labels stay. Returns every mask the image or frame then has. A
+    prediction already made of the image is used instead of running the model.
     """
-    prediction = model.run_inference(crop_to_box(image, box), cancel_event=cancel_event)
+    if prediction is None:
+        prediction = model.run_inference(crop_to_box(image, box), cancel_event=cancel_event)
     if cancel_event.is_set():
         raise RuntimeError("Inference canceled.")
     labels = place_prediction(prediction, image, box)
@@ -5294,14 +5308,69 @@ class InferenceWorker(QObject):
     canceled = pyqtSignal()
     error = pyqtSignal(str)
 
-    def __init__(self, model, image):
+    def __init__(self, model, image, video=None):
         super().__init__()
         self._model = model
         self._image = image
+        # (path, frame index, frame count, angle, box) of a video frame, read
+        # with the frames around it by a model that reads clips.
+        self._video = video
         self._cancel_event = Event()
 
     def cancel(self):
         self._cancel_event.set()
+
+    def _predict_video_frame(self, length):
+        """The prediction of a video frame from the clips holding it, the same
+        windows a batch run over the whole video reads it in."""
+        path, frame_index, frame_count, angle, box = self._video
+        starts = [
+            start
+            for start in clip_starts(frame_count, length, max(1, length // 2))
+            if start <= frame_index < start + length
+        ]
+        first, stop = starts[0], starts[-1] + length
+        prediction, short = self._predict_from(first, stop, length)
+        if short and first:
+            # A video holding fewer frames than it claims ends its last window
+            # earlier than the claimed count puts it, so the frame is read again
+            # from far enough back to take part in that window.
+            prediction, _ = self._predict_from(max(0, first - length), stop, length)
+        if prediction is None:
+            raise RuntimeError(f"Could not decode frame {frame_index}.")
+        return prediction
+
+    def _predict_from(self, first, stop, length):
+        """(prediction of the frame, whether the video ended before stop), the
+        frames from first to stop read as a video of their own."""
+        path, frame_index, _, angle, box = self._video
+        capture = open_capture(path)
+        short = False
+        try:
+            # Frames are stepped through rather than sought, as seeking in some
+            # videos lands a frame off.
+            for _ in range(first):
+                if not capture.grab():
+                    return None, True
+
+            def frames():
+                nonlocal short
+                for _ in range(first, stop):
+                    success, frame = capture.read()
+                    if not success or frame is None:
+                        short = True
+                        return
+                    if frame.ndim == 3 and frame.shape[2] == 3:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    yield crop_to_box(rotate_image(frame, angle), box)
+
+            predictions = self._model.segment_video(frames(), self._cancel_event)
+            for index, prediction in enumerate(predictions, start=first):
+                if index == frame_index:
+                    return prediction, short
+        finally:
+            capture.release()
+        return None, short
 
     @pyqtSlot()
     def run(self):
@@ -5309,10 +5378,14 @@ class InferenceWorker(QObject):
             self.canceled.emit()
             return
         try:
-            prediction = self._model.run_inference(
-                self._image,
-                cancel_event=self._cancel_event,
-            )
+            length = self._video is not None and self._model.clip_length()
+            if length:
+                prediction = self._predict_video_frame(length)
+            else:
+                prediction = self._model.run_inference(
+                    self._image,
+                    cancel_event=self._cancel_event,
+                )
         except Exception as exc:
             if str(exc).lower().startswith("inference canceled"):
                 self.canceled.emit()
@@ -5505,6 +5578,41 @@ class VideoBatchInferenceWorker(QObject):
         self.saved = set()
         self._cancel_event = Event()
 
+    def _video_frames(self, capture, video_name, frame_count, angle):
+        """(frame index, image as segmented, stored shape, box to segment) of
+        each frame in turn, up to the first that does not decode."""
+        for frame_index in range(frame_count):
+            success, frame = capture.read()
+            if not success or frame is None:
+                return
+            if frame.ndim == 3 and frame.shape[2] == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = rotate_image(frame, angle)
+            box = box_to_segment(image, self._rois.get((video_name, str(frame_index))))
+            yield frame_index, image, frame.shape[:2], box
+
+    def _segmented_frames(self, capture, video_name, frame_count, angle):
+        """The frames of _video_frames, each with the prediction of a model that
+        reads clips, or None for segment_into to run a model of single images.
+
+        A model that reads clips is given every frame, as the frames around one
+        shape its prediction, so it runs ahead of the frames handed out.
+        """
+        frames = self._video_frames(capture, video_name, frame_count, angle)
+        if not self._model.clip_length():
+            for frame in frames:
+                yield (*frame, None)
+            return
+        pending = deque()
+
+        def crops():
+            for frame in frames:
+                pending.append(frame)
+                yield crop_to_box(frame[1], frame[3])
+
+        for prediction in self._model.segment_video(crops(), self._cancel_event):
+            yield (*pending.popleft(), prediction)
+
     def cancel(self):
         self._cancel_event.set()
 
@@ -5542,8 +5650,13 @@ class VideoBatchInferenceWorker(QObject):
                 video_output_dir.mkdir(parents=True, exist_ok=True)
                 annotated = annotated_frames(video_output_dir)
                 side, location = self._file_labels.get(video_name, (None, None))
+                angle = self._rotations.get(video_name, 0.0)
+                read = 0
                 try:
-                    for frame_index in range(frame_count):
+                    for frame_index, image, stored_shape, box, prediction in (
+                        self._segmented_frames(capture, video_name, frame_count, angle)
+                    ):
+                        read = frame_index + 1
                         if self._cancel_event.is_set():
                             self.canceled.emit()
                             return
@@ -5555,33 +5668,15 @@ class VideoBatchInferenceWorker(QObject):
                             total_frames,
                         )
                         mask_set = MaskSet(video_output_dir, frame_index)
-                        success, frame = capture.read()
-                        if not success or frame is None:
-                            # Some containers report more frames than they
-                            # hold; nothing past a failed sequential read can
-                            # be decoded, so the video ends here.
-                            total_frames -= frame_count - frame_index
-                            self.progress.emit(processed + skipped, total_frames)
-                            break
                         if not self._overwrite_existing and frame_index in annotated:
                             skipped += 1
                             self.progress.emit(processed + skipped, total_frames)
                             self.frame_progress.emit(frame_index + 1, frame_count)
                             continue
-                        if frame.ndim == 3 and frame.shape[2] == 3:
-                            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        else:
-                            image = frame
-                        angle = self._rotations.get(video_name, 0.0)
-                        stored_shape = image.shape[:2]
-                        image = rotate_image(image, angle)
-                        box = box_to_segment(
-                            image, self._rois.get((video_name, str(frame_index)))
-                        )
                         self.started.add((video_path, frame_index))
                         instances = segment_into(
                             self._model, image, box, mask_set, angle, stored_shape,
-                            self._default_class, self._cancel_event,
+                            self._default_class, self._cancel_event, prediction,
                         )
                         self.saved.add((video_path, frame_index))
                         measurement_log.set(
@@ -5599,6 +5694,12 @@ class VideoBatchInferenceWorker(QObject):
                         self.frame_segmented.emit(video_path, frame_index)
                         self.progress.emit(processed + skipped, total_frames)
                         self.frame_progress.emit(frame_index + 1, frame_count)
+                    if read < frame_count:
+                        # Some containers report more frames than they hold;
+                        # nothing past a failed sequential read can be
+                        # decoded, so the video ends there.
+                        total_frames -= frame_count - read
+                        self.progress.emit(processed + skipped, total_frames)
                 finally:
                     capture.release()
                     # The rows go into the file as it is on disk, keeping any row

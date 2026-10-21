@@ -5,6 +5,10 @@ A model with a one-channel input is fed a min-max scaled grey image; one with a
 three-channel input is taken to be a DINOv3 model and fed an RGB image prepared
 as DINOv3 was trained. Either returns the class index of each pixel, covering
 the whole image given, for the caller to resize onto it.
+
+A model whose input is (1, T, C, H, W) reads a clip of T video frames, each
+prepared as a single image would be, and gives the class scores of every frame
+of it; see segment_video.
 """
 
 import os
@@ -13,6 +17,18 @@ import json
 import contextlib
 import numpy as np
 import cv2
+
+
+def clip_starts(n_frames: int, length: int, stride: int) -> list[int]:
+    """Where windows of length frames start so that, stride apart, they cover
+    all n_frames, the last one moved back to end on the last frame. A video
+    shorter than a window has one window, at its start."""
+    if n_frames <= length:
+        return [0]
+    starts = list(range(0, n_frames - length + 1, stride))
+    if starts[-1] != n_frames - length:
+        starts.append(n_frames - length)
+    return starts
 
 
 GPU_FALLBACK_WARNING = (
@@ -195,8 +211,25 @@ class ModelIntegration:
     def preload(self) -> bool:
         return self._ensure_session() is not None
 
-    def _model_input_hw(self, session) -> tuple[int, int]:
+    def _image_input_shape(self, session) -> list:
+        """The model's input shape as (batch, channels, height, width), leaving
+        out the frames axis of a model that reads clips."""
+        shape = list(session.get_inputs()[0].shape)
+        return shape[:1] + shape[2:] if len(shape) == 5 else shape
+
+    def clip_length(self) -> int | None:
+        """The number of frames a model that reads clips takes at once, or None
+        for a model of single images. Loads the model."""
+        session = self._ensure_session()
+        if session is None:
+            return None
         shape = session.get_inputs()[0].shape
+        if len(shape) == 5 and isinstance(shape[1], int) and shape[1] > 0:
+            return shape[1]
+        return None
+
+    def _model_input_hw(self, session) -> tuple[int, int]:
+        shape = self._image_input_shape(session)
         height = shape[2] if len(shape) > 2 and isinstance(shape[2], int) else None
         width = shape[3] if len(shape) > 3 and isinstance(shape[3], int) else None
         if not height or not width:
@@ -205,7 +238,7 @@ class ModelIntegration:
         return height, width
 
     def _model_channels(self, session) -> int:
-        shape = session.get_inputs()[0].shape
+        shape = self._image_input_shape(session)
         channels = shape[1] if len(shape) > 1 else None
         return channels if isinstance(channels, int) else 1
 
@@ -334,6 +367,9 @@ class ModelIntegration:
         session = self._ensure_session()
         if session is None:
             raise RuntimeError("Model session is not available.")
+        if self.clip_length():
+            # A still image is read as a clip of that image alone.
+            return next(self.segment_video([image], cancel_event))
         model_input, part = self._prepare_input(image, session)
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Inference canceled.")
@@ -345,3 +381,75 @@ class ModelIntegration:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Inference canceled.")
         return self._postprocess(outputs[0], self._model_input_hw(session), part)
+
+    def segment_video(self, frames, cancel_event=None):
+        """Yield the class index of each pixel of every frame of a video, in
+        order, from a model that reads clips.
+
+        frames is an iterable of the video's images, each as run_inference
+        takes one. The video is read in windows of clip_length() frames, half a
+        window apart, the last one ending on the last frame, and a frame takes
+        the mean of the class probabilities every window holding it gave it.
+        A video shorter than a window is filled out with its last frame.
+        """
+        session = self._ensure_session()
+        if session is None:
+            raise RuntimeError("Model session is not available.")
+        length = self.clip_length()
+        if not length:
+            raise RuntimeError("The model does not read video clips.")
+        stride = max(1, length // 2)
+        input_hw = self._model_input_hw(session)
+        inputs, parts, totals, counts = {}, {}, {}, {}
+        state = {"next": 0, "last_start": None}
+
+        def run_window(start, stop):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Inference canceled.")
+            window = [inputs[index] for index in range(start, stop)]
+            window += [window[-1]] * (length - len(window))
+            input_name = session.get_inputs()[0].name
+            with self._redirect_stderr_to_log():
+                outputs = session.run(None, {input_name: np.stack(window)[None]})
+            if not outputs:
+                raise RuntimeError("Model returned no outputs.")
+            scores = np.asarray(outputs[0], dtype=np.float32)[0]
+            if scores.shape[1] > 1:
+                scores = np.exp(scores - scores.max(axis=1, keepdims=True))
+                probabilities = scores / scores.sum(axis=1, keepdims=True)
+            else:
+                probabilities = 1.0 / (1.0 + np.exp(-scores))
+            for index in range(start, stop):
+                frame = probabilities[index - start]
+                totals[index] = totals[index] + frame if index in totals else frame
+                counts[index] = counts.get(index, 0) + 1
+            state["last_start"] = start
+
+        def finished(upto):
+            while state["next"] < upto:
+                index = state["next"]
+                mean = totals.pop(index) / counts.pop(index)
+                labels = self._postprocess(mean, input_hw, parts.pop(index))
+                inputs.pop(index, None)
+                state["next"] += 1
+                yield labels
+
+        count = 0
+        for index, image in enumerate(frames):
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("Inference canceled.")
+            model_input, parts[index] = self._prepare_input(image, session)
+            inputs[index] = model_input[0]
+            count = index + 1
+            start = count - length
+            if start >= 0 and start % stride == 0:
+                run_window(start, count)
+                # Only the window ending on the last frame starts between this
+                # one and the next, so frames up to this start are complete.
+                yield from finished(start + 1)
+        if not count:
+            return
+        last_start = max(0, count - length)
+        if state["last_start"] != last_start:
+            run_window(last_start, count)
+        yield from finished(count)
