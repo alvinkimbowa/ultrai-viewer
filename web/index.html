@@ -30,13 +30,14 @@
             <option value="select">Select</option>
             <option value="freehand" selected>Freehand Line</option>
             <option value="polygon">Segmented Line</option>
+            <option value="brush">Paint Brush</option>
             <option value="eraser">Eraser</option>
           </select>
         </label>
         <label><input id="showMasks" type="checkbox" checked> Show masks</label>
         <label><input id="fillMasks" type="checkbox"> Fill masks</label>
         <label>Opacity <input id="opacity" type="range" min="0" max="100" value="50"></label>
-        <label>Eraser radius <input id="radius" type="range" min="1" max="50" value="4"></label>
+        <label>Tool radius <input id="radius" type="range" min="1" max="50" value="4"></label>
         <button id="fit">Fit to window</button>
         <div class="row"><button id="undo">Undo</button><button id="redo">Redo</button></div>
         <button id="clearMasks">Clear masks</button>

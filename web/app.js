@@ -8,6 +8,19 @@ const TOOL_SETTINGS_KEY = "ultrai-tool-settings";
 const REMEMBER_OUTPUT_KEY = "ultrai-remember-output";
 const $ = (id) => document.getElementById(id);
 const canvas = $("canvas");
+// Each cursor is drawn to a PNG at load and handed to the stylesheet as a CSS variable; the
+// numbers are the hotspot, the pixel of the icon that sits on the pointer.
+const TOOL_CURSORS = {
+  brush: {x: 2, y: 26, svg: "<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'><path d='M26 2 15 15' stroke='#000' stroke-width='5' stroke-linecap='round'/><path d='M26 2 15 15' stroke='#c8873a' stroke-width='3' stroke-linecap='round'/><path d='m13 13 3 3-2 2-3-3z' fill='#ccc' stroke='#000' stroke-width='1.5' stroke-linejoin='round'/><path d='M11 15c-3-1-6 1-6 4 0 2-1 4-3 7 4 0 9-1 11-4 1-2 0-4-2-7z' fill='#fff' stroke='#000' stroke-width='1.5' stroke-linejoin='round'/></svg>"},
+  eraser: {x: 7, y: 21, svg: "<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'><g transform='rotate(-45 14 14)' stroke='#000' stroke-width='1.5' stroke-linejoin='round'><rect x='4' y='9' width='20' height='10' rx='2' fill='#f28ca0'/><rect x='4' y='9' width='7' height='10' rx='2' fill='#fff'/></g></svg>"},
+};
+function loadToolCursors(){
+  for(const [tool,cursor] of Object.entries(TOOL_CURSORS)){
+    const image=new Image();
+    image.onload=()=>{const out=document.createElement("canvas");out.width=28;out.height=28;out.getContext("2d").drawImage(image,0,0);canvas.style.setProperty(`--${tool}-cursor`,`url(${out.toDataURL("image/png")}) ${cursor.x} ${cursor.y}, default`);};
+    image.src=`data:image/svg+xml,${encodeURIComponent(cursor.svg)}`;
+  }
+}
 const ctx = canvas.getContext("2d");
 const video = $("video");
 
@@ -115,7 +128,7 @@ function rebuildChips(containerId, labels, kind) {
     button.dataset.value=label;
     button.addEventListener("click",()=>{
       if(kind==="location") { state.location=label;state.outputPromptReady=true;if(mediaItem())mediaItem().location=label; }
-      else { state.activeClass=label; }
+      else { state.activeClass=label;state.selectedInstance=null;render(); }
       updateChipSelection();if(kind==="location")queueAutoSave();
     }); holder.appendChild(button);
   }
@@ -281,7 +294,7 @@ function clampView(){
 }
 function toImagePoint(event){const rect=canvas.getBoundingClientRect();const x=(event.clientX-rect.left-state.offsetX)/state.scale,y=(event.clientY-rect.top-state.offsetY)/state.scale;if(x<0||y<0||x>=state.sourceWidth||y>=state.sourceHeight)return null;return{x:Math.floor(x),y:Math.floor(y)};}
 function render(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle="#252525";ctx.fillRect(0,0,canvas.width,canvas.height);const item=mediaItem();if(!item)return;
+  canvas.dataset.tool=$("tool").value;state.labelBoxes=[];ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle="#252525";ctx.fillRect(0,0,canvas.width,canvas.height);const item=mediaItem();if(!item)return;
   const source=item.type==="video"?video:item.element; if(source)ctx.drawImage(source,state.offsetX,state.offsetY,state.sourceWidth*state.scale,state.sourceHeight*state.scale);
   if($("showMasks").checked&&sliderPreviewFrame===null)renderInstances();renderWorkingLine();renderEraserOutline();
 }
@@ -307,6 +320,7 @@ function renderInstanceLabels(){
     const minX=imageLeft+width/2,maxX=imageLeft+imageWidth-width/2,minY=imageTop+height/2,maxY=imageTop+imageHeight-height/2;
     let x=imageLeft+(anchor.x+.5)*state.scale,y=imageTop+(anchor.y+.5)*state.scale;
     x=minX<=maxX?Math.max(minX,Math.min(maxX,x)):imageLeft+imageWidth/2;y=minY<=maxY?Math.max(minY,Math.min(maxY,y)):imageTop+imageHeight/2;
+    state.labelBoxes.push({index,left:x-width/2,top:y-height/2,width,height});
     drawRoundedRect(ctx,x-width/2,y-height/2,width,height,5);ctx.fillStyle="rgba(20, 27, 34, .9)";ctx.fill();ctx.lineWidth=index===selectedIndex?2:1.5;ctx.strokeStyle=index===selectedIndex?"#fff":classColor(instance.className);ctx.stroke();ctx.fillStyle="#fff";ctx.fillText(text,x,y+.5);
   });
   ctx.restore();
@@ -328,7 +342,7 @@ function renderInstances(){
 }
 function renderWorkingLine(){if(state.points.length<1)return;ctx.strokeStyle=state.activeClass?classColor(state.activeClass):"#00ff00";ctx.lineWidth=2;ctx.beginPath();state.points.forEach((p,i)=>{const x=state.offsetX+p.x*state.scale,y=state.offsetY+p.y*state.scale;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}
 function renderEraserOutline(){
-  if($("tool").value!=="eraser"||!state.eraserCursor)return;const x=state.offsetX+state.eraserCursor.x*state.scale,y=state.offsetY+state.eraserCursor.y*state.scale,r=Number($("radius").value)*state.scale;ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle="#000";ctx.lineWidth=3;ctx.stroke();ctx.strokeStyle="#fff";ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
+  if(!["eraser","brush"].includes($("tool").value)||!state.eraserCursor)return;const x=state.offsetX+state.eraserCursor.x*state.scale,y=state.offsetY+state.eraserCursor.y*state.scale,r=Number($("radius").value)*state.scale;ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle="#000";ctx.lineWidth=3;ctx.stroke();ctx.strokeStyle="#fff";ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
 }
 
 function maskFromPolygon(points){
@@ -337,10 +351,15 @@ function maskFromPolygon(points){
 }
 function completePolygon(){
   if(state.points.length<3)return cancelDrawing();if(!state.activeClass){alert("Select a nerve or other anatomy before drawing.");return cancelDrawing();}
-  const id=allocateInstanceId(state.activeClass);
-  instances().push({className:state.activeClass,id,mask:maskFromPolygon(state.points)});state.points=[];state.drawing=false;state.outputPromptReady=true;pushHistory();render();status(`Created ${state.activeClass} ${id}`);queueAutoSave();
+  const region=maskFromPolygon(state.points),target=selectedInstanceIndex();let message;
+  if(target>=0){const item=instances()[target];for(let i=0;i<region.length;i++)if(region[i])item.mask[i]=1;message=`Extended ${item.className} ${item.id}`;}
+  else{const id=allocateInstanceId(state.activeClass);instances().push({className:state.activeClass,id,mask:region});message=`Created ${state.activeClass} ${id}`;}
+  state.points=[];state.drawing=false;state.outputPromptReady=true;pushHistory();render();status(message);queueAutoSave();
 }
 function cancelDrawing(){state.points=[];state.drawing=false;render();}
+// Name tags are hit-tested in canvas pixels, topmost first, from the boxes recorded by the last render.
+function hitLabel(event){const rect=canvas.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;for(let i=(state.labelBoxes||[]).length-1;i>=0;i--){const box=state.labelBoxes[i];if(x>=box.left&&x<=box.left+box.width&&y>=box.top&&y<=box.top+box.height)return box.index;}return-1;}
+function startMove(index,p){selectInstance(index);state.moving=true;state.moveChanged=false;state.moveIndex=index;state.moveAnchor=p;state.moveOriginal=new Uint8Array(instances()[index].mask);}
 function hitInstance(point){for(let i=instances().length-1;i>=0;i--){if(instances()[i].mask[point.y*state.sourceWidth+point.x])return i;}return-1;}
 function selectedInstanceIndex(){const selected=state.selectedInstance;if(!selected||selected.key!==annotationKey())return-1;return instances().findIndex(item=>item.className===selected.className&&item.id===selected.id);}
 function selectInstance(index){const item=instances()[index];if(!item)return;state.selectedInstance={key:annotationKey(),className:item.className,id:item.id};state.activeClass=item.className;updateChipSelection();status(`Selected ${item.className} ${item.id}`);render();}
@@ -371,28 +390,47 @@ function relabelSelectedInstance(className){
 }
 function deleteSelectedInstance(){const index=selectedInstanceIndex();if(index<0)return false;const [removed]=instances().splice(index,1);state.selectedInstance=null;hideMaskContextMenu();stageRemoval(removed.className,removed.id);pushHistory();render();status(`Deleted ${removed.className} ${removed.id}`);queueAutoSave();return true;}
 function translateMask(mask,dx,dy){const moved=new Uint8Array(mask.length);for(let y=0;y<state.sourceHeight;y++)for(let x=0;x<state.sourceWidth;x++){if(!mask[y*state.sourceWidth+x])continue;const nx=x+dx,ny=y+dy;if(nx>=0&&ny>=0&&nx<state.sourceWidth&&ny<state.sourceHeight)moved[ny*state.sourceWidth+nx]=1;}return moved;}
-function eraseLine(a,b){
+function stampLine(a,b,value,masks){
   const radius=Number($("radius").value),steps=Math.max(1,Math.ceil(Math.hypot(b.x-a.x,b.y-a.y)));
-  for(let step=0;step<=steps;step++){const cx=Math.round(a.x+(b.x-a.x)*step/steps),cy=Math.round(a.y+(b.y-a.y)*step/steps);for(let y=Math.max(0,cy-radius);y<=Math.min(state.sourceHeight-1,cy+radius);y++)for(let x=Math.max(0,cx-radius);x<=Math.min(state.sourceWidth-1,cx+radius);x++)if((x-cx)**2+(y-cy)**2<=radius**2)for(const item of instances())item.mask[y*state.sourceWidth+x]=0;}
+  for(let step=0;step<=steps;step++){const cx=Math.round(a.x+(b.x-a.x)*step/steps),cy=Math.round(a.y+(b.y-a.y)*step/steps);for(let y=Math.max(0,cy-radius);y<=Math.min(state.sourceHeight-1,cy+radius);y++)for(let x=Math.max(0,cx-radius);x<=Math.min(state.sourceWidth-1,cx+radius);x++)if((x-cx)**2+(y-cy)**2<=radius**2)for(const mask of masks)mask[y*state.sourceWidth+x]=value;}
+}
+function eraseLine(a,b){stampLine(a,b,0,instances().map(x=>x.mask));}
+// The brush paints into the selected mask, or into a new mask of the active label when none is selected.
+function beginBrush(p){
+  let target=selectedInstanceIndex();
+  if(target<0){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}const id=allocateInstanceId(state.activeClass);instances().push({className:state.activeClass,id,mask:new Uint8Array(state.sourceWidth*state.sourceHeight)});target=instances().length-1;selectInstance(target);}
+  state.drawing=true;state.lastPointer=p;state.eraserCursor=p;stampLine(p,p,1,[instances()[target].mask]);render();
+}
+function brushTo(p){const target=selectedInstanceIndex();if(target>=0)stampLine(state.lastPointer,p,1,[instances()[target].mask]);state.lastPointer=p;render();}
+function endBrush(){
+  state.drawing=false;const before=instances(),after=before.filter(x=>x.mask.some(Boolean));stageRemovals(before,after);state.instancesByKey.set(annotationKey(),after);
+  state.outputPromptReady=true;pushHistory();render();queueAutoSave();
 }
 canvas.addEventListener("pointerdown",(event)=>{
   if(event.button!==0)return;hideMaskContextMenu();const p=toImagePoint(event);if(!p)return;canvas.setPointerCapture(event.pointerId);const tool=$("tool").value;
-  const index=tool!=="eraser"&&!(tool==="polygon"&&state.drawing)?hitInstance(p):-1;
-  if(index>=0){selectInstance(index);state.moving=true;state.moveChanged=false;state.moveIndex=index;state.moveAnchor=p;state.moveOriginal=new Uint8Array(instances()[index].mask);}
+  const tagged=hitLabel(event);if(tagged>=0){startMove(tagged,p);return;}
+  // Drawing tools pick a mask on a press over one that isn't selected; a press anywhere else draws,
+  // so a drag inside the selected mask grows it. Masks are moved only with the Select tool.
+  const selected=selectedInstanceIndex(),onSelected=selected>=0&&instances()[selected].mask[p.y*state.sourceWidth+p.x];
+  const index=tool==="eraser"||(tool==="polygon"&&state.drawing)?-1:(onSelected?selected:hitInstance(p));
+  if(index>=0&&tool!=="select"&&index!==selected){selectInstance(index);return;}
+  if(index>=0&&tool==="select")startMove(index,p);
   else if(tool==="select"){state.selectedInstance=null;render();return;}
   else if(tool==="freehand"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.drawing=true;state.points=[p];}
   else if(tool==="polygon"){if(!state.activeClass){alert("Select a nerve or other anatomy first.");return;}state.points.push(p);state.drawing=true;render();}
+  else if(tool==="brush")beginBrush(p);
   else if(tool==="eraser"){state.drawing=true;state.lastPointer=p;state.eraserCursor=p;eraseLine(p,p);render();}
 });
 canvas.addEventListener("pointermove",(event)=>{
-  const tool=$("tool").value,p=toImagePoint(event);if(tool==="eraser")state.eraserCursor=p;if(!p){render();return;}
+  const tool=$("tool").value,p=toImagePoint(event);const overLabel=!state.drawing&&!state.moving&&hitLabel(event)>=0;canvas.toggleAttribute("data-over-label",overLabel);const circle=(tool==="eraser"||tool==="brush")&&!overLabel&&!state.moving;state.eraserCursor=circle?p:null;if(!p){render();return;}
   if(state.moving){const dx=p.x-state.moveAnchor.x,dy=p.y-state.moveAnchor.y;state.moveChanged=state.moveChanged||dx!==0||dy!==0;instances()[state.moveIndex].mask=translateMask(state.moveOriginal,dx,dy);render();}
   else if(state.drawing&&tool==="freehand"){state.points.push(p);render();}
+  else if(state.drawing&&tool==="brush")brushTo(p);
   else if(state.drawing&&tool==="eraser"){eraseLine(state.lastPointer,p);state.lastPointer=p;render();}
-  else if(tool==="eraser")render();
+  else if(tool==="eraser"||tool==="brush")render();
 });
 canvas.addEventListener("pointerleave",()=>{if(!state.drawing&&state.eraserCursor){state.eraserCursor=null;render();}});
-canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;const before=instances(),after=before.filter(x=>x.mask.some(Boolean));stageRemovals(before,after);state.instancesByKey.set(annotationKey(),after);pushHistory();render();queueAutoSave();}});
+canvas.addEventListener("pointerup",()=>{const tool=$("tool").value;if(state.moving){state.moving=false;if(state.moveChanged){pushHistory();queueAutoSave();}state.moveChanged=false;render();}else if(state.drawing&&tool==="freehand")completePolygon();else if(state.drawing&&tool==="brush")endBrush();else if(state.drawing&&tool==="eraser"){state.drawing=false;state.selectedInstance=null;const before=instances(),after=before.filter(x=>x.mask.some(Boolean));stageRemovals(before,after);state.instancesByKey.set(annotationKey(),after);pushHistory();render();queueAutoSave();}});
 canvas.addEventListener("dblclick",()=>{if($("tool").value==="polygon")completePolygon();});
 canvas.addEventListener("contextmenu",(event)=>{event.preventDefault();const point=toImagePoint(event),index=point?hitInstance(point):-1;if(index>=0){selectInstance(index);showMaskContextMenu(event);}else{hideMaskContextMenu();if($("tool").value==="polygon")completePolygon();}});
 canvas.addEventListener("wheel",(event)=>{if(!mediaItem())return;event.preventDefault();if(event.ctrlKey){const old=state.scale;state.scale=Math.max(.1,Math.min(10,state.scale*(event.deltaY<0?1.1:.9)));const rect=canvas.getBoundingClientRect(),mx=event.clientX-rect.left,my=event.clientY-rect.top;state.offsetX=mx-(mx-state.offsetX)*state.scale/old;state.offsetY=my-(my-state.offsetY)*state.scale/old;state.fit=false;clampView();render();}else if(event.deltaY!==0)queueWheelStep(Math.sign(event.deltaY));},{passive:false});
@@ -497,7 +535,7 @@ $("fit").onclick=()=>{fitView();render();};$("undo").onclick=undo;$("redo").oncl
 for(const id of ["showMasks","fillMasks","opacity"])$(id).oninput=()=>{saveToolSettings();render();};$("radius").oninput=()=>{saveToolSettings();render();};$("tool").onchange=render;$("addLocation").onclick=()=>addLabel("location");$("addNerve").onclick=()=>addLabel("nerve");$("addAnatomy").onclick=()=>addLabel("anatomy");
 $("deleteMask").onclick=deleteSelectedInstance;$("maskClass").onchange=event=>relabelSelectedInstance(event.target.value);document.addEventListener("pointerdown",event=>{if(!$("maskContextMenu").contains(event.target))hideMaskContextMenu();});
 video.addEventListener("seeked",()=>{if(sliderPreviewFrame!==null)render();});
-document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")queueWheelStep(-1);else if(event.key==="ArrowRight")queueWheelStep(1);else if(event.key==="Escape"){hideMaskContextMenu();cancelDrawing();}});
+document.addEventListener("keydown",(event)=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="z"){event.preventDefault();event.shiftKey?redo():undo();}else if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="y"){event.preventDefault();redo();}else if(event.key==="Delete"&&!/^(INPUT|SELECT|TEXTAREA)$/.test(event.target.tagName)){if(deleteSelectedInstance())event.preventDefault();}else if(event.key==="ArrowLeft")queueWheelStep(-1);else if(event.key==="ArrowRight")queueWheelStep(1);else if(event.key==="Escape"){hideMaskContextMenu();if(state.points.length)cancelDrawing();else if(!state.drawing){state.selectedInstance=null;render();}}});
 async function runSelfTest(){
   try{
     const previousSettings=localStorage.getItem(TOOL_SETTINGS_KEY);$("showMasks").checked=false;$("fillMasks").checked=true;$("opacity").value="73";$("radius").value="19";saveToolSettings();$("tool").value="select";$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";restoreToolSettings();if($("tool").value!=="freehand"||$("showMasks").checked||!$("fillMasks").checked||$("opacity").value!=="73"||$("radius").value!=="19")throw new Error("tool settings");if(previousSettings===null){localStorage.removeItem(TOOL_SETTINGS_KEY);$("showMasks").checked=true;$("fillMasks").checked=false;$("opacity").value="50";$("radius").value="4";}else{localStorage.setItem(TOOL_SETTINGS_KEY,previousSettings);restoreToolSettings();}
@@ -507,8 +545,19 @@ async function runSelfTest(){
     if(instances().length!==2||instances()[0].id!==1||instances()[1].id!==1)throw new Error("instance creation");
     if(classColor("median")===classColor("artery"))throw new Error("class colors");undo();if(instances().length!==1)throw new Error("undo");redo();if(instances().length!==2)throw new Error("redo");
     selectInstance(0);if(selectedInstanceIndex()!==0)throw new Error("mask selection");if(state.activeClass!=="median"||!document.querySelector('#nerves .chip[data-value="median"]').classList.contains("selected"))throw new Error("mask class selection");const anchor=maskLabelAnchor(instances()[0].mask);if(!anchor||!instances()[0].mask[anchor.y*state.sourceWidth+anchor.x])throw new Error("mask label anchor");if(maskLabelAnchor(new Uint8Array(state.sourceWidth*state.sourceHeight))!==null)throw new Error("empty mask label");relabelSelectedInstance("ulnar");if(instances()[0].className!=="ulnar"||selectedInstanceIndex()!==0)throw new Error("mask relabel");undo();if(instances()[0].className!=="median")throw new Error("relabel undo");selectInstance(0);deleteSelectedInstance();if(instances().length!==1)throw new Error("mask deletion");undo();if(instances().length!==2)throw new Error("delete undo");
+    const pixels=mask=>mask.reduce((sum,v)=>sum+v,0),previousRadius=$("radius").value;$("radius").value="2";
+    state.selectedInstance=null;state.activeClass="ulnar";beginBrush({x:20,y:4});endBrush();if(instances().length!==3||instances()[2].className!=="ulnar"||selectedInstanceIndex()!==2)throw new Error("brush creation");
+    const brushId=instances()[2].id,firstStroke=pixels(instances()[2].mask);beginBrush({x:26,y:4});brushTo({x:26,y:10});endBrush();const secondStroke=pixels(instances()[2].mask);
+    if(instances().length!==3||instances()[2].id!==brushId||secondStroke<=firstStroke)throw new Error("brush extend");
+    const brushed=new Uint8Array(instances()[2].mask);state.points=[{x:18,y:12},{x:30,y:12},{x:30,y:14},{x:18,y:14}];completePolygon();
+    if(instances().length!==3||instances()[2].id!==brushId||pixels(instances()[2].mask)<=secondStroke||brushed.some((v,i)=>v&&!instances()[2].mask[i]))throw new Error("polygon extend");
+    undo();if(pixels(instances()[2].mask)!==secondStroke)throw new Error("extend undo");undo();if(pixels(instances()[2].mask)!==firstStroke)throw new Error("brush undo");
+    selectInstance(2);document.querySelector('#nerves .chip[data-value="ulnar"]').click();if(selectedInstanceIndex()!==-1)throw new Error("chip clears selection");
+    state.points=[{x:18,y:20},{x:24,y:20},{x:24,y:26},{x:18,y:26}];completePolygon();if(instances().length!==4||instances()[3].id===brushId)throw new Error("chip new instance");
+    $("radius").value=previousRadius;
+    const rect=canvas.getBoundingClientRect();state.labelBoxes=[{index:1,left:10,top:10,width:40,height:22}];if(hitLabel({clientX:rect.left+20,clientY:rect.top+20})!==1||hitLabel({clientX:rect.left+60,clientY:rect.top+20})!==-1)throw new Error("name tag hit");
     if(typeof UTIF!=="object"||typeof UTIF.decode!=="function")throw new Error("TIFF support");
     const blob=await maskBlob(instances()[0]);if(blob.type!=="image/png"||blob.size===0)throw new Error("mask PNG");document.body.dataset.selftest="pass";
   }catch(error){document.body.dataset.selftest=`fail:${error.message}`;}
 }
-window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");sizeLaunchWindow();restoreToolSettings();rebuildAllChips();resizeCanvas();restoreOutputDirectory();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
+window.addEventListener("resize",resizeCanvas);document.body.dataset.fileApi=String(typeof window.showOpenFilePicker==="function"&&typeof window.showDirectoryPicker==="function");sizeLaunchWindow();loadToolCursors();restoreToolSettings();rebuildAllChips();resizeCanvas();restoreOutputDirectory();if(new URLSearchParams(location.search).has("selftest"))runSelfTest();
