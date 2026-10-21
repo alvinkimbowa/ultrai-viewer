@@ -4037,8 +4037,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _supports_random_seek(self, video_path):
-        suffix = Path(video_path).suffix.lower()
-        return suffix in {".mp4", ".m4v", ".mov"} or is_tiff(video_path)
+        # OpenCV seeks in a video file by time, and in a video whose frame rate
+        # varies it lands a frame early, so only a TIFF stack is sought in.
+        return is_tiff(video_path)
 
     def _decode_video_frame(self, frame_index):
         if frame_index in self._video_frame_cache:
@@ -4070,15 +4071,19 @@ class MainWindow(QMainWindow):
                             return None
                         self._video_decode_pos += 1
         else:
-            # Sequential decode only. Reopen to restart when requesting older frames.
+            # Sequential decode only. Reopen to restart when requesting older
+            # frames; the frames passed over are only grabbed, not converted.
             if frame_index <= self._video_decode_pos:
                 if not self._reopen_video_capture():
                     return None
-            while self._video_decode_pos < frame_index:
-                success, frame = self._video_capture.read()
-                if not success or frame is None:
+            while self._video_decode_pos < frame_index - 1:
+                if not self._video_capture.grab():
                     return None
                 self._video_decode_pos += 1
+            success, frame = self._video_capture.read()
+            if not success or frame is None:
+                return None
+            self._video_decode_pos += 1
 
         if frame.ndim == 3 and frame.shape[2] == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
