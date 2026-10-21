@@ -85,6 +85,7 @@ from .sam_integration import (
 )
 from .sam_plan import propagation_steps
 from threading import Event, Thread
+from typing import NamedTuple
 from collections import OrderedDict
 import html
 import time
@@ -218,6 +219,22 @@ def prediction_instances(labels, class_names, default_class):
     return instances_from_labels(labels, class_names)
 
 
+class FrameTarget(NamedTuple):
+    """The image or frame a segmentation was made of, and where its masks and
+    measurements are saved."""
+
+    run_key: object
+    image: np.ndarray
+    mask_set: MaskSet | None
+    base_mask_set: MaskSet | None
+    output_dir: str
+    file_name: str
+    frame: str
+    angle: float
+    shape: tuple
+    roi: tuple | None
+
+
 def merge_predicted(kept, predicted):
     """Kept instances plus predicted ones, numbered on from those kept."""
     merged = list(kept)
@@ -348,6 +365,8 @@ class MainWindow(QMainWindow):
         self._inference_thread = None
         self._inference_worker = None
         self._inference_box = None
+        self._inference_target = None
+        self._inference_classes = ({}, DEFAULT_MODEL_CLASS)
         self._inference_dialog = None
         # Seconds the last Segment image took, by model, to tell how long the
         # next one will take.
@@ -1616,21 +1635,27 @@ class MainWindow(QMainWindow):
             )
         return self._measurement_logs[key]
 
-    def _record_measurement(self, output_dir, file_name, frame=""):
-        """Store the measurements of the masks on screen next to their saved masks."""
+    def _record_measurement(self, output_dir, file_name, frame="", target=None, instances=None):
+        """Store the measurements of the masks on screen next to their saved
+        masks, or, given a target, those of its masks (instances)."""
         side, location = self._file_labels(file_name, frame != "")
+        if target is None:
+            instances = self.canvas.visible_instances()
+            roi, angle = self.canvas.roi_box(), self._shown_angle
+        else:
+            roi, angle = target.roi, target.angle
         try:
             log = self._measurement_log(output_dir)
             log.set(
                 file_name,
                 frame,
-                self.canvas.visible_instances(),
+                instances,
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
                 side=side,
                 location=location,
-                limits=self.canvas.roi_box(),
-                rotation=self._shown_angle,
+                limits=roi,
+                rotation=angle,
             )
             log.save()
         except OSError as exc:
@@ -1656,16 +1681,22 @@ class MainWindow(QMainWindow):
         return same_instances(turned, shown)
 
     def _write_shown_masks(self, mask_set):
-        """Save the masks on screen so that they line up with the stored image.
+        """Save the masks on screen so that they line up with the stored image."""
+        self._write_masks(
+            mask_set, self.canvas.visible_instances(), self._shown_angle, self._original_shape
+        )
+
+    def _write_masks(self, mask_set, shown, angle, original_shape):
+        """Save masks as viewed at angle so that they line up with the stored
+        image of shape original_shape.
 
         On a video frame saved while SAM is selected, the masks changed by hand
         become ones SAM propagates from; the others stay what SAM found.
         """
-        shown = self.canvas.visible_instances()
         tracked = self._sam_selected and mask_set.frame is not None
         # Compared as viewed, since turning a mask back is not exactly reversible.
-        before = stored_masks(mask_set, self._shown_angle) if tracked else None
-        mask_set.write(shown, self._shown_angle, self._original_shape)
+        before = stored_masks(mask_set, angle) if tracked else None
+        mask_set.write(shown, angle, original_shape)
         if tracked:
             after = {(i["class"], i["id"]): i["mask"] > 0 for i in shown if i["mask"].any()}
             changed = {
@@ -2759,24 +2790,36 @@ class MainWindow(QMainWindow):
         for x, y, include in self._sam_points:
             points.append(unrotate_point(x, y, angle, shape))
             labels.append(1 if include else 0)
-        target = (self._video_path, self._video_frame_index, self._sam_object)
-        video, frame, _ = target
+        target = self._frame_target()
+        sam_object = self._sam_object
+        video, frame = self._video_path, self._video_frame_index
         ok, mask = self._sam_call(
             "Segmenting with SAM 3.1...",
             lambda progress: self._sam.segment_points(video, frame, points, labels),
         )
         rerun, self._sam_rerun = self._sam_rerun, False
-        current = (self._video_path, self._video_frame_index, self._sam_object)
-        if not ok or current != target:
+        if not ok:
             return
-        label, number = target[2]
-        self.canvas.put_instance(
-            make_instance(label, number, rotate_mask(mask, angle) if angle else mask)
-        )
-        if rerun:
+        label, number = sam_object
+        instance = make_instance(label, number, rotate_mask(mask, angle) if angle else mask)
+        on_screen = self._shows_target(target)
+        if not self._deliver(
+            target,
+            lambda: self.canvas.put_instance(instance),
+            lambda stored: [
+                i for i in stored if (i["class"], i["id"]) != (label, number)
+            ] + [instance],
+        ):
+            return
+        if on_screen and self._sam_object != sam_object:
+            # A new mask was started while SAM worked on this one, so the next
+            # prompt must not go to this one.
+            self.canvas.selected_index = None
+            self.canvas.update()
+        if rerun and on_screen and self._sam_object == sam_object:
             self._run_sam_prompts()
         else:
-            self.statusBar().showMessage(f"SAM 3.1: {instance_title(self.canvas.instances[-1])}")
+            self.statusBar().showMessage(f"SAM 3.1: {instance_title(instance)}")
 
     def _sam_find_text(self):
         text = self.sam_text.text().strip()
@@ -2792,13 +2835,14 @@ class MainWindow(QMainWindow):
             )
             return
         video, frame, angle = self._video_path, self._video_frame_index, self._shown_angle
+        target = self._frame_target()
+        label = clean_class(self._model_default_class())
         ok, masks = self._sam_call(
             f'Finding "{text}" with SAM 3.1...',
             lambda progress: self._sam.find_text(video, frame, text),
         )
-        if not ok or (self._video_path, self._video_frame_index) != (video, frame):
+        if not ok:
             return
-        label = clean_class(self._model_default_class())
         found = [
             make_instance(label, 0, rotate_mask(mask, angle) if angle else mask)
             for mask in masks
@@ -2807,9 +2851,16 @@ class MainWindow(QMainWindow):
         if not found:
             self.statusBar().showMessage(f'SAM 3.1 found nothing matching "{text}"')
             return
-        self._reset_sam_prompts()
-        self.canvas.add_instances(found)
-        self.statusBar().showMessage(f'SAM 3.1 found {len(found)} match(es) for "{text}"')
+
+        def show():
+            self._reset_sam_prompts()
+            self.canvas.add_instances(found)
+
+        if self._deliver(target, show, lambda stored: merge_predicted(stored, found)):
+            self.statusBar().showMessage(
+                f'SAM 3.1 found {len(found)} match(es) for "{text}" '
+                f"on {self._target_title(target)}"
+            )
 
     def _edit_sam_prompts(self, folder, edit):
         """Change the prompts kept in a video's SAM results folder with
@@ -4714,6 +4765,80 @@ class MainWindow(QMainWindow):
             self._gpu_warning = f"{GPU_FALLBACK_WARNING}\n\nDetails: {exc}"
             self._select_cpu_device(show_warning=True)
 
+    def _frame_target(self):
+        """Where a result made of the image or frame on screen belongs, taken
+        when the work starts, so that the result lands there whatever is on
+        screen by the time it is ready."""
+        if self._mode == "video" and self._video_path:
+            source, base_dir = self._video_path, self._video_base_dir
+        elif self._mode == "sequence" and 0 <= self._sequence_index < len(self._sequence_paths):
+            source, base_dir = self._sequence_paths[self._sequence_index], self._sequence_base_dir
+        else:
+            return None
+        key = self._current_frame_key()
+        mask_set = self._current_mask_set() if key is not None else None
+        output_dir, file_name, frame = key if key is not None else ("", Path(source).name, "")
+        return FrameTarget(
+            run_key=self._run_key(),
+            image=self.canvas.image,
+            mask_set=mask_set,
+            base_mask_set=(
+                self._mask_set_in(base_dir, source, mask_set.frame)
+                if mask_set is not None else None
+            ),
+            output_dir=output_dir,
+            file_name=file_name,
+            frame=frame,
+            angle=self._shown_angle,
+            shape=self._original_shape,
+            roi=self.canvas.roi_box(),
+        )
+
+    def _shows_target(self, target):
+        """True when the image or frame of a target is on screen, as it was seen
+        then: in the same results folder and at the same angle."""
+        current = self._current_mask_set()
+        return (
+            self._run_key() == target.run_key
+            and self._shown_angle == target.angle
+            and (current and current.folder) == (target.mask_set and target.mask_set.folder)
+        )
+
+    def _deliver(self, target, show, edit):
+        """Put a result on the image or frame it was made of and save it.
+
+        On screen, show() puts it on the canvas, and the canvas is saved. Else
+        edit(masks) gives the masks with the result, from those saved for it,
+        and they are saved with their measurements. Returns whether the result
+        was put anywhere.
+        """
+        if self._shows_target(target):
+            show()
+            if self._mode == "video":
+                self._stash_video_mask_for_current_frame(force=True)
+            else:
+                self._save_sequence_mask_if_needed()
+            return True
+        if target.mask_set is None:
+            return False
+        source = target.mask_set if target.mask_set.exists() else target.base_mask_set
+        try:
+            stored = source.read(target.angle) if source is not None and source.exists() else []
+            instances = clip_instances(edit(stored), target.roi)
+            self._write_masks(target.mask_set, instances, target.angle, target.shape)
+        except Exception as exc:
+            QMessageBox.warning(self, "Save error", str(exc))
+            return False
+        self._record_measurement(
+            target.output_dir, target.file_name, target.frame, target, instances
+        )
+        return True
+
+    def _target_title(self, target):
+        if target.frame:
+            return f"{target.file_name} frame {target.frame}"
+        return target.file_name
+
     def _run_inference(self):
         if self.canvas.image is None:
             QMessageBox.warning(self, "No image", "Load an image before running segmentation.")
@@ -4736,6 +4861,8 @@ class MainWindow(QMainWindow):
         self._show_inference_dialog()
 
         self._inference_thread = QThread(self)
+        self._inference_target = self._frame_target()
+        self._inference_classes = (self._model.class_names(), self._model_default_class())
         self._inference_box = box_to_segment(self.canvas.image, self.canvas.roi_box())
         self._inference_worker = InferenceWorker(
             self._model, crop_to_box(self.canvas.image, self._inference_box)
@@ -4805,22 +4932,38 @@ class MainWindow(QMainWindow):
             time.monotonic() - self._inference_started
         )
         self._close_inference_dialog()
-        if prediction is None or self.canvas.image is None:
+        target = self._inference_target
+        if prediction is None or target is None:
             return
-        labels = place_prediction(prediction, self.canvas.image, self._inference_box)
-        class_names = self._model.class_names()
-        default_class = self._model_default_class()
+        labels = place_prediction(prediction, target.image, self._inference_box)
+        class_names, default_class = self._inference_classes
         found = prediction_instances(labels, class_names, default_class)
         segmented = set(class_names.values()) if class_names else {default_class}
         segmented.update(i["class"] for i in found)
+        segmented = {clean_class(c) for c in segmented}
         if not found:
-            self.statusBar().showMessage("Segmentation complete: nothing found")
+            self.statusBar().showMessage(
+                f"Segmentation of {self._target_title(target)} complete: nothing found"
+            )
             return
-        self.canvas.replace_classes(found, segmented)
-        names = ", ".join(
-            instance_title(i) for i in self.canvas.instances if i["class"] in segmented
-        )
-        self.statusBar().showMessage(f"Segmentation complete: {names}")
+        on_screen = self._shows_target(target)
+        if not self._deliver(
+            target,
+            lambda: self.canvas.replace_classes(found, segmented),
+            lambda stored: merge_predicted(
+                [i for i in stored if i["class"] not in segmented], found
+            ),
+        ):
+            return
+        if on_screen:
+            names = ", ".join(
+                instance_title(i) for i in self.canvas.instances if i["class"] in segmented
+            )
+            self.statusBar().showMessage(f"Segmentation complete: {names}")
+        else:
+            self.statusBar().showMessage(
+                f"Segmentation of {self._target_title(target)} saved"
+            )
 
     def _model_default_class(self):
         """The label a single-class model's masks get: the nerve or anatomy
@@ -4839,7 +4982,6 @@ class MainWindow(QMainWindow):
     def _on_inference_thread_done(self):
         self._inference_thread = None
         self._inference_worker = None
-        self.statusBar().showMessage("Ready")
 
     def closeEvent(self, event):
         self._stop_playback()
