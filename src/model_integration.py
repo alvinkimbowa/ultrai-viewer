@@ -123,6 +123,9 @@ class ModelIntegration:
             return None
         import onnxruntime as ort
 
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            ort.preload_dlls()
+
         model_source = self._model_path
         self._monogenic = None
         split = split_monogenic(self._model_path)
