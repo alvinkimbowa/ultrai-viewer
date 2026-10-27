@@ -75,7 +75,7 @@ python app.py
 1. Click `Load files`, choose a folder of images and an output folder.
 2. Select a model.
 3. Click `Segment all files`.
-4. Masks are written to the chosen output folder as `<image_stem>.png`.
+4. Masks are written to `<output_dir>/<model>_predictions/<input_folder_name>/<image_stem>.png`, and measurements to `<output_dir>/<model>_predictions/measurements_<model>_<input_folder_name>.csv`. Images loaded as files rather than a folder go straight into `<output_dir>/<model>_predictions/`, with measurements in `measurements_<model>.csv`.
 
 ### Video annotation
 
@@ -85,10 +85,10 @@ python app.py
 4. Assign `Location` and `Nerve` labels.
 5. Save masks to persist annotated frames.
 
-For video mode, masks are stored under:
+For video mode, masks are stored under the folder below, where `<results_dir>` is `<output_dir>/<model>_predictions/<input_folder_name>` when a folder of videos was loaded and `<output_dir>/<model>_predictions` when videos were loaded as files:
 
 ```text
-<output_dir>/
+<results_dir>/
   nerve_manifest.json
   <video_stem>/
     frame_000000.png

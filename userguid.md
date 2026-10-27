@@ -18,7 +18,7 @@ Runs on the CPU; a 4-core CPU and 8 GB of RAM are recommended. macOS is not supp
 
 Scroll, use the arrow keys, or **Prev** / **Next** to move between images.
 
-Masks are saved automatically as you go to `<output folder>/<model_name>_predictions/<image name>.png`.
+Masks are saved automatically as you go to `<output folder>/<model_name>_predictions/<image name>.png`. When you load a folder, they go in a subfolder named after it: `<output folder>/<model_name>_predictions/<input folder name>/<image name>.png`. Each video gets its own folder of frame masks named after the video.
 
 ## Compare models
 
@@ -37,7 +37,7 @@ Masks cannot be edited while comparing; click **Stop comparing** to edit again.
 4. **Notch centre:** if needed, drag the yellow diamond with the **Select** tool.
 5. **Read the results** in the **Measurements** panel: area, length, thickness and echo intensity of the cartilage.
 
-Measurements are saved automatically as you go to `<output folder>/measurements_<model_name>.csv`, one row per image.
+Measurements are saved automatically as you go to `<output folder>/<model_name>_predictions/measurements_<model_name>.csv`, one row per image. When you load a folder, the file is named `measurements_<model_name>_<input folder name>.csv`.
 
 ## Tips
 

@@ -369,6 +369,7 @@ class MainWindow(QMainWindow):
         self._last_video_input_dir = ""
         self._last_video_output_dir = ""
         self._last_load_kind = "image"
+        self._input_folder_name = None
         self._load_persisted_paths()
         self._update_output_dir_tooltip()
         # Recomputing on every mask change would stall drawing, so changes are
@@ -519,32 +520,42 @@ class MainWindow(QMainWindow):
         """Folder the masks of the selected model are kept in.
 
         The subfolder "<model>_predictions" of the selected output folder, or the
-        output folder itself when no model is selected.
+        output folder itself when no model is selected. When a folder was loaded
+        rather than files, the masks go one level further down, in a subfolder
+        named after the loaded folder.
         """
         return self._results_dir_for(base_dir, self._model.current_model())
 
-    @staticmethod
-    def _results_dir_for(base_dir, model):
+    def _results_dir_for(self, base_dir, model):
         if not base_dir:
             return None
-        if not model:
-            return str(base_dir)
-        return str(Path(base_dir) / f"{model}{PREDICTIONS_SUFFIX}")
+        results_dir = Path(base_dir)
+        if model:
+            results_dir /= f"{model}{PREDICTIONS_SUFFIX}"
+        if self._input_folder_name:
+            results_dir /= self._input_folder_name
+        return str(results_dir)
 
     def _measurement_file(self, results_dir):
         """(folder, file name) of the measurements file that goes with a results
         folder.
 
-        The masks of a model sit in "<model>_predictions"; its measurements sit
-        beside that folder as "measurements_<model>.csv". Masks kept directly in
-        the selected output folder go with its "measurements.csv".
+        The measurements of a model sit in its "<model>_predictions" folder as
+        "measurements_<model>.csv". Masks kept outside a model's folder go with
+        "measurements.csv" in the folder holding them. When a folder was loaded,
+        its name is added to the file name, "measurements_<model>_<folder>.csv",
+        and the file sits above the masks, which are in a subfolder of that name.
         """
         folder = Path(results_dir)
+        name = self._input_folder_name
+        if name and folder.name == name:
+            folder = folder.parent
+        suffix = f"_{name}" if name else ""
         selected = (self._sequence_base_dir, self._video_base_dir)
-        if str(results_dir) in selected or not folder.name.endswith(PREDICTIONS_SUFFIX):
-            return folder, MEASUREMENTS_FILE_NAME
+        if str(folder) in selected or not folder.name.endswith(PREDICTIONS_SUFFIX):
+            return folder, f"{Path(MEASUREMENTS_FILE_NAME).stem}{suffix}.csv"
         model = folder.name[: -len(PREDICTIONS_SUFFIX)]
-        return folder.parent, f"measurements_{model}.csv"
+        return folder, f"measurements_{model}{suffix}.csv"
 
     @property
     def _sequence_output_dir(self):
@@ -2749,20 +2760,21 @@ class MainWindow(QMainWindow):
         dialog_result = self._show_load_dialog()
         if dialog_result is None:
             return
-        kind, paths, output_dir = dialog_result
+        kind, paths, output_dir, folder_name = dialog_result
         # A single TIFF file holding several images is gone through frame by
         # frame, as a video is.
         stack = kind != "video" and len(paths) == 1 and tiff_frame_count(paths[0]) > 1
         if kind == "video" or stack:
-            self._load_video(paths, output_dir)
+            self._load_video(paths, output_dir, folder_name)
         else:
-            self._load_sequence(paths, output_dir)
+            self._load_sequence(paths, output_dir, folder_name)
 
-    def _load_sequence(self, paths, output_dir):
+    def _load_sequence(self, paths, output_dir, folder_name=None):
         self._stop_playback()
         if self._mode == "video":
             self._stash_video_mask_for_current_frame()
             self._clear_video_state()
+        self._input_folder_name = folder_name
         self._mode = "sequence"
         self._sequence_paths = list(paths)
         self._sequence_index = 0
@@ -2775,13 +2787,14 @@ class MainWindow(QMainWindow):
         self._set_sequence_index(0)
         self.statusBar().showMessage(f"Sequence loaded: {len(self._sequence_paths)} images")
 
-    def _load_video(self, video_paths, output_dir):
+    def _load_video(self, video_paths, output_dir, folder_name=None):
         self._stop_playback()
         if self._mode == "sequence":
             self._save_sequence_mask_if_needed()
             self._clear_sequence_state(clear_canvas=False)
         self._stash_video_mask_for_current_frame()
         self._clear_video_state()
+        self._input_folder_name = folder_name
         self._video_paths = sorted(str(Path(p)) for p in video_paths)
         self._video_list_index = 0
         self._video_output_dir = output_dir
@@ -3625,7 +3638,7 @@ class MainWindow(QMainWindow):
         input_line.setReadOnly(True)
 
         selected_paths = []
-        selection = {"kind": self._last_load_kind}
+        selection = {"kind": self._last_load_kind, "folder": None}
 
         def input_dir():
             if selection["kind"] == "video":
@@ -3648,9 +3661,10 @@ class MainWindow(QMainWindow):
         def with_suffix(paths, extensions):
             return [str(path) for path in paths if Path(path).suffix.lower() in extensions]
 
-        def choose(kind, paths, description, directory):
+        def choose(kind, paths, description, directory, folder=None):
             selected_paths[:] = paths
             selection["kind"] = kind
+            selection["folder"] = folder
             noun = "videos" if kind == "video" else "images"
             input_line.setText(f"{description}{len(paths)} {noun}")
             if kind == "video":
@@ -3695,7 +3709,13 @@ class MainWindow(QMainWindow):
                     dialog, "No files", "No images or videos found in the selected folder."
                 )
                 return
-            choose(kind, videos if kind == "video" else images, f"{directory}: ", directory)
+            choose(
+                kind,
+                videos if kind == "video" else images,
+                f"{directory}: ",
+                directory,
+                folder=Path(directory).name,
+            )
 
         def select_files():
             image_filter = " ".join(f"*{ext}" for ext in IMAGE_EXTENSIONS)
@@ -3775,7 +3795,7 @@ class MainWindow(QMainWindow):
         else:
             self._last_image_output_dir = output_dir
         self._save_persisted_paths()
-        return selection["kind"], list(selected_paths), output_dir
+        return selection["kind"], list(selected_paths), output_dir, selection["folder"]
 
     def _preload_model(self):
         if not self._model.has_model():
