@@ -41,9 +41,12 @@ class Canvas(QWidget):
     delete_requested = pyqtSignal(str)
     # A message for the status bar, such as why a drawing was not made.
     notice = pyqtSignal(str)
-    # A SAM prompt, in image pixels: ("point", x, y, include) or
-    # ("box", left, top, right, bottom).
+    # A SAM prompt, in image pixels: ("point", x, y, include),
+    # ("box", left, top, right, bottom) or ("mask", mask); or ("remove_point",
+    # index) for a click on a prompt point shown.
     sam_prompt_added = pyqtSignal(tuple)
+    # Esc while prompts are shown: the prompts and the mask they made are dropped.
+    sam_prompts_cleared = pyqtSignal()
     # The mask selected changed, or none is selected any more.
     selection_changed = pyqtSignal()
     # The user asked to name the selected mask with a class not listed yet.
@@ -279,6 +282,18 @@ class Canvas(QWidget):
         kept.append(make_instance(key[0], key[1], instance["mask"]))
         self.instances = kept
         self.selected_index = len(kept) - 1
+        self._refresh_mask_pixmap()
+        self._push_history()
+        self._mask_touched = True
+        self.update()
+
+    def remove_instance(self, key):
+        """Take away the mask of a (class, number), as a step Undo takes back."""
+        kept = [i for i in self.instances if (i["class"], i["id"]) != tuple(key)]
+        if len(kept) == len(self.instances):
+            return
+        self.instances = kept
+        self.selected_index = None
         self._refresh_mask_pixmap()
         self._push_history()
         self._mask_touched = True
@@ -1117,7 +1132,11 @@ class Canvas(QWidget):
                 self._poly_points.append(point)
                 self.update()
             elif self.tool == "sam_point":
-                self.sam_prompt_added.emit(("point", point.x(), point.y(), True))
+                index = self._sam_point_at(event.position().toPoint())
+                if index is not None:
+                    self.sam_prompt_added.emit(("remove_point", index))
+                else:
+                    self.sam_prompt_added.emit(("point", point.x(), point.y(), True))
             elif self.tool == "sam_box":
                 self._sam_box_draft = [point, point]
                 self.update()
@@ -1138,6 +1157,16 @@ class Canvas(QWidget):
                 point = self._screen_to_image(event.position().toPoint())
                 if point is not None:
                     self.sam_prompt_added.emit(("point", point.x(), point.y(), False))
+
+    def _sam_point_at(self, pos):
+        """Index in the prompt points shown of the one whose marker is at a widget
+        position, or None."""
+        for index in range(len(self._sam_points) - 1, -1, -1):
+            x, y, _ = self._sam_points[index]
+            center = self._image_to_screen(QPoint(int(x), int(y)))
+            if (center - pos).manhattanLength() <= 10:
+                return index
+        return None
 
     def _label_at(self, pos):
         """Index in self.instances of the mask whose name tag is at a widget
@@ -1214,6 +1243,11 @@ class Canvas(QWidget):
         if not self._drawing:
             if self._label_at(event.position().toPoint()) is not None:
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
+            elif (
+                self.tool == "sam_point"
+                and self._sam_point_at(event.position().toPoint()) is not None
+            ):
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
             elif self.tool in ("sam_point", "sam_box", "sam_mask"):
                 self.setCursor(Qt.CursorShape.CrossCursor)
             else:
@@ -1328,6 +1362,11 @@ class Canvas(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Delete and self.selection is not None:
             self.request_delete(self.selection)
+            return
+        if event.key() == Qt.Key.Key_Escape and (
+            self._sam_points or self._sam_box is not None or self._sam_mask_outline
+        ):
+            self.sam_prompts_cleared.emit()
             return
         if event.key() == Qt.Key.Key_Escape and self.selection == "mask":
             self.selected_index = None

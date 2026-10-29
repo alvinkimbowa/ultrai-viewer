@@ -381,6 +381,9 @@ class MainWindow(QMainWindow):
         self._sam_points = []
         self._sam_box = None
         self._sam_mask = None
+        self._prompt_undo = []
+        self._prompt_redo = []
+        self._prompt_start = None
         self._inference_thread = None
         self._inference_worker = None
         self._inference_box = None
@@ -1136,7 +1139,12 @@ class MainWindow(QMainWindow):
         self._save_current_roi()
 
     def _undo(self):
-        """Take back the latest step: an edit on the canvas or a step across files."""
+        """Take back the latest step: a prompt of the mask being prompted, an edit
+        on the canvas or a step across files."""
+        if self._prompt_undo:
+            if not self._sam_busy:
+                self._undo_prompt()
+            return
         step = self._bulk_undo[-1] if self._bulk_undo else None
         canvas_is_later = (
             step is not None
@@ -1152,6 +1160,11 @@ class MainWindow(QMainWindow):
         self._bulk_redo.append(step)
 
     def _redo(self):
+        # Edits undone from before the first prompt are redone before the prompts.
+        if self._prompt_redo and not self._behind_prompt_start():
+            if not self._sam_busy:
+                self._redo_prompt()
+            return
         if self.canvas.can_redo():
             self.canvas.redo()
             return
@@ -2156,6 +2169,7 @@ class MainWindow(QMainWindow):
         self.auto_roi_btn.clicked.connect(self._auto_roi)
         self.rotate_action.triggered.connect(self._rotate_dialog)
         self.fill_mask_checkbox.toggled.connect(self.canvas.set_fill_mask)
+        self.canvas.sam_prompts_cleared.connect(self._clear_prompts)
         self.undo_btn.clicked.connect(self._undo)
         self.redo_btn.clicked.connect(self._redo)
         self.undo_action.triggered.connect(self._undo)
@@ -2716,6 +2730,12 @@ class MainWindow(QMainWindow):
         self._sam_points = []
         self._sam_box = None
         self._sam_mask = None
+        # The prompts of the mask being prompted as they were before each change,
+        # and those undone; and where the canvas history stood, and the mask as
+        # it was, before its first prompt.
+        self._prompt_undo = []
+        self._prompt_redo = []
+        self._prompt_start = None
         self.canvas.set_sam_prompts([], None)
 
     def _new_sam_object(self):
@@ -2804,6 +2824,13 @@ class MainWindow(QMainWindow):
         replaces the prompts before it; points and boxes after it refine it."""
         if not self._can_prompt():
             return
+        before = self._prompt_state()
+        if prompt[0] == "remove_point":
+            if self._sam_busy or not 0 <= prompt[1] < len(self._sam_points):
+                return
+            points = [p for i, p in enumerate(self._sam_points) if i != prompt[1]]
+            self._change_prompts((points, self._sam_box, self._sam_mask))
+            return
         if not self._prompt_allowed(prompt):
             self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
             return
@@ -2815,6 +2842,10 @@ class MainWindow(QMainWindow):
             else:
                 label = self.canvas.active_class or UNLABELED
                 self._sam_object = (label, next_instance_id(self.canvas.instances, label))
+        if self._prompt_start is None:
+            self._prompt_start = self._canvas_point_in_history()
+        self._prompt_undo.append(before)
+        self._prompt_redo.clear()
         if prompt[0] == "point":
             self._sam_points.append(tuple(prompt[1:]))
         elif prompt[0] == "mask":
@@ -2825,6 +2856,85 @@ class MainWindow(QMainWindow):
             self._sam_box = tuple(prompt[1:])
         self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
         self._run_sam_prompts()
+
+    def _prompt_state(self):
+        return (list(self._sam_points), self._sam_box, self._sam_mask)
+
+    def _has_prompts(self):
+        return bool(self._sam_points) or self._sam_box is not None or self._sam_mask is not None
+
+    def _canvas_point_in_history(self):
+        """Where the canvas history stands, and the mask being prompted as it is,
+        or None when it is not on the canvas."""
+        label, number = self._sam_object
+        mask = next(
+            (
+                i["mask"].copy()
+                for i in self.canvas.instances
+                if (i["class"], i["id"]) == (label, number)
+            ),
+            None,
+        )
+        return self.canvas.history_resets, self.canvas.history_depth(), mask
+
+    def _change_prompts(self, state):
+        """Make state the prompts of the mask being prompted, as a step Undo
+        takes back."""
+        self._prompt_undo.append(self._prompt_state())
+        self._prompt_redo.clear()
+        self._show_prompts(state)
+
+    def _show_prompts(self, state):
+        """Make state the prompts of the mask being prompted and show the mask
+        they make; with none left, the mask is as it was before its first prompt."""
+        self._sam_points, self._sam_box, self._sam_mask = list(state[0]), state[1], state[2]
+        self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
+        if self._has_prompts():
+            self._run_sam_prompts()
+        else:
+            self._restore_unprompted()
+
+    def _restore_unprompted(self):
+        """Put the canvas back as it was before the first prompt of the mask being
+        prompted: its history is stepped back when it still leads there, else the
+        mask alone is put back, or taken away when it had none."""
+        if self._prompt_start is None:
+            return
+        resets, depth, mask = self._prompt_start
+        if self.canvas.history_resets == resets and self.canvas.history_depth() >= depth:
+            while self.canvas.history_depth() > depth:
+                self.canvas.undo()
+        elif mask is not None:
+            self.canvas.put_instance(make_instance(*self._sam_object, mask))
+        else:
+            self.canvas.remove_instance(self._sam_object)
+        self.canvas.selected_index = None
+        self.canvas.update()
+
+    def _behind_prompt_start(self):
+        """True when the canvas history was undone to before the first prompt of
+        the mask being prompted."""
+        if self._prompt_start is None or not self.canvas.can_redo():
+            return False
+        resets, depth, _ = self._prompt_start
+        return self.canvas.history_resets == resets and self.canvas.history_depth() < depth
+
+    def _undo_prompt(self):
+        self._prompt_redo.append(self._prompt_state())
+        self._show_prompts(self._prompt_undo.pop())
+        self.statusBar().showMessage("Prompt undone")
+
+    def _redo_prompt(self):
+        self._prompt_undo.append(self._prompt_state())
+        self._show_prompts(self._prompt_redo.pop())
+        self.statusBar().showMessage("Prompt redone")
+
+    def _clear_prompts(self):
+        """Drop the prompts of the mask being prompted and the mask they made."""
+        if self._sam_busy or not self._has_prompts():
+            return
+        self._change_prompts(([], None, None))
+        self.statusBar().showMessage("Prompts cleared")
 
     def _prompt_allowed(self, prompt):
         """False when the model selected cannot take prompt. A model trained on
