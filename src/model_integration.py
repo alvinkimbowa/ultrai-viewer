@@ -141,6 +141,9 @@ class ModelIntegration:
             return None
         import onnxruntime as ort
 
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            ort.preload_dlls()
+
         self._device_warning = None
         providers = ort.get_available_providers()
         selected = self._device_provider
