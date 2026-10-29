@@ -1,6 +1,6 @@
 # UltrAi Viewer
 
-A desktop PyQt6 application for annotating images and videos. It loads images and videos, annotates objects as instance masks of classes the user defines, segments them with ONNX models and promptable models (SAM 3.1, UltraSam), and measures the area of each mask.
+A desktop PyQt6 application for annotating images and videos. It loads images and videos, annotates objects as instance masks of classes the user defines, segments them with ONNX models and promptable models (SAM 3.1, UltraSam, nnInteractive), and measures the area of each mask.
 
 ## Features
 

@@ -76,6 +76,16 @@ SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation fil
 
 UltraSam's masks go in `<output folder>/ultrasam_predictions/`. The first prompt loads the model, which takes a few seconds; later prompts on the same image take a fraction of a second.
 
+## Prompt masks with nnInteractive
+
+**nnInteractive** appears under **Model** on a computer set up with the `nnInteractive` project. It is MIC-DKFZ's promptable nnU-Net, trained on CT, MRI and other 3D scans rather than ultrasound. Like UltraSam, it makes one mask at a time on an image or a video frame, and does not propagate.
+
+1. Choose **nnInteractive** under **Model**. **Point prompt**, **Box prompt** and **Mask prompt** are added under **Tools**.
+2. Prompt as with UltraSam. A box or an outline works far better than a point. On breast ultrasound, the mean Dice is about 0.85 from a box, 0.89 from a rough outline, and 0.47 from a single point. Right-click with **Point prompt** to exclude a spot. Press **New object** before prompting the next structure.
+3. Masks get the class chosen under **Objects**, or are **Unlabeled**.
+
+nnInteractive's masks go in `<output folder>/nninteractive_predictions/`. The first prompt loads the model, which takes several seconds. Its weights are licensed for non-commercial use only (CC BY-NC-SA 4.0).
+
 ## Measurements
 
 1. **Calibrate:** enter **Pixels per mm**, or click **Calibrate** and drag the lines onto a known distance. Until then, areas are in pixels.

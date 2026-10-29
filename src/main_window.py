@@ -88,12 +88,8 @@ from .sam_integration import (
     save_prompts,
 )
 from .sam_plan import propagation_steps
-from .ultrasam_integration import (
-    ULTRASAM_MODEL_LABEL,
-    ULTRASAM_MODEL_NAME,
-    UltraSamPrompter,
-    ultrasam_available,
-)
+from .nninteractive_integration import NnInteractivePrompter, nninteractive_available
+from .ultrasam_integration import UltraSamPrompter, ultrasam_available
 from threading import Event, Thread
 from typing import NamedTuple
 from collections import OrderedDict, deque
@@ -361,8 +357,17 @@ class MainWindow(QMainWindow):
         self._model = ModelIntegration()
         self._sam = SamTracker() if sam_available() else None
         self._sam_selected = False
-        self._ultrasam = UltraSamPrompter() if ultrasam_available() else None
-        self._ultrasam_selected = False
+        # The models that make one mask at a time from prompts on an image, by
+        # the label they are listed under.
+        self._image_prompters = {}
+        for available, prompter in (
+            (ultrasam_available, UltraSamPrompter),
+            (nninteractive_available, NnInteractivePrompter),
+        ):
+            if available():
+                helper = prompter()
+                self._image_prompters[helper.label] = helper
+        self._image_prompter = None
         # Set while a SAM request is being answered; prompts made meanwhile are
         # sent once it is.
         self._sam_busy = False
@@ -550,8 +555,8 @@ class MainWindow(QMainWindow):
     def _selected_model_name(self):
         if self._sam_selected:
             return SAM_MODEL_NAME
-        if self._ultrasam_selected:
-            return ULTRASAM_MODEL_NAME
+        if self._image_prompter is not None:
+            return self._image_prompter.model_name
         return self._model.current_model()
 
     def _measurement_file(self, results_dir):
@@ -2646,15 +2651,13 @@ class MainWindow(QMainWindow):
 
     def _prompt_model(self):
         """The helper that the point, box and mask prompts go to, or None while neither
-        SAM 3.1 nor UltraSam is the model selected."""
+        SAM 3.1 nor a model that prompts on images is the model selected."""
         if self._sam_selected:
             return self._sam
-        if self._ultrasam_selected:
-            return self._ultrasam
-        return None
+        return self._image_prompter
 
     def _can_prompt(self):
-        """True when SAM 3.1 or UltraSam is selected and an image or video frame
+        """True when SAM 3.1, UltraSam or nnInteractive is selected and an image or video frame
         is on screen."""
         if self._prompt_model() is None or self.canvas.image is None:
             return False
@@ -2664,7 +2667,7 @@ class MainWindow(QMainWindow):
 
     def _update_sam_controls(self):
         """Show the SAM controls and tools in place of the segmenting ones while
-        SAM 3.1 or UltraSam is the model selected."""
+        SAM 3.1, UltraSam or nnInteractive is the model selected."""
         sam = self._prompt_model() is not None
         self.sam_video_controls.setVisible(self._sam_selected)
         for widget in (
@@ -2794,8 +2797,8 @@ class MainWindow(QMainWindow):
 
     def _on_sam_prompt(self, prompt):
         """Add a point, box or mask to the prompts of the mask being prompted, and
-        show the mask SAM 3.1 or UltraSam makes of them. A mask replaces the
-        prompts before it; points and boxes after it refine it."""
+        show the mask SAM 3.1, UltraSam or nnInteractive makes of them. A mask
+        replaces the prompts before it; points and boxes after it refine it."""
         if not self._can_prompt():
             return
         if self._sam_object is None:
@@ -2851,9 +2854,7 @@ class MainWindow(QMainWindow):
             image = self.canvas.display_rgb()
             key = repr((target.run_key, target.file_name, target.frame, target.angle))
             segment = (
-                self._sam.segment_image_points
-                if helper is self._sam
-                else self._ultrasam.segment_points
+                self._sam.segment_image_points if helper is self._sam else helper.segment_points
             )
             work = lambda progress: segment(image, key, points, labels, prompt_mask)
         ok, mask = self._sam_call(f"Segmenting with {helper.label}...", work)
@@ -4726,8 +4727,7 @@ class MainWindow(QMainWindow):
         models = self._model.list_models()
         if self._sam is not None:
             models.append(SAM_MODEL_LABEL)
-        if self._ultrasam is not None:
-            models.append(ULTRASAM_MODEL_LABEL)
+        models.extend(self._image_prompters)
         if not models:
             self.model_picker.clear()
             self.model_picker.addItem("No models loaded")
@@ -4782,15 +4782,18 @@ class MainWindow(QMainWindow):
         elif self._mode == "sequence":
             self._save_sequence_mask_if_needed()
         self._sam_selected = name == SAM_MODEL_LABEL
-        self._ultrasam_selected = name == ULTRASAM_MODEL_LABEL
+        self._image_prompter = self._image_prompters.get(name)
         # Only the helper of the model chosen keeps its model on the GPU.
         if self._sam is not None and not self._sam_selected:
             self._sam.stop()
-        if self._ultrasam is not None and not self._ultrasam_selected:
-            self._ultrasam.stop()
+        for prompter in self._image_prompters.values():
+            if prompter is not self._image_prompter:
+                prompter.stop()
         try:
             self._model.set_model(
-                "" if name in (NO_MODEL_LABEL, SAM_MODEL_LABEL, ULTRASAM_MODEL_LABEL) else name
+                ""
+                if name in (NO_MODEL_LABEL, SAM_MODEL_LABEL) or name in self._image_prompters
+                else name
             )
             self.statusBar().showMessage(f"Model selected: {name}")
         except Exception as exc:
@@ -5072,7 +5075,7 @@ class MainWindow(QMainWindow):
                 thread.quit()
                 thread.wait(5000)
         self._clear_video_state()
-        for helper in (self._sam, self._ultrasam):
+        for helper in (self._sam, *self._image_prompters.values()):
             if helper is not None:
                 helper.close()
         super().closeEvent(event)

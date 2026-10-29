@@ -54,6 +54,8 @@ def ultrasam_available():
 
 
 class UltraSamPrompter(HelperProcess):
+    model_name = ULTRASAM_MODEL_NAME
+
     def __init__(self):
         super().__init__(
             ULTRASAM_MODEL_LABEL,
