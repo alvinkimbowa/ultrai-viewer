@@ -982,10 +982,23 @@ class Canvas(QWidget):
                     event.position().toPoint()
                 )
             return
-        if self.tool in ("brush", "eraser") and event.button() == Qt.MouseButton.LeftButton:
-            index = self._label_at(event.position().toPoint())
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            index = self._label_at(pos)
             if index is not None:
-                self._select_by_label(index)
+                if self.tool == "select":
+                    # With Select, a tag is a handle: it selects the mask and drags it.
+                    self.selected_index = index
+                    self.selection = "mask"
+                    self.notice.emit(f"Selected {instance_title(self.instances[index])}")
+                    self._mask_move = {
+                        "press": pos,
+                        "mask": self.instances[index]["mask"].copy(),
+                        "moved": False,
+                    }
+                    self.update()
+                else:
+                    self._select_by_label(index)
                 return
         if self.tool in LABELLED_TOOLS and event.button() in (
             Qt.MouseButton.LeftButton,
