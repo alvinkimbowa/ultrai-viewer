@@ -1,5 +1,5 @@
 """
-Main window of the nerve ultrasound app.
+Main window of the annotation app.
 """
 
 from PyQt6.QtWidgets import (
@@ -30,7 +30,10 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QInputDialog,
+    QMenu,
     QToolTip,
+    QTreeWidget,
+    QTreeWidgetItem,
 )
 from PyQt6.QtCore import (
     Qt, QObject, QThread, QTimer, QSize, QEvent, QEventLoop, QSettings, pyqtSignal, pyqtSlot,
@@ -58,8 +61,9 @@ from .instances import (
     next_instance_id,
     safe_class,
     same_instances,
+    UNLABELED,
 )
-from .labels import LabelChips, NerveManifest
+from .labels import CLASSES_FILE_NAME, ClassList
 from .theme import TEXT, TEXT_DISABLED
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING, clip_starts
 from .rois import RoiStore
@@ -258,7 +262,7 @@ def merge_predicted(kept, predicted):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self._base_title = "UltrAi Nerve Viewer"
+        self._base_title = "UltrAi Viewer"
         self.setWindowTitle(self._base_title)
         self._sidebar_width = 340
         self._measurements_sidebar_width = 280
@@ -273,10 +277,10 @@ class MainWindow(QMainWindow):
         self.canvas.image_loaded.connect(self._update_title_with_image)
         self.canvas.navigation_requested.connect(self._on_canvas_navigation_requested)
         self.canvas.notice.connect(self.statusBar().showMessage)
-        # The label sets and the location and side of each file, kept in the
-        # selected output folder; one with no folder yet holds only the defaults.
-        self._manifest = NerveManifest()
-        self._manifest_dir = None
+        # The classes objects are named with, kept in the selected output folder;
+        # with no folder yet they are kept in memory.
+        self._classes = ClassList()
+        self._classes_dir = None
 
         self._sidebar_panels = []
         root_layout.addWidget(
@@ -288,8 +292,6 @@ class MainWindow(QMainWindow):
         canvas_layout = QVBoxLayout(canvas_panel)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
         canvas_layout.setSpacing(0)
-        canvas_layout.addWidget(self._build_label_panel(), stretch=0)
-        canvas_layout.addSpacing(6)
         canvas_layout.addWidget(self.canvas, stretch=1)
         canvas_layout.addSpacing(6)
         frame_nav_row = QHBoxLayout()
@@ -454,14 +456,9 @@ class MainWindow(QMainWindow):
         self.canvas.roi_drawn.connect(self._on_roi_drawn)
         self.canvas.roi_changed.connect(self._save_current_roi)
         self.canvas.delete_requested.connect(self._on_delete_requested)
-        self.side_picker.currentIndexChanged.connect(self._on_side_changed)
-        self.location_chips.picked.connect(self._on_location_picked)
-        self.nerve_chips.picked.connect(lambda label: self._on_class_picked(label, "nerves"))
-        self.anatomy_chips.picked.connect(lambda label: self._on_class_picked(label, "anatomy"))
-        self.location_chips.add_requested.connect(lambda: self._add_label("locations"))
-        self.nerve_chips.add_requested.connect(lambda: self._add_label("nerves"))
-        self.anatomy_chips.add_requested.connect(lambda: self._add_label("anatomy"))
-        self._show_label_sets()
+        self.canvas.selection_changed.connect(self._select_object_row)
+        self.canvas.class_requested.connect(self._name_selected_with_new_class)
+        self._show_classes()
         self.canvas.image_loaded.connect(self._on_image_loaded_during_calibration)
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance_playback)
@@ -714,120 +711,32 @@ class MainWindow(QMainWindow):
     def _base_output_dir(self):
         return self._video_base_dir if self._mode == "video" else self._sequence_base_dir
 
-    def _load_manifest(self):
-        """Read the label sets and file labels of the selected output folder."""
+    def _load_classes(self):
+        """Read the classes of the selected output folder."""
         folder = self._base_output_dir()
-        if folder == self._manifest_dir:
+        if folder == self._classes_dir:
             return
         try:
-            self._manifest = NerveManifest(folder)
+            self._classes = ClassList(folder)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(
-                self, "Labels", f"Could not read {Path(folder) / 'nerve_manifest.json'}: {exc}"
+                self, "Classes", f"Could not read {Path(folder) / CLASSES_FILE_NAME}: {exc}"
             )
-            self._manifest = NerveManifest()
-        self._manifest_dir = folder
-        self._show_label_sets()
+            self._classes = ClassList()
+        self._classes_dir = folder
+        self._show_classes()
 
-    def _save_manifest(self):
+    def _save_classes(self):
         try:
-            self._manifest.save()
+            self._classes.save()
         except OSError as exc:
-            self.statusBar().showMessage(f"Could not save the labels: {exc}")
+            self.statusBar().showMessage(f"Could not save the classes: {exc}")
 
-    def _show_label_sets(self):
-        """Put the label sets on the chips and give the canvas their colours."""
-        order = self._manifest.class_order()
-        self.canvas.set_class_order(order)
-        self.canvas.set_label_choices(self._manifest.nerves, self._manifest.anatomy)
-        colors = {label: self.canvas.color_of(label) for label in order}
-        self.location_chips.set_labels(self._manifest.locations)
-        self.nerve_chips.set_labels(self._manifest.nerves, colors)
-        self.anatomy_chips.set_labels(self._manifest.anatomy, colors)
-        self._show_file_labels()
-
-    def _show_file_labels(self):
-        """Show the location and side of the file on screen."""
-        name = self._shown_file_name()
-        is_video = self._mode == "video"
-        location = None if name is None else self._manifest.location(name, is_video)
-        side = None if name is None else self._manifest.side(name, is_video)
-        self.location_chips.set_checked(location)
-        self.side_picker.blockSignals(True)
-        self.side_picker.setCurrentIndex(max(0, self.side_picker.findData(side or "")))
-        self.side_picker.blockSignals(False)
-
-    def _file_labels(self, file_name, is_video):
-        """(side, location) of a file."""
-        return (
-            self._manifest.side(file_name, is_video),
-            self._manifest.location(file_name, is_video),
-        )
-
-    def _on_class_picked(self, label, kind):
-        """A nerve or anatomy chip picked: new masks get its label. Nerve and
-        anatomy chips share one choice, so picking one unchecks the other row."""
-        other = self.anatomy_chips if kind == "nerves" else self.nerve_chips
-        if label:
-            other.set_checked(None)
-        self.canvas.set_active_class(label or None)
-        if label:
-            self.statusBar().showMessage(f"New masks are labelled {display_class(label)}")
-
-    def _on_location_picked(self, location):
-        name = self._shown_file_name()
-        if name is None:
-            self.location_chips.set_checked(None)
-            QMessageBox.information(self, "No files", "Load files first.")
-            return
-        self._manifest.set_location(name, self._mode == "video", location or None)
-        self._save_manifest()
-        self._file_labels_changed()
-        self.statusBar().showMessage(
-            f"Location of {name}: {display_class(location)}" if location else f"Location of {name} cleared"
-        )
-
-    def _on_side_changed(self):
-        name = self._shown_file_name()
-        if name is None:
-            return
-        self._manifest.set_side(name, self._mode == "video", self.side_picker.currentData() or None)
-        self._save_manifest()
-        self._file_labels_changed()
-
-    def _file_labels_changed(self):
-        """Bring the measurements of the file on screen up to date with its
-        location and side; for a video, those of every saved frame."""
-        if self._mode == "video":
-            if self._batch_thread and self._batch_thread.isRunning():
-                return
-            self._stash_video_mask_for_current_frame()
-            self._remeasure_video_frames()
-        elif self._mode == "sequence":
-            self._save_sequence_mask_if_needed()
-
-    def _add_label(self, kind):
-        titles = {"locations": "location", "nerves": "nerve", "anatomy": "anatomy"}
-        text, ok = QInputDialog.getText(
-            self, f"Add {titles[kind]}", f"Name of the new {titles[kind]}:"
-        )
-        if not ok or not clean_class(text):
-            return
-        if not self._manifest.add_label(kind, text):
-            QMessageBox.information(
-                self, "Add label", f"There is already a label called {display_class(text)}."
-            )
-            return
-        self._save_manifest()
-        self._show_label_sets()
-        chips = {"locations": self.location_chips, "nerves": self.nerve_chips, "anatomy": self.anatomy_chips}
-        if kind == "locations":
-            if self._shown_file_name() is not None:
-                self.location_chips.set_checked(clean_class(text))
-                self._on_location_picked(clean_class(text))
-        else:
-            chips[kind].set_checked(clean_class(text))
-            self._on_class_picked(clean_class(text), kind)
+    def _show_classes(self):
+        """Give the canvas the class colours and list the objects under them."""
+        self.canvas.set_class_order(self._classes.class_order())
+        self._listed_mask_keys = None
+        self._list_shown_masks()
 
     def _shown_file_name(self):
         """Name of the image or video file on screen, or None."""
@@ -856,8 +765,7 @@ class MainWindow(QMainWindow):
         return str(output_dir), file_name, str(frame)
 
     def _restore_frame_inputs(self):
-        """Bring back the ROI, location and side of the frame on screen."""
-        self._show_file_labels()
+        """Bring back the ROI of the frame on screen."""
         key = self._current_frame_key()
         if key is None:
             return
@@ -932,9 +840,9 @@ class MainWindow(QMainWindow):
         return None
 
     def _restore_folder_inputs(self):
-        """Show the ROI, location and side the output folder holds for the frame
-        on screen, in place of those of the folder it was switched from."""
-        self._load_manifest()
+        """Show the classes and ROI the output folder holds, in place of those of
+        the folder it was switched from."""
+        self._load_classes()
         self._restore_frame_inputs()
 
     def _roi_store(self, output_dir):
@@ -1526,16 +1434,12 @@ class MainWindow(QMainWindow):
             log.remove(file_name, frame)
             return True
         mask_set.write(trimmed, angle, stored_shape)
-        is_video = frame != ""
-        side, location = self._file_labels(file_name, is_video)
         log.set(
             file_name,
             frame,
             trimmed,
             self.px_per_mm_x_spin.value(),
             self.px_per_mm_y_spin.value(),
-            side=side,
-            location=location,
             limits=fitted,
             rotation=angle,
         )
@@ -1649,7 +1553,6 @@ class MainWindow(QMainWindow):
     def _record_measurement(self, output_dir, file_name, frame="", target=None, instances=None):
         """Store the measurements of the masks on screen next to their saved
         masks, or, given a target, those of its masks (instances)."""
-        side, location = self._file_labels(file_name, frame != "")
         if target is None:
             instances = self.canvas.visible_instances()
             roi, angle = self.canvas.roi_box(), self._shown_angle
@@ -1663,8 +1566,6 @@ class MainWindow(QMainWindow):
                 instances,
                 self.px_per_mm_x_spin.value(),
                 self.px_per_mm_y_spin.value(),
-                side=side,
-                location=location,
                 limits=roi,
                 rotation=angle,
             )
@@ -1718,13 +1619,10 @@ class MainWindow(QMainWindow):
 
     def _measurement_is_current(self, output_dir, file_name, frame=""):
         """True when the saved rows were measured with the inputs on screen."""
-        side, location = self._file_labels(file_name, frame != "")
         try:
             return self._measurement_log(output_dir).matches_inputs(
                 file_name,
                 frame,
-                side,
-                location,
                 self.canvas.roi_box(),
                 self._shown_angle,
                 (self.px_per_mm_x_spin.value(), self.px_per_mm_y_spin.value()),
@@ -1744,7 +1642,6 @@ class MainWindow(QMainWindow):
         if not frames:
             return
         name = Path(self._video_path).name
-        side, location = self._file_labels(name, True)
         angle = self._angle_of(self._video_output_dir, name)
         progress = WorkProgressDialog(
             "Measurements", "Updating measurements...", len(frames), self
@@ -1763,8 +1660,6 @@ class MainWindow(QMainWindow):
                     instances,
                     self.px_per_mm_x_spin.value(),
                     self.px_per_mm_y_spin.value(),
-                    side=side,
-                    location=location,
                     limits=(
                         log.limits(name, frame)
                         if log.rotation(name, frame) == angle
@@ -2143,54 +2038,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(undo_redo_row)
 
         layout.addSpacing(10)
-        layout.addWidget(QLabel("Masks shown:"))
-        self.show_all_masks_checkbox = QCheckBox("Select all")
-        self.show_all_masks_checkbox.setToolTip(
-            "Show every mask of the image or frame on screen, or hide them all. "
-            "Hidden masks are still saved and measured, but the eraser and Select "
-            "leave them alone."
+        layout.addWidget(QLabel("Objects:"))
+        self.objects_tree = QTreeWidget()
+        self.objects_tree.setHeaderHidden(True)
+        self.objects_tree.setMinimumHeight(160)
+        self.objects_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.objects_tree.setToolTip(
+            "The objects on screen under their classes. Click an object to select "
+            "it, double-click it to name it, and untick it to hide it. Click a "
+            "class to give new objects that class; double-click it to rename it."
         )
-        layout.addWidget(self.show_all_masks_checkbox)
-        self.shown_masks_box = QWidget()
-        self.shown_masks_layout = QVBoxLayout(self.shown_masks_box)
-        self.shown_masks_layout.setContentsMargins(18, 0, 0, 0)
-        self.shown_masks_layout.setSpacing(2)
-        layout.addWidget(self.shown_masks_box)
-        # (label, number) of each mask listed, and the file they were listed for;
-        # masks hidden in one file are shown again in the next.
+        layout.addWidget(self.objects_tree)
+        # (classes, objects) as last listed, and the file they were listed for;
+        # objects hidden in one file are shown again in the next.
         self._listed_mask_keys = None
         self._listed_masks_file = None
 
         layout.addStretch()
 
-        return panel
-
-    def _build_label_panel(self):
-        """The location, nerve and anatomy chips, in rows across the top of the
-        image."""
-        panel = QWidget()
-        grid = QGridLayout(panel)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(4)
-        self.location_chips = LabelChips("+ Add location")
-        self.location_chips.setToolTip("Where on the body the file on screen was scanned")
-        self.nerve_chips = LabelChips("+ Add nerve")
-        self.nerve_chips.setToolTip("The label new masks get")
-        self.anatomy_chips = LabelChips("+ Add anatomy")
-        self.anatomy_chips.setToolTip("The label new masks get")
-        for row, (title, chips) in enumerate(
-            (
-                ("Location:", self.location_chips),
-                ("Nerve:", self.nerve_chips),
-                ("Other anatomy:", self.anatomy_chips),
-            )
-        ):
-            label = QLabel(title)
-            label.setStyleSheet("font-weight: bold;")
-            grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-            grid.addWidget(chips, row, 1)
-        grid.setColumnStretch(1, 1)
         return panel
 
     def _build_measurements_sidebar(self):
@@ -2231,19 +2096,6 @@ class MainWindow(QMainWindow):
         configure_button(self.calibrate_btn)
         layout.addWidget(self.calibrate_btn)
 
-        side_row = QHBoxLayout()
-        self.side_picker = QComboBox()
-        self.side_picker.addItem("Not set", "")
-        self.side_picker.addItem("Left", "left")
-        self.side_picker.addItem("Right", "right")
-        self.side_picker.setToolTip(
-            "Which side of the body the file on screen shows. It is recorded with "
-            "the measurements of every image or frame of the file."
-        )
-        side_row.addWidget(QLabel("Side:"))
-        side_row.addWidget(self.side_picker, stretch=1)
-        layout.addLayout(side_row)
-
         # One row per mask on screen, filled in by _update_measurements.
         self.results_grid = QGridLayout()
         self.results_grid.setHorizontalSpacing(8)
@@ -2269,7 +2121,10 @@ class MainWindow(QMainWindow):
         self.save_mask_action.triggered.connect(self._save_current_mask)
         self.delete_mask_btn.clicked.connect(self._delete_current_mask)
         self.delete_mask_action.triggered.connect(self._delete_current_mask)
-        self.show_all_masks_checkbox.clicked.connect(self._show_all_masks_clicked)
+        self.objects_tree.itemChanged.connect(self._on_object_item_changed)
+        self.objects_tree.currentItemChanged.connect(self._on_object_row_selected)
+        self.objects_tree.itemDoubleClicked.connect(self._on_object_row_double_clicked)
+        self.objects_tree.customContextMenuRequested.connect(self._objects_menu)
         self.delete_masks_before_btn.clicked.connect(
             lambda: self._delete_video_masks_in_range(after=False)
         )
@@ -2299,11 +2154,6 @@ class MainWindow(QMainWindow):
         self.redo_action.triggered.connect(self._redo)
         self.model_picker.currentIndexChanged.connect(self._on_model_changed)
         self.canvas.sam_prompt_added.connect(self._on_sam_prompt)
-        self.canvas.label_needed.connect(
-            lambda text: QTimer.singleShot(
-                0, lambda: QMessageBox.information(self, "Pick a label", text)
-            )
-        )
         self.sam_find_btn.clicked.connect(self._sam_find_text)
         self.sam_text.returnPressed.connect(self._sam_find_text)
         self.sam_new_object_btn.clicked.connect(self._new_sam_object)
@@ -2582,8 +2432,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Deleted {what} of {count} frame(s) of {name}")
 
     def _list_shown_masks(self):
-        """List the masks of the image or frame on screen, each with a box that
-        shows or hides it."""
+        """List the objects of the image or frame on screen under their classes,
+        each with a box that shows or hides it, and add any class they bring
+        that the class list lacks."""
         listed_file = self._video_path if self._mode == "video" else self.canvas.image_path
         if listed_file != self._listed_masks_file:
             self._listed_masks_file = listed_file
@@ -2591,55 +2442,207 @@ class MainWindow(QMainWindow):
             self.canvas.hidden_keys = set()
         keys = sorted(
             {(i["class"], i["id"]) for i in self.canvas.instances if i["mask"].any()},
-            key=lambda key: (display_class(key[0]).lower(), key[1]),
+            key=lambda key: key[1],
         )
-        if keys != self._listed_mask_keys:
-            self._listed_mask_keys = keys
-            while self.shown_masks_layout.count():
-                self.shown_masks_layout.takeAt(0).widget().deleteLater()
-            for key in keys:
-                swatch = QPixmap(12, 12)
-                swatch.fill(QColor(*self.canvas.color_of(key[0])))
-                checkbox = QCheckBox(instance_title({"class": key[0], "id": key[1]}))
-                checkbox.setIcon(QIcon(swatch))
-                checkbox.setProperty("mask_key", key)
-                checkbox.toggled.connect(
-                    lambda shown, key=key: self._set_mask_shown(key, shown)
+        added = [c for c, _ in keys if c != UNLABELED and self._classes.add(c)]
+        if added:
+            self._save_classes()
+            self.canvas.set_class_order(self._classes.class_order())
+        classes = [UNLABELED] + self._classes.class_order()
+        listing = (tuple(classes), tuple(keys))
+        if listing != self._listed_mask_keys:
+            self._listed_mask_keys = listing
+            self._fill_objects_tree(classes, keys)
+        self._check_object_rows()
+        self._select_object_row()
+
+    def _fill_objects_tree(self, classes, keys):
+        tree = self.objects_tree
+        tree.blockSignals(True)
+        tree.clear()
+        for name in classes:
+            members = [key for key in keys if key[0] == name]
+            swatch = QPixmap(12, 12)
+            swatch.fill(QColor(*self.canvas.color_of(name)))
+            row = QTreeWidgetItem([f"{display_class(name)} ({len(members)})"])
+            row.setIcon(0, QIcon(swatch))
+            row.setData(0, Qt.ItemDataRole.UserRole, ("class", name))
+            flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            if members:
+                flags |= Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate
+            else:
+                row.setForeground(0, QColor(TEXT_DISABLED))
+            row.setFlags(flags)
+            for key in members:
+                child = QTreeWidgetItem([instance_title({"class": key[0], "id": key[1]})])
+                child.setIcon(0, QIcon(swatch))
+                child.setData(0, Qt.ItemDataRole.UserRole, ("object", key))
+                child.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsUserCheckable
                 )
-                self.shown_masks_layout.addWidget(checkbox)
-        hidden = self.canvas.hidden_keys
-        for index in range(self.shown_masks_layout.count()):
-            checkbox = self.shown_masks_layout.itemAt(index).widget()
-            checkbox.blockSignals(True)
-            checkbox.setChecked(tuple(checkbox.property("mask_key")) not in hidden)
-            checkbox.blockSignals(False)
-        shown = sum(1 for key in keys if key not in hidden)
-        self.show_all_masks_checkbox.blockSignals(True)
-        self.show_all_masks_checkbox.setEnabled(bool(keys))
-        if keys and shown == len(keys):
-            self.show_all_masks_checkbox.setCheckState(Qt.CheckState.Checked)
-        elif shown:
-            self.show_all_masks_checkbox.setCheckState(Qt.CheckState.PartiallyChecked)
-        else:
-            self.show_all_masks_checkbox.setCheckState(Qt.CheckState.Unchecked)
-        self.show_all_masks_checkbox.blockSignals(False)
+                child.setCheckState(0, Qt.CheckState.Checked)
+                row.addChild(child)
+            tree.addTopLevelItem(row)
+            row.setExpanded(True)
+        tree.blockSignals(False)
 
-    def _set_mask_shown(self, key, shown):
-        hidden = set(self.canvas.hidden_keys)
-        if shown:
-            hidden.discard(key)
-        else:
-            hidden.add(key)
-        self.canvas.set_hidden_keys(hidden)
+    def _object_rows(self):
+        """(item, (class, number)) of every object row."""
+        rows = []
+        for index in range(self.objects_tree.topLevelItemCount()):
+            parent = self.objects_tree.topLevelItem(index)
+            for child_index in range(parent.childCount()):
+                child = parent.child(child_index)
+                rows.append((child, tuple(child.data(0, Qt.ItemDataRole.UserRole)[1])))
+        return rows
 
-    def _show_all_masks_clicked(self):
-        """Show every mask listed unless all are shown, in which case hide them."""
-        keys = self._listed_mask_keys or []
-        if any(key in self.canvas.hidden_keys for key in keys):
-            self.canvas.set_hidden_keys(set())
-        else:
-            self.canvas.set_hidden_keys(set(self.canvas.hidden_keys) | set(keys))
-        self._list_shown_masks()
+    def _check_object_rows(self):
+        """Tick the rows of the objects shown and untick those of hidden ones."""
+        tree = self.objects_tree
+        tree.blockSignals(True)
+        for item, key in self._object_rows():
+            hidden = key in self.canvas.hidden_keys
+            item.setCheckState(0, Qt.CheckState.Unchecked if hidden else Qt.CheckState.Checked)
+        tree.blockSignals(False)
+
+    def _on_object_item_changed(self, item, column):
+        hidden = {
+            key
+            for row, key in self._object_rows()
+            if row.checkState(0) == Qt.CheckState.Unchecked
+        }
+        if hidden != self.canvas.hidden_keys:
+            self.canvas.set_hidden_keys(hidden)
+
+    def _select_object_row(self):
+        """Select the row of the object selected on the canvas."""
+        selected = self.canvas._selected_instance()
+        key = None if selected is None else (selected["class"], selected["id"])
+        tree = self.objects_tree
+        row = next((item for item, row_key in self._object_rows() if row_key == key), None)
+        if row is tree.currentItem() and (row is None or row.isSelected()):
+            return
+        tree.blockSignals(True)
+        tree.clearSelection()
+        tree.setCurrentItem(row)
+        tree.blockSignals(False)
+
+    def _on_object_row_selected(self, item, previous=None):
+        if item is None:
+            return
+        kind, value = item.data(0, Qt.ItemDataRole.UserRole)
+        if kind == "object":
+            self.canvas.select_key(value)
+            return
+        self.canvas.select_key((None, None))
+        name = None if value == UNLABELED else value
+        self.canvas.set_active_class(name)
+        self.statusBar().showMessage(
+            f"New objects are {display_class(name)}" if name else "New objects are unlabeled"
+        )
+
+    def _on_object_row_double_clicked(self, item, column):
+        kind, value = item.data(0, Qt.ItemDataRole.UserRole)
+        if kind == "object":
+            self._name_object(tuple(value))
+        elif value != UNLABELED:
+            self._rename_class(value)
+
+    def _objects_menu(self, pos):
+        item = self.objects_tree.itemAt(pos)
+        if item is None:
+            return
+        kind, value = item.data(0, Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        if kind == "object":
+            key = tuple(value)
+            name_menu = menu.addMenu("Name as")
+            for name in self._classes.class_order():
+                action = name_menu.addAction(display_class(name))
+                action.setCheckable(True)
+                action.setChecked(name == key[0])
+                action.triggered.connect(lambda _, name=name: self._name_object(key, name))
+            if self._classes.class_order():
+                name_menu.addSeparator()
+            name_menu.addAction("New class...").triggered.connect(
+                lambda: self._name_object(key, new=True)
+            )
+            menu.addAction("Delete object").triggered.connect(
+                lambda: self._delete_object(key)
+            )
+        elif value != UNLABELED:
+            menu.addAction("Rename class...").triggered.connect(
+                lambda: self._rename_class(value)
+            )
+            remove = menu.addAction("Remove class")
+            remove.setEnabled(not any(i["class"] == value for i in self.canvas.instances))
+            remove.triggered.connect(lambda: self._remove_class(value))
+        if not menu.isEmpty():
+            menu.exec(self.objects_tree.viewport().mapToGlobal(pos))
+
+    def _ask_class(self, title, current=""):
+        """A class name typed or picked from the class list, or None."""
+        names = [display_class(name) for name in self._classes.class_order()]
+        start = names.index(display_class(current)) if display_class(current) in names else -1
+        if start < 0:
+            names = [""] + names
+            start = 0
+        text, ok = QInputDialog.getItem(self, title, "Class:", names, start, True)
+        name = clean_class(text)
+        if not ok or not name or name == UNLABELED:
+            return None
+        return name
+
+    def _name_object(self, key, name=None, new=False):
+        """Name an object with a class, asking for it when none is given."""
+        if name is None:
+            current = "" if new or key[0] == UNLABELED else key[0]
+            name = self._ask_class("Name object", current)
+            if name is None:
+                return
+        self.canvas.select_key(key)
+        if self._classes.add(name):
+            self._save_classes()
+            self.canvas.set_class_order(self._classes.class_order())
+        self.canvas.relabel_selected_instance(name)
+
+    def _name_selected_with_new_class(self):
+        selected = self.canvas._selected_instance()
+        if selected is not None:
+            self._name_object((selected["class"], selected["id"]), new=True)
+
+    def _delete_object(self, key):
+        self.canvas.select_key(key)
+        self.canvas.request_delete("mask")
+
+    def _rename_class(self, old):
+        text, ok = QInputDialog.getText(
+            self, "Rename class", "New name:", text=display_class(old)
+        )
+        new = clean_class(text)
+        if not ok or not new or new == old:
+            return
+        if not self._classes.rename(old, new):
+            QMessageBox.information(
+                self, "Rename class", f"There is already a class called {display_class(new)}."
+            )
+            return
+        self._save_classes()
+        if self.canvas.active_class == old:
+            self.canvas.set_active_class(new)
+        # The objects are renamed before the colours change, so that listing
+        # them does not bring the old name back as a class.
+        self.canvas.rename_class(old, new)
+        self._show_classes()
+
+    def _remove_class(self, name):
+        self._classes.remove(name)
+        self._save_classes()
+        if self.canvas.active_class == name:
+            self.canvas.set_active_class(None)
+        self._show_classes()
 
     def _prompt_model(self):
         """The helper that the point, box and mask prompts go to, or None while neither
@@ -2801,7 +2804,7 @@ class MainWindow(QMainWindow):
                 instance = self.canvas.instances[index]
                 self._sam_object = (instance["class"], instance["id"])
             else:
-                label = clean_class(self._model_default_class())
+                label = self.canvas.active_class or UNLABELED
                 self._sam_object = (label, next_instance_id(self.canvas.instances, label))
         if prompt[0] == "point":
             self._sam_points.append(tuple(prompt[1:]))
@@ -2886,16 +2889,10 @@ class MainWindow(QMainWindow):
             return
         if not self._sam_selected or not self._can_prompt():
             return
-        if self.canvas.active_class is None:
-            QMessageBox.information(
-                self,
-                "Pick a label",
-                "Pick a nerve or anatomy label under Labels for the masks SAM finds.",
-            )
-            return
-        video, frame, angle = self._video_path, self._video_frame_index, self._shown_angle
+        angle = self._shown_angle
         target = self._frame_target()
-        label = clean_class(self._model_default_class())
+        # Matches are named with the class new objects get, else with the text.
+        label = self.canvas.active_class or clean_class(text)
         # As for point prompts, a video frame is found in the stored frame's
         # pixels and an image as drawn.
         stored = self._mode == "video"
@@ -3259,7 +3256,6 @@ class MainWindow(QMainWindow):
         name = Path(video).name
         output_dir = self._video_output_dir
         angle = self._angle_of(output_dir, name)
-        side, location = self._file_labels(name, True)
         px_per_mm = (self.px_per_mm_x_spin.value(), self.px_per_mm_y_spin.value())
         rois = self._roi_store(output_dir)
         log = self._measurement_log(output_dir)
@@ -3297,8 +3293,6 @@ class MainWindow(QMainWindow):
                         frame,
                         instances,
                         *px_per_mm,
-                        side=side,
-                        location=location,
                         limits=box,
                         rotation=angle,
                     )
@@ -3503,10 +3497,6 @@ class MainWindow(QMainWindow):
             rois=self._rois_for_segmenting(self._sequence_output_dir),
             rotations=self._rotation_store(self._sequence_output_dir).angles(),
             measurements=self._measurement_file(self._sequence_output_dir),
-            file_labels={
-                Path(path).name: self._file_labels(Path(path).name, False)
-                for path in self._sequence_paths
-            },
             default_class=self._model_default_class(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
@@ -3600,10 +3590,6 @@ class MainWindow(QMainWindow):
             rois=self._rois_for_segmenting(self._video_output_dir),
             rotations=self._rotation_store(self._video_output_dir).angles(),
             measurements=self._measurement_file(self._video_output_dir),
-            file_labels={
-                Path(path).name: self._file_labels(Path(path).name, True)
-                for path in video_paths
-            },
             default_class=self._model_default_class(),
         )
         self._batch_worker.moveToThread(self._batch_thread)
@@ -3784,7 +3770,7 @@ class MainWindow(QMainWindow):
         self._sequence_index = 0
         self._sequence_output_dir = output_dir
         self._update_output_dir_tooltip()
-        self._load_manifest()
+        self._load_classes()
         self.file_combo.setEnabled(True)
         self.file_combo.clear()
         self.file_combo.addItems([Path(p).name for p in self._sequence_paths])
@@ -3806,7 +3792,7 @@ class MainWindow(QMainWindow):
         self._save_persisted_paths()
         self._update_output_dir_tooltip()
         self._mode = "video"
-        self._load_manifest()
+        self._load_classes()
         self.file_combo.setEnabled(True)
         self.file_combo.clear()
         self.file_combo.addItems([Path(p).name for p in self._video_paths])
@@ -5052,8 +5038,8 @@ class MainWindow(QMainWindow):
             )
 
     def _model_default_class(self):
-        """The label a single-class model's masks get: the nerve or anatomy
-        picked, or the default nerve."""
+        """The class a single-class model's masks get: the class new objects
+        get, or the model's default."""
         return self.canvas.active_class or DEFAULT_MODEL_CLASS
 
     def _on_inference_canceled(self):
@@ -5495,15 +5481,12 @@ class BatchInferenceWorker(QObject):
         rois=None,
         rotations=None,
         measurements=None,
-        file_labels=None,
         default_class=DEFAULT_MODEL_CLASS,
     ):
         super().__init__()
         self._rotations = rotations or {}
         # (folder, file name) of the measurements file the results go into.
         self._measurements = measurements or (output_dir, MEASUREMENTS_FILE_NAME)
-        # (side, location) of each image, by file name.
-        self._file_labels = file_labels or {}
         self._default_class = default_class
         self._model = model
         self._image_paths = list(image_paths)
@@ -5571,14 +5554,11 @@ class BatchInferenceWorker(QObject):
                     self._default_class, self._cancel_event,
                 )
                 self.saved.add(image_path)
-                side, location = self._file_labels.get(name, (None, None))
                 self._measurement_log.set(
                     name,
                     "",
                     instances,
                     *self._px_per_mm,
-                    side=side,
-                    location=location,
                     limits=box,
                     rotation=angle,
                 )
@@ -5633,15 +5613,12 @@ class VideoBatchInferenceWorker(QObject):
         rois=None,
         rotations=None,
         measurements=None,
-        file_labels=None,
         default_class=DEFAULT_MODEL_CLASS,
     ):
         super().__init__()
         self._rotations = rotations or {}
         # (folder, file name) of the measurements file the results go into.
         self._measurements = measurements or (output_dir, MEASUREMENTS_FILE_NAME)
-        # (side, location) of each video, by file name.
-        self._file_labels = file_labels or {}
         self._default_class = default_class
         self._model = model
         self._video_paths = list(video_paths)
@@ -5727,7 +5704,6 @@ class VideoBatchInferenceWorker(QObject):
                 video_output_dir = self._output_dir / Path(video_path).stem
                 video_output_dir.mkdir(parents=True, exist_ok=True)
                 annotated = annotated_frames(video_output_dir)
-                side, location = self._file_labels.get(video_name, (None, None))
                 angle = self._rotations.get(video_name, 0.0)
                 read = 0
                 try:
@@ -5762,8 +5738,6 @@ class VideoBatchInferenceWorker(QObject):
                             frame_index,
                             instances,
                             *self._px_per_mm,
-                            side=side,
-                            location=location,
                             limits=box,
                             rotation=angle,
                         )

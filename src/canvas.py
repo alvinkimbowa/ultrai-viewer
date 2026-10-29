@@ -17,14 +17,10 @@ from .instances import (
     instance_title,
     make_instance,
     next_instance_id,
+    UNLABELED,
 )
 from .labels import class_color
 from .theme import CANVAS
-
-# Tools that make or change a mask of a label, and so need a label picked or a
-# mask selected before they start.
-LABELLED_TOOLS = ("freehand", "polyline", "brush", "sam_point", "sam_box", "sam_mask")
-
 
 def label_anchor(mask):
     """The mask pixel (x, y) nearest the mask's centroid, so that a label put
@@ -48,8 +44,10 @@ class Canvas(QWidget):
     # A SAM prompt, in image pixels: ("point", x, y, include) or
     # ("box", left, top, right, bottom).
     sam_prompt_added = pyqtSignal(tuple)
-    # Why a drawing tool was not started: no label is picked and no mask selected.
-    label_needed = pyqtSignal(str)
+    # The mask selected changed, or none is selected any more.
+    selection_changed = pyqtSignal()
+    # The user asked to name the selected mask with a class not listed yet.
+    class_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -60,16 +58,14 @@ class Canvas(QWidget):
         # uint8 0/1 mask the size of the image. Later ones are drawn on top.
         self.instances = []
         # Index in self.instances of the instance the Select tool picked, or None.
-        self.selected_index = None
+        self._selected_index = None
         # (label, number) of the masks kept out of view. They are still saved and
         # measured, but are not drawn, picked or erased.
         self.hidden_keys = set()
-        # The label new masks get, and the order of the labels, which gives each
-        # its colour.
+        # The class new masks get, unlabeled when None, and the order of the
+        # classes, which gives each its colour.
         self.active_class = None
         self.class_order = []
-        # The labels offered when relabelling a mask: (nerves, other anatomy).
-        self.label_choices = ([], [])
         self.mask_pixmap = None
         self._label_anchors = []
         # The screen rectangle of each mask's name tag as last drawn, with the
@@ -331,9 +327,6 @@ class Canvas(QWidget):
         self._refresh_mask_pixmap()
         self.update()
 
-    def set_label_choices(self, nerves, anatomy):
-        self.label_choices = (list(nerves), list(anatomy))
-
     def set_active_class(self, name):
         self.active_class = clean_class(name) or None
 
@@ -387,34 +380,31 @@ class Canvas(QWidget):
         self.update()
         return made
 
-    def _add_polygon(self, points):
-        """Fill a closed outline as a new mask of the active label.
+    @property
+    def selected_index(self):
+        return self._selected_index
 
-        With no label picked the outline is added to the selected mask instead,
-        and with neither nothing is drawn. Returns whether a mask changed.
-        """
+    @selected_index.setter
+    def selected_index(self, index):
+        if index != self._selected_index:
+            self._selected_index = index
+            self.selection_changed.emit()
+
+    def _new_class(self):
+        return self.active_class or UNLABELED
+
+    def _add_polygon(self, points):
+        """Fill a closed outline as a new mask of the active class, or an
+        unlabeled one. Returns whether a mask was made."""
         if self.image is None:
             return False
         outline = np.array([[p.x(), p.y()] for p in points], dtype=np.int32)
-        if self.active_class is not None:
-            height, width = self.image.shape[:2]
-            mask = np.zeros((height, width), dtype=np.uint8)
-            cv2.fillPoly(mask, [outline.reshape((-1, 1, 2))], 1)
-            self.instances.append(
-                make_instance(
-                    self.active_class,
-                    next_instance_id(self.instances, self.active_class),
-                    mask,
-                )
-            )
-            self.selected_index = len(self.instances) - 1
-        elif self._selected_instance() is not None:
-            cv2.fillPoly(
-                self._selected_instance()["mask"], [outline.reshape((-1, 1, 2))], 1
-            )
-        else:
-            self.label_needed.emit("Pick a nerve or anatomy label before drawing a mask.")
-            return False
+        height, width = self.image.shape[:2]
+        mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillPoly(mask, [outline.reshape((-1, 1, 2))], 1)
+        name = self._new_class()
+        self.instances.append(make_instance(name, next_instance_id(self.instances, name), mask))
+        self.selected_index = len(self.instances) - 1
         self._refresh_mask_pixmap()
         self._push_history()
         self._mask_touched = True
@@ -683,6 +673,32 @@ class Canvas(QWidget):
         self.notice.emit(f"{old_title} is now {instance_title(instance)}")
         self.update()
 
+    def select_key(self, key):
+        """Select the mask of a (class, number), or none when it is not here."""
+        index = next(
+            (n for n, i in enumerate(self.instances) if (i["class"], i["id"]) == tuple(key)),
+            None,
+        )
+        self.selected_index = index
+        self.selection = None if index is None else "mask"
+        self.update()
+
+    def rename_class(self, old, new):
+        """Give every mask of one class another class, keeping their numbers;
+        new must have no masks here."""
+        old, new = clean_class(old), clean_class(new)
+        changed = False
+        for instance in self.instances:
+            if instance["class"] == old:
+                instance["class"] = new
+                changed = True
+        if changed:
+            self.hidden_keys = {(new if c == old else c, n) for c, n in self.hidden_keys}
+            self._refresh_mask_pixmap()
+            self._push_history()
+            self._mask_touched = True
+        self.update()
+
     def start_calibration(self):
         if self.image is None:
             return False
@@ -928,19 +944,16 @@ class Canvas(QWidget):
         return max(1, min(8, width))
 
     def _brush_target(self):
-        """The mask a brush stroke paints into: the selected mask when it has the
-        active label or no label is picked, otherwise a new mask of the active
-        label. None, with a notice, when there is neither."""
+        """The mask a brush stroke paints into: the selected mask, otherwise a
+        new mask of the active class, or an unlabeled one."""
         selected = self._selected_instance()
-        if selected is not None and self.active_class in (None, selected["class"]):
+        if selected is not None:
             return selected
-        if self.active_class is None:
-            self.label_needed.emit("Pick a nerve or anatomy label before painting a mask.")
-            return None
         height, width = self.image.shape[:2]
+        name = self._new_class()
         instance = make_instance(
-            self.active_class,
-            next_instance_id(self.instances, self.active_class),
+            name,
+            next_instance_id(self.instances, name),
             np.zeros((height, width), dtype=np.uint8),
         )
         self.instances.append(instance)
@@ -1034,17 +1047,6 @@ class Canvas(QWidget):
                 else:
                     self._select_by_label(index)
                 return
-        if self.tool in LABELLED_TOOLS and event.button() in (
-            Qt.MouseButton.LeftButton,
-            Qt.MouseButton.RightButton,
-        ):
-            if self.active_class is None and self._selected_instance() is None:
-                if event.button() == Qt.MouseButton.LeftButton or self.tool == "sam_point":
-                    self.label_needed.emit(
-                        "Pick a nerve or anatomy label under Labels before drawing "
-                        "or prompting a mask, or select the mask to change."
-                    )
-                    return
         if event.button() == Qt.MouseButton.LeftButton:
             point = self._screen_to_image(event.position().toPoint())
             if point is None:
@@ -1345,16 +1347,15 @@ class Canvas(QWidget):
             self._select_instance_at(event.pos())
             self.update()
             instance = self._selected_instance()
-            label_menu = menu.addMenu(f"Label of {instance_title(instance)}")
-            nerves, anatomy = self.label_choices
-            for group_index, group in enumerate((nerves, anatomy)):
-                if group_index and group:
-                    label_menu.addSeparator()
-                for name in group:
-                    action = label_menu.addAction(display_class(name))
-                    action.setCheckable(True)
-                    action.setChecked(name == instance["class"])
-                    action.setData(("label", name))
+            label_menu = menu.addMenu(f"Name {instance_title(instance)} as")
+            for name in self.class_order:
+                action = label_menu.addAction(display_class(name))
+                action.setCheckable(True)
+                action.setChecked(name == instance["class"])
+                action.setData(("label", name))
+            if self.class_order:
+                label_menu.addSeparator()
+            label_menu.addAction("New class...").setData(("new_class", None))
             menu.addAction("Delete mask").setData("mask")
         if "roi" in kinds:
             menu.addAction("Delete ROI").setData("roi")
@@ -1366,6 +1367,8 @@ class Canvas(QWidget):
         data = chosen.data()
         if isinstance(data, tuple) and data[0] == "label":
             self.relabel_selected_instance(data[1])
+        elif isinstance(data, tuple) and data[0] == "new_class":
+            self.class_requested.emit()
         else:
             self.request_delete(data)
 

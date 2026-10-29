@@ -25,17 +25,19 @@ from .rotations import rotate_mask, unrotate_mask
 MASK_FILE = re.compile(r"^(?:frame_(\d{6})_)?(.+)_(\d{3,})\.png$")
 
 
+UNLABELED = "unlabeled"
+
+
 def clean_class(name):
     return str(name or "").strip().lower()
 
 
 def safe_class(name):
-    return re.sub(r"[^a-z0-9]+", "_", clean_class(name)).strip("_") or "unlabeled"
+    return re.sub(r"[^a-z0-9]+", "_", clean_class(name)).strip("_") or UNLABELED
 
 
 def display_class(name):
-    label = clean_class(name)
-    return "LFCN" if label == "lfcn" else label.title()
+    return clean_class(name).title()
 
 
 def instance_title(instance):

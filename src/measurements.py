@@ -54,8 +54,6 @@ LIMIT_COLUMNS = ["limit_left", "limit_right", "limit_top", "limit_bottom"]
 MEASUREMENT_COLUMNS = [
     "file",
     "frame",
-    "side",
-    "location",
     "class",
     "instance_id",
     "area_px",
@@ -110,14 +108,11 @@ class MeasurementLog:
         instances,
         px_per_mm_x,
         px_per_mm_y,
-        side=None,
-        location=None,
         limits=None,
         rotation=0.0,
     ):
         """Measure the instances of an image or frame and store them as its rows.
 
-        side is "left", "right" or None, location the scanned site or None.
         limits is the ROI box (left, right, top, bottom) the masks were confined
         to, if any. rotation is the angle, in degrees clockwise, the image and
         masks were turned by before being measured.
@@ -126,8 +121,6 @@ class MeasurementLog:
         shared = {
             "file": str(file_name),
             "frame": str(frame),
-            "side": side or "",
-            "location": location or "",
             "unit": unit,
             "pixels_per_mm_x": f"{px_per_mm_x:.3f}" if px_per_mm_x else "",
             "pixels_per_mm_y": f"{px_per_mm_y:.3f}" if px_per_mm_y else "",
@@ -166,19 +159,13 @@ class MeasurementLog:
         except (TypeError, IndexError, KeyError, ValueError):
             return 0.0
 
-    def matches_inputs(
-        self, file_name, frame, side, location, limits, rotation, px_per_mm
-    ):
-        """True when a frame has rows and they record this side, location, ROI
-        box, rotation and pixels per mm."""
+    def matches_inputs(self, file_name, frame, limits, rotation, px_per_mm):
+        """True when a frame has rows and they record this ROI box, rotation and
+        pixels per mm."""
         rows = self.get(file_name, frame)
         if not rows:
             return False
         first = rows[0]
-        if first.get("side") != (side or "") or first.get("location") != (
-            location or ""
-        ):
-            return False
         if self.rotation(file_name, frame) != round(float(rotation), 1):
             return False
         x, y = px_per_mm
