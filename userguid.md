@@ -64,7 +64,7 @@ A video model, such as V-JEPA, reads 16 frames at a time, so a frame is segmente
    - A video is saved only once it is finished, so Cancel keeps the videos already done and leaves the one in progress as it was. The next Propagate all videos asks whether to propagate the finished videos again; **No** skips them and carries on with the rest. A video whose prompt frames changed since counts as not finished.
 4. Check the result, then trim it with **Delete before** / **Delete after**, or correct a frame by hand. The masks you change by hand are used as prompts the next time you propagate; SAM's other masks on that frame are tracked again. Your annotated frames are prompts in full.
 
-SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation files are not changed. The first prompt or propagation loads the model, which takes about half a minute.
+SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation files are not changed. Selecting SAM 3.1 loads its model in the background, which takes several seconds; a prompt given before it is ready waits for it.
 
 ## Prompt masks with UltraSam
 
@@ -74,7 +74,7 @@ SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation fil
 2. **Box prompt**: drag a box around the structure. **Point prompt**: left-click on it. **Mask prompt**: outline it roughly, by dragging or by clicking its corners and double-clicking to close; UltraSam fits the outline to the structure. Each prompt updates the mask; right-click with **Point prompt** excludes a spot, though UltraSam was trained on a single point or box and follows extra points loosely. Press **New object** before prompting the next structure. To redo a mask, select it first.
 3. Masks get the class chosen under **Objects**, or are **Unlabeled**.
 
-UltraSam's masks go in `<output folder>/ultrasam_predictions/`. The first prompt loads the model, which takes a few seconds; later prompts on the same image take a fraction of a second.
+UltraSam's masks go in `<output folder>/ultrasam_predictions/`. Selecting UltraSam loads its model in the background, which takes a few seconds; a prompt given before it is ready waits for it. After that, prompts take a fraction of a second.
 
 ## Prompt masks with nnInteractive
 
@@ -84,7 +84,7 @@ UltraSam's masks go in `<output folder>/ultrasam_predictions/`. The first prompt
 2. Prompt as with UltraSam. A box or an outline works far better than a point. On breast ultrasound, the mean Dice is about 0.85 from a box, 0.89 from a rough outline, and 0.47 from a single point. Right-click with **Point prompt** to exclude a spot. Press **New object** before prompting the next structure.
 3. Masks get the class chosen under **Objects**, or are **Unlabeled**.
 
-nnInteractive's masks go in `<output folder>/nninteractive_predictions/`. The first prompt loads the model, which takes several seconds. Its weights are licensed for non-commercial use only (CC BY-NC-SA 4.0).
+nnInteractive's masks go in `<output folder>/nninteractive_predictions/`. Selecting nnInteractive loads its model in the background, which takes several seconds; a prompt given before it is ready waits for it. Its weights are licensed for non-commercial use only (CC BY-NC-SA 4.0).
 
 ## Measurements
 

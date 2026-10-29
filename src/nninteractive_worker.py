@@ -16,6 +16,7 @@ Requests:
             "mask", a PNG of the image's size, is a closed outline of the
             structure (nnInteractive's lasso). The image is kept while requests
             carry the same key.
+    load    {}  loads the model, so that the first prompt need not wait for it
     quit
 
 Each request answers its prompts from scratch: the session's interactions are
@@ -130,10 +131,13 @@ def main():
         if cmd == "quit":
             return
         try:
-            if cmd != "points":
+            if cmd not in ("points", "load"):
                 raise RuntimeError(f"Unknown request {cmd!r}")
             if model is None:
                 model = NnInteractive(model_folder)
+            if cmd == "load":
+                send({"id": reply_id, "ok": True})
+                continue
             image = cv2.imread(request["image"], cv2.IMREAD_COLOR)
             if image is None:
                 raise RuntimeError(f"Could not read {request['image']}")

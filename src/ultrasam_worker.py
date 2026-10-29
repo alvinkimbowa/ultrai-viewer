@@ -15,6 +15,7 @@ Requests:
             labelled 2 and 3, select on an 8-bit RGB PNG; points are its pixels.
             "mask", a PNG of the image's size, prompts as well. The image
             embedding is kept while requests carry the same key.
+    load    {}  loads the model, so that the first prompt need not wait for it
     quit
 
 A prompt is answered as UltraSam answers it: one mask from the prompt, then one
@@ -151,6 +152,10 @@ class UltraSam:
         model = sam_model_registry["vit_b"](checkpoint=None)
         model.load_state_dict(segment_anything_weights(mmdet_weights(checkpoint)), strict=True)
         self.model = model.to(self.device).eval()
+        # CUDA sets itself up on the first forward pass; doing it here keeps that
+        # wait out of the first prompt.
+        with torch.inference_mode():
+            self.model.image_encoder(torch.zeros(1, 3, SIDE, SIDE, device=self.device))
         self._key = None
         self._features = None
         self._scale = None
@@ -274,10 +279,13 @@ def main():
         if cmd == "quit":
             return
         try:
-            if cmd != "points":
+            if cmd not in ("points", "load"):
                 raise RuntimeError(f"Unknown request {cmd!r}")
             if sam is None:
                 sam = UltraSam(checkpoint)
+            if cmd == "load":
+                send({"id": reply_id, "ok": True})
+                continue
             image = cv2.imread(request["image"], cv2.IMREAD_COLOR)
             if image is None:
                 raise RuntimeError(f"Could not read {request['image']}")

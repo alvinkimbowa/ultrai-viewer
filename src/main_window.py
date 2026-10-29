@@ -4789,13 +4789,18 @@ class MainWindow(QMainWindow):
         for prompter in self._image_prompters.values():
             if prompter is not self._image_prompter:
                 prompter.stop()
+        if self._prompt_model() is not None:
+            self._prompt_model().warm_up()
         try:
             self._model.set_model(
                 ""
                 if name in (NO_MODEL_LABEL, SAM_MODEL_LABEL) or name in self._image_prompters
                 else name
             )
-            self.statusBar().showMessage(f"Model selected: {name}")
+            if self._prompt_model() is not None:
+                self.statusBar().showMessage(f"Model selected: {name}, loading it in the background")
+            else:
+                self.statusBar().showMessage(f"Model selected: {name}")
         except Exception as exc:
             QMessageBox.warning(self, "Model error", str(exc))
         self._update_sam_controls()

@@ -97,6 +97,18 @@ class HelperProcess:
                     raise RuntimeError(reply["error"])
                 return reply
 
+    def warm_up(self):
+        """Start the helper and load its model on a background thread, so that
+        the first request finds it ready. A request made meanwhile waits for it."""
+
+        def load():
+            try:
+                self.request("load")
+            except Exception:
+                pass
+
+        threading.Thread(target=load, daemon=True).start()
+
     def cancel(self):
         if self._process is not None and self._process.poll() is None:
             try:

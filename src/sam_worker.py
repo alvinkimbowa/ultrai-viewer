@@ -24,6 +24,7 @@ Requests:
                frame start "both", "forward" or "backward", and saves the masks
                found as <out_dir>/<frame>_<object index>.png; its progress
                lines are [done, total, object index, frame]
+    load       {}  loads the tracker, so that the first prompt need not wait for it
     cancel     stops a running propagation
     quit
 """
@@ -449,7 +450,10 @@ def main():
         if cmd == "cancel":
             continue
         try:
-            if cmd == "open":
+            if cmd == "load":
+                sam.tracker()
+                result = {}
+            elif cmd == "open":
                 result = sam.open(request["video"])
             elif cmd == "image":
                 result = sam.open_image(request["image"], request.get("key"))
