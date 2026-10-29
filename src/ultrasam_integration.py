@@ -55,6 +55,10 @@ def ultrasam_available():
 
 class UltraSamPrompter(HelperProcess):
     model_name = ULTRASAM_MODEL_NAME
+    # UltraSam was trained on one point or one box per mask, and never on an
+    # exclude point.
+    single_prompt = True
+    exclude_points = False
 
     def __init__(self):
         super().__init__(

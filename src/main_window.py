@@ -368,6 +368,9 @@ class MainWindow(QMainWindow):
                 helper = prompter()
                 self._image_prompters[helper.label] = helper
         self._image_prompter = None
+        # Labels of the single-prompt models whose user chose, for this session,
+        # to replace a prompt by the next one without being asked.
+        self._replace_prompt_models = set()
         # Set while a SAM request is being answered; prompts made meanwhile are
         # sent once it is.
         self._sam_busy = False
@@ -2801,6 +2804,9 @@ class MainWindow(QMainWindow):
         replaces the prompts before it; points and boxes after it refine it."""
         if not self._can_prompt():
             return
+        if not self._prompt_allowed(prompt):
+            self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
+            return
         if self._sam_object is None:
             index = self.canvas.selected_index
             if index is not None and index < len(self.canvas.instances):
@@ -2819,6 +2825,53 @@ class MainWindow(QMainWindow):
             self._sam_box = tuple(prompt[1:])
         self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
         self._run_sam_prompts()
+
+    def _prompt_allowed(self, prompt):
+        """False when the model selected cannot take prompt. A model trained on
+        a single prompt per mask takes a further one only in place of the one
+        given, which the user is asked to confirm, unless it is a box or outline
+        replacing one of its own kind, as with every model."""
+        helper = self._prompt_model()
+        if prompt[0] == "point" and not prompt[3] and not helper.exclude_points:
+            QMessageBox.warning(
+                self,
+                helper.label,
+                f"{helper.label} has no exclude points. It was trained on a single "
+                "include point or box per mask.",
+            )
+            return False
+        if not helper.single_prompt:
+            return True
+        given = (
+            "point" if self._sam_points
+            else "box" if self._sam_box is not None
+            else "mask" if self._sam_mask is not None
+            else None
+        )
+        if given is None or (given == prompt[0] and given != "point"):
+            return True
+        if helper.label not in self._replace_prompt_models:
+            box = QMessageBox(self)
+            box.setWindowTitle(helper.label)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(
+                f"{helper.label} takes a single prompt per mask: one point, one box "
+                "or one outline. The prompt given will be discarded and the mask made "
+                "from the one you just gave."
+            )
+            replace = box.addButton("Use the new prompt", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            remember = QCheckBox(f"Remember choice for {helper.label} this session")
+            box.setCheckBox(remember)
+            box.exec()
+            if box.clickedButton() is not replace:
+                return False
+            if remember.isChecked():
+                self._replace_prompt_models.add(helper.label)
+        self._sam_points = []
+        self._sam_box = None
+        self._sam_mask = None
+        return True
 
     def _run_sam_prompts(self):
         if self._sam_busy:

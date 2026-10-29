@@ -20,9 +20,16 @@ class HelperProcess:
     """Requests to a helper process, which is started on first use and keeps
     its model loaded until the viewer closes.
 
+    A model whose single_prompt is True was trained on one prompt per mask, one
+    point or one box, and one with exclude_points False has no trained exclude
+    point.
+
     Requests block until answered, so they are made from worker threads; one
     runs at a time. cancel() may be called from any thread.
     """
+
+    single_prompt = False
+    exclude_points = True
 
     def __init__(self, label, command, pythonpath, log_file, scratch_prefix):
         self.label = label

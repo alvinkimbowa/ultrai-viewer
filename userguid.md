@@ -71,7 +71,7 @@ SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation fil
 **UltraSam** appears under **Model** on a computer set up with the `ultrasam` project. It is SAM trained on ultrasound: it makes one mask at a time from a point or a box, on an image or a video frame, and does not propagate.
 
 1. Choose **UltraSam** under **Model**. **Point prompt**, **Box prompt** and **Mask prompt** are added under **Tools**.
-2. **Box prompt**: drag a box around the structure. **Point prompt**: left-click on it. **Mask prompt**: outline it roughly, by dragging or by clicking its corners and double-clicking to close; UltraSam fits the outline to the structure. Each prompt updates the mask; right-click with **Point prompt** excludes a spot, though UltraSam was trained on a single point or box and follows extra points loosely. Press **New object** before prompting the next structure. To redo a mask, select it first.
+2. **Box prompt**: drag a box around the structure. **Point prompt**: left-click on it. **Mask prompt**: outline it roughly, by dragging or by clicking its corners and double-clicking to close; UltraSam fits the outline to the structure. UltraSam was trained on a single prompt per mask, so it takes one point, one box or one outline at a time. A prompt of another kind, or a second point, replaces the one given once you confirm it; tick **Remember choice** to replace without being asked for the rest of the session. A box or outline replaces the previous box or outline without asking. UltraSam has no exclude points, so a right-click with **Point prompt** is refused. Press **New object** before prompting the next structure. To redo a mask, select it first.
 3. Masks get the class chosen under **Objects**, or are **Unlabeled**.
 
 UltraSam's masks go in `<output folder>/ultrasam_predictions/`. Selecting UltraSam loads its model in the background, which takes a few seconds; a prompt given before it is ready waits for it. After that, prompts take a fraction of a second.
@@ -81,7 +81,7 @@ UltraSam's masks go in `<output folder>/ultrasam_predictions/`. Selecting UltraS
 **nnInteractive** appears under **Model** on a computer set up with the `nnInteractive` project. It is MIC-DKFZ's promptable nnU-Net, trained on CT, MRI and other 3D scans rather than ultrasound. Like UltraSam, it makes one mask at a time on an image or a video frame, and does not propagate.
 
 1. Choose **nnInteractive** under **Model**. **Point prompt**, **Box prompt** and **Mask prompt** are added under **Tools**.
-2. Prompt as with UltraSam. A box or an outline works far better than a point. On breast ultrasound, the mean Dice is about 0.85 from a box, 0.89 from a rough outline, and 0.47 from a single point. Right-click with **Point prompt** to exclude a spot. Press **New object** before prompting the next structure.
+2. Prompt as with SAM 3.1: points, a box and an outline combine. A box or an outline works far better than a point. On breast ultrasound, the mean Dice is about 0.85 from a box, 0.89 from a rough outline, and 0.47 from a single point. Right-click with **Point prompt** to exclude a spot. Press **New object** before prompting the next structure.
 3. Masks get the class chosen under **Objects**, or are **Unlabeled**.
 
 nnInteractive's masks go in `<output folder>/nninteractive_predictions/`. Selecting nnInteractive loads its model in the background, which takes several seconds; a prompt given before it is ready waits for it. Its weights are licensed for non-commercial use only (CC BY-NC-SA 4.0).
