@@ -16,7 +16,7 @@ from pathlib import Path
 import cv2
 
 from .helper_process import HelperProcess
-from .sam_integration import prompt_mask_fields, read_mask
+from .sam_integration import read_mask
 
 NNINTERACTIVE_MODEL_NAME = "nninteractive"
 NNINTERACTIVE_MODEL_LABEL = "nnInteractive"
@@ -60,6 +60,8 @@ def nninteractive_available():
 
 class NnInteractivePrompter(HelperProcess):
     model_name = NNINTERACTIVE_MODEL_NAME
+    exclude_boxes = True
+    ordered_prompts = True
 
     def __init__(self):
         super().__init__(
@@ -70,22 +72,36 @@ class NnInteractivePrompter(HelperProcess):
             "ultrai_nninteractive_",
         )
 
-    def segment_points(self, image, key, points, labels, mask=None):
-        """The mask points select on an 8-bit RGB image: (x, y) pixels of it,
-        labelled 1 to include, 0 to exclude, and 2 and 3 for the corners of a box.
-        A mask of the image's size, when given, is an outline of the structure.
-        The helper keeps the image while key stays the same."""
-        folder = self.scratch_dir("points")
+    def segment_prompts(self, image, key, prompts):
+        """The mask that prompts select on an 8-bit RGB image. prompts are
+        (id, prompt) in the order given, each id kept by its prompt for as long as
+        it stands; a prompt is ("point", x, y, include), ("box", left, top, right,
+        bottom), ("exclude_box", left, top, right, bottom) or ("mask", outline),
+        in pixels of the image. The helper keeps the image while key stays the
+        same, and adds only the prompts it has not had yet."""
+        folder = self.scratch_dir("prompts")
         image_path = folder / "image.png"
         out = folder / "mask.png"
         cv2.imwrite(str(image_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
-        self.request(
-            "points",
-            image=str(image_path),
-            key=key,
-            points=[[float(x), float(y)] for x, y in points],
-            labels=[int(label) for label in labels],
-            out=str(out),
-            **prompt_mask_fields(folder, mask),
-        )
+        sent = []
+        for prompt_id, prompt in prompts:
+            kind = prompt[0]
+            if kind == "point":
+                x, y, include = prompt[1:]
+                sent.append(
+                    {"id": prompt_id, "kind": "point", "include": bool(include),
+                     "x": float(x), "y": float(y)}
+                )
+            elif kind in ("box", "exclude_box"):
+                sent.append(
+                    {"id": prompt_id, "kind": "box", "include": kind == "box",
+                     "box": [float(v) for v in prompt[1:]]}
+                )
+            else:
+                path = folder / f"outline_{prompt_id}.png"
+                cv2.imwrite(str(path), prompt[1].astype("uint8") * 255)
+                sent.append(
+                    {"id": prompt_id, "kind": "lasso", "include": True, "mask": str(path)}
+                )
+        self.request("prompts", image=str(image_path), key=key, prompts=sent, out=str(out))
         return read_mask(out)

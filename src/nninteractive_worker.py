@@ -3,25 +3,30 @@ nnInteractive helper process for UltrAi Viewer.
 
 nnInteractive is MIC-DKFZ's promptable nnU-Net, trained on 3D volumes. A 2D
 image is given to it as a volume of DEPTH copies of the image, every prompt lies
-on the middle slice, and the mask is that slice of the result. The viewer has no PyTorch, so it runs this script with the Python of an
-environment that has PyTorch and the nnInteractive package, and talks to it
+on the middle slice, and the mask is that slice of the result. The viewer has
+no PyTorch, so it runs this script with the Python of an environment that has
+PyTorch and the nnInteractive package, and talks to it
 through the pipes: one JSON request per line on stdin, one JSON reply per line
 on stdout. Every reply carries the "id" of its request. Anything else the
 libraries print goes to stderr.
 
 Requests:
-    points  {"image", "key", "points", "labels", "out", "mask"?}  the mask that
-            include (1) and exclude (0) points, and a box given as corner points
-            labelled 2 and 3, select on an 8-bit RGB PNG; points are its pixels.
-            "mask", a PNG of the image's size, is a closed outline of the
-            structure (nnInteractive's lasso). The image is kept while requests
-            carry the same key.
-    load    {}  loads the model, so that the first prompt need not wait for it
+    prompts  {"image", "key", "prompts", "out"}  the mask that the prompts select
+             on an 8-bit RGB PNG, in the order they were given. Each prompt is
+             {"id", "kind", "include"} and, by kind, "x" and "y" for a "point",
+             "box" [left, top, right, bottom] for a "box", or "mask", a PNG of the
+             image's size holding a closed outline, for a "lasso"; positions are
+             pixels of the image. The image is kept while requests carry the same
+             key.
+    load     {}  loads the model, so that the first prompt need not wait for it
     quit
 
-Each request answers its prompts from scratch: the session's interactions are
-cleared, the outline and box are added, then the points, and nnInteractive
-predicts once, after the last of them.
+nnInteractive is used as it is meant to be: one session per image, to which
+each prompt is added in turn and followed by a prediction, so that later prompts
+weigh more and each prediction starts from the one before. A request whose
+prompts are those already added and more adds only the new ones; one that drops
+the last prompt takes it back with nnInteractive's undo; any other change clears
+the session and adds the prompts again in their order.
 """
 
 import json
@@ -66,11 +71,15 @@ class NnInteractive:
             verbose=False,
             torch_n_threads=os.cpu_count() or 4,
             do_autozoom=True,
-            enable_undo=False,
+            enable_undo=True,
         )
         self.session.initialize_from_trained_model_folder(str(model_folder))
         self._key = None
         self._target = None
+        # Ids of the prompts in the session, in the order added; None when the
+        # session no longer matches them, after a failed request.
+        self._added = []
+        self._can_undo = False
 
     def _set_image(self, image, key):
         if key is not None and key == self._key and self._target is not None:
@@ -80,41 +89,64 @@ class NnInteractive:
         self._target = torch.zeros((DEPTH, *grey.shape), dtype=torch.uint8)
         self.session.set_target_buffer(self._target)
         self._key = key
+        self._added = []
+        self._can_undo = False
 
-    @torch.inference_mode()
-    def points(self, image, key, points, labels, prompt_mask=None):
-        self._set_image(image, key)
-        self.session.reset_interactions()
-        height, width = image.shape[:2]
-        steps = []
-        if prompt_mask is not None and prompt_mask.any():
-            lasso = prompt_mask[None].astype(np.uint8)
-            middle = [[MIDDLE, MIDDLE + 1], [0, height], [0, width]]
-            steps.append(
-                lambda run: self.session.add_lasso_interaction(
-                    lasso, True, run, interaction_bbox=middle
-                )
-            )
-        corners = [p for p, label in zip(points, labels) if int(label) in (2, 3)]
-        if len(corners) == 2:
-            (x0, y0), (x1, y1) = corners
+    def _add(self, prompt, height, width):
+        include = bool(prompt["include"])
+        if prompt["kind"] == "point":
+            x = min(max(int(prompt["x"]), 0), width - 1)
+            y = min(max(int(prompt["y"]), 0), height - 1)
+            self.session.add_point_interaction((MIDDLE, y, x), include, True)
+        elif prompt["kind"] == "box":
+            left, top, right, bottom = prompt["box"]
             box = [
                 [MIDDLE, MIDDLE + 1],
-                [int(min(y0, y1)), max(int(min(y0, y1)) + 1, int(round(max(y0, y1))))],
-                [int(min(x0, x1)), max(int(min(x0, x1)) + 1, int(round(max(x0, x1))))],
+                [int(top), max(int(top) + 1, int(round(bottom)))],
+                [int(left), max(int(left) + 1, int(round(right)))],
             ]
-            steps.append(lambda run: self.session.add_bbox_interaction(box, True, run))
-        for (x, y), label in zip(points, labels):
-            if int(label) in (0, 1):
-                where = (MIDDLE, min(max(int(y), 0), height - 1), min(max(int(x), 0), width - 1))
-                include = int(label) == 1
-                steps.append(
-                    lambda run, where=where, include=include: self.session.add_point_interaction(
-                        where, include, run
-                    )
-                )
-        for index, step in enumerate(steps):
-            step(index == len(steps) - 1)
+            self.session.add_bbox_interaction(box, include, True)
+        else:
+            outline = cv2.imread(prompt["mask"], cv2.IMREAD_GRAYSCALE)
+            if outline is None:
+                raise RuntimeError(f"Could not read {prompt['mask']}")
+            middle = [[MIDDLE, MIDDLE + 1], [0, height], [0, width]]
+            self.session.add_lasso_interaction(
+                (outline > 127)[None].astype(np.uint8), include, True, interaction_bbox=middle
+            )
+        self._added.append(prompt["id"])
+        self._can_undo = True
+
+    @torch.inference_mode()
+    def prompts(self, image, key, prompts):
+        self._set_image(image, key)
+        height, width = image.shape[:2]
+        ids = [prompt["id"] for prompt in prompts]
+        added = self._added
+        try:
+            if added is not None and ids[: len(added)] == added:
+                new = prompts[len(added):]
+            elif (
+                added is not None
+                and ids == added[:-1]
+                and self._can_undo
+                and self.session.undo()
+            ):
+                self._added = ids
+                self._can_undo = False
+                new = []
+            else:
+                self.session.reset_interactions()
+                self._added = []
+                self._can_undo = False
+                new = prompts
+            for prompt in new:
+                self._add(prompt, height, width)
+        except Exception:
+            self._added = None
+            raise
+        if not self._added:
+            return np.zeros((height, width), dtype=bool)
         return self._target[MIDDLE].numpy() > 0
 
 
@@ -131,7 +163,7 @@ def main():
         if cmd == "quit":
             return
         try:
-            if cmd not in ("points", "load"):
+            if cmd not in ("prompts", "load"):
                 raise RuntimeError(f"Unknown request {cmd!r}")
             if model is None:
                 model = NnInteractive(model_folder)
@@ -142,12 +174,7 @@ def main():
             if image is None:
                 raise RuntimeError(f"Could not read {request['image']}")
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            prompt_mask = None
-            if request.get("mask"):
-                prompt_mask = cv2.imread(request["mask"], cv2.IMREAD_GRAYSCALE) > 127
-            mask = model.points(
-                image, request.get("key"), request["points"], request["labels"], prompt_mask
-            )
+            mask = model.prompts(image, request.get("key"), request["prompts"])
             cv2.imwrite(request["out"], mask.astype(np.uint8) * 255)
             send({"id": reply_id, "ok": True, "area": int(mask.sum())})
         except Exception as exc:

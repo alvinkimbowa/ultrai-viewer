@@ -22,7 +22,9 @@ class HelperProcess:
 
     A model whose single_prompt is True was trained on one prompt per mask, one
     point or one box, and one with exclude_points False has no trained exclude
-    point.
+    point; one with exclude_boxes True takes boxes that exclude what they hold.
+    One with ordered_prompts True takes its prompts in the order they were given,
+    through segment_prompts, rather than as points, a box and a mask.
 
     Requests block until answered, so they are made from worker threads; one
     runs at a time. cancel() may be called from any thread.
@@ -30,6 +32,8 @@ class HelperProcess:
 
     single_prompt = False
     exclude_points = True
+    exclude_boxes = False
+    ordered_prompts = False
 
     def __init__(self, label, command, pythonpath, log_file, scratch_prefix):
         self.label = label

@@ -376,11 +376,11 @@ class MainWindow(QMainWindow):
         self._sam_busy = False
         self._sam_rerun = False
         # The (label, number) of the mask the point, box and mask prompts shape,
-        # and those prompts, in pixels of the frame as viewed.
+        # and those prompts in the order given, each as (id, prompt) with the
+        # prompt as the canvas sends it, in pixels of the frame as viewed.
         self._sam_object = None
-        self._sam_points = []
-        self._sam_box = None
-        self._sam_mask = None
+        self._sam_prompts = []
+        self._next_prompt_id = 0
         self._prompt_undo = []
         self._prompt_redo = []
         self._prompt_start = None
@@ -2727,16 +2727,14 @@ class MainWindow(QMainWindow):
 
     def _reset_sam_prompts(self):
         self._sam_object = None
-        self._sam_points = []
-        self._sam_box = None
-        self._sam_mask = None
+        self._sam_prompts = []
         # The prompts of the mask being prompted as they were before each change,
         # and those undone; and where the canvas history stood, and the mask as
         # it was, before its first prompt.
         self._prompt_undo = []
         self._prompt_redo = []
         self._prompt_start = None
-        self.canvas.set_sam_prompts([], None)
+        self._show_prompt_marks()
 
     def _new_sam_object(self):
         self._reset_sam_prompts()
@@ -2826,13 +2824,14 @@ class MainWindow(QMainWindow):
             return
         before = self._prompt_state()
         if prompt[0] == "remove_point":
-            if self._sam_busy or not 0 <= prompt[1] < len(self._sam_points):
+            points = [entry for entry in self._sam_prompts if entry[1][0] == "point"]
+            if self._sam_busy or not 0 <= prompt[1] < len(points):
                 return
-            points = [p for i, p in enumerate(self._sam_points) if i != prompt[1]]
-            self._change_prompts((points, self._sam_box, self._sam_mask))
+            removed = points[prompt[1]]
+            self._change_prompts([entry for entry in self._sam_prompts if entry is not removed])
             return
         if not self._prompt_allowed(prompt):
-            self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
+            self._show_prompt_marks()
             return
         if self._sam_object is None:
             index = self.canvas.selected_index
@@ -2846,22 +2845,48 @@ class MainWindow(QMainWindow):
             self._prompt_start = self._canvas_point_in_history()
         self._prompt_undo.append(before)
         self._prompt_redo.clear()
-        if prompt[0] == "point":
-            self._sam_points.append(tuple(prompt[1:]))
-        elif prompt[0] == "mask":
-            self._sam_mask = prompt[1]
-            self._sam_points = []
-            self._sam_box = None
+        entry = (self._next_prompt_id, tuple(prompt))
+        self._next_prompt_id += 1
+        if prompt[0] == "mask":
+            self._sam_prompts = [entry]
+        elif prompt[0] == "box":
+            self._sam_prompts = [e for e in self._sam_prompts if e[1][0] != "box"] + [entry]
         else:
-            self._sam_box = tuple(prompt[1:])
-        self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
+            self._sam_prompts.append(entry)
+        self._show_prompt_marks()
         self._run_sam_prompts()
 
+    @property
+    def _sam_points(self):
+        """The (x, y, include) of the point prompts, in the order given."""
+        return [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "point"]
+
+    @property
+    def _sam_box(self):
+        """The (left, top, right, bottom) of the box prompt, or None."""
+        boxes = [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "box"]
+        return boxes[-1] if boxes else None
+
+    @property
+    def _sam_exclude_boxes(self):
+        return [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "exclude_box"]
+
+    @property
+    def _sam_mask(self):
+        """The mask prompt, or None."""
+        masks = [entry[1][1] for entry in self._sam_prompts if entry[1][0] == "mask"]
+        return masks[-1] if masks else None
+
+    def _show_prompt_marks(self):
+        self.canvas.set_sam_prompts(
+            self._sam_points, self._sam_box, self._sam_mask, self._sam_exclude_boxes
+        )
+
     def _prompt_state(self):
-        return (list(self._sam_points), self._sam_box, self._sam_mask)
+        return list(self._sam_prompts)
 
     def _has_prompts(self):
-        return bool(self._sam_points) or self._sam_box is not None or self._sam_mask is not None
+        return bool(self._sam_prompts)
 
     def _canvas_point_in_history(self):
         """Where the canvas history stands, and the mask being prompted as it is,
@@ -2887,8 +2912,8 @@ class MainWindow(QMainWindow):
     def _show_prompts(self, state):
         """Make state the prompts of the mask being prompted and show the mask
         they make; with none left, the mask is as it was before its first prompt."""
-        self._sam_points, self._sam_box, self._sam_mask = list(state[0]), state[1], state[2]
-        self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
+        self._sam_prompts = list(state)
+        self._show_prompt_marks()
         if self._has_prompts():
             self._run_sam_prompts()
         else:
@@ -2933,7 +2958,7 @@ class MainWindow(QMainWindow):
         """Drop the prompts of the mask being prompted and the mask they made."""
         if self._sam_busy or not self._has_prompts():
             return
-        self._change_prompts(([], None, None))
+        self._change_prompts([])
         self.statusBar().showMessage("Prompts cleared")
 
     def _prompt_allowed(self, prompt):
@@ -2942,6 +2967,14 @@ class MainWindow(QMainWindow):
         given, which the user is asked to confirm, unless it is a box or outline
         replacing one of its own kind, as with every model."""
         helper = self._prompt_model()
+        if prompt[0] == "exclude_box" and not helper.exclude_boxes:
+            QMessageBox.warning(
+                self,
+                helper.label,
+                f"{helper.label} has no exclude boxes. Drag with the left button for a "
+                "box around the structure.",
+            )
+            return False
         if prompt[0] == "point" and not prompt[3] and not helper.exclude_points:
             QMessageBox.warning(
                 self,
@@ -2978,9 +3011,7 @@ class MainWindow(QMainWindow):
                 return False
             if remember.isChecked():
                 self._replace_prompt_models.add(helper.label)
-        self._sam_points = []
-        self._sam_box = None
-        self._sam_mask = None
+        self._sam_prompts = []
         return True
 
     def _run_sam_prompts(self):
@@ -3016,10 +3047,14 @@ class MainWindow(QMainWindow):
         else:
             image = self.canvas.display_rgb()
             key = repr((target.run_key, target.file_name, target.frame, target.angle))
-            segment = (
-                self._sam.segment_image_points if helper is self._sam else helper.segment_points
-            )
-            work = lambda progress: segment(image, key, points, labels, prompt_mask)
+            if helper.ordered_prompts:
+                ordered = list(self._sam_prompts)
+                work = lambda progress: helper.segment_prompts(image, key, ordered)
+            else:
+                segment = (
+                    self._sam.segment_image_points if helper is self._sam else helper.segment_points
+                )
+                work = lambda progress: segment(image, key, points, labels, prompt_mask)
         ok, mask = self._sam_call(f"Segmenting with {helper.label}...", work)
         rerun, self._sam_rerun = self._sam_rerun, False
         if not ok:

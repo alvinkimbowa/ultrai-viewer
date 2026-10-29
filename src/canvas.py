@@ -42,8 +42,9 @@ class Canvas(QWidget):
     # A message for the status bar, such as why a drawing was not made.
     notice = pyqtSignal(str)
     # A SAM prompt, in image pixels: ("point", x, y, include),
-    # ("box", left, top, right, bottom) or ("mask", mask); or ("remove_point",
-    # index) for a click on a prompt point shown.
+    # ("box", left, top, right, bottom), ("exclude_box", left, top, right,
+    # bottom) or ("mask", mask); or ("remove_point", index) for a click on a
+    # prompt point shown.
     sam_prompt_added = pyqtSignal(tuple)
     # Esc while prompts are shown: the prompts and the mask they made are dropped.
     sam_prompts_cleared = pyqtSignal()
@@ -116,8 +117,11 @@ class Canvas(QWidget):
         self._mask_move = None
         # What a click with the Select tool picked for deletion: "roi", "mask" or None.
         self.selection = None
-        # Opposite corners (x, y) of a box being drawn with the Box prompt tool.
+        # Opposite corners (x, y) of a box being drawn with the Box prompt tool;
+        # one dragged with the right button excludes what it holds.
         self._sam_box_draft = None
+        self._sam_box_draft_exclude = False
+        self._sam_exclude_boxes = []
         # Where a press of the Mask prompt tool landed, in widget pixels, and
         # whether the pointer has since moved away, while the button is down: a
         # press that moves draws freehand, one that does not adds a vertex of a
@@ -327,9 +331,10 @@ class Canvas(QWidget):
             return np.ascontiguousarray(np.stack([gray] * 3, axis=-1))
         return np.ascontiguousarray(self._as_uint8(self.image[:, :, :3]))
 
-    def set_sam_prompts(self, points, box, mask=None):
+    def set_sam_prompts(self, points, box, mask=None, exclude_boxes=()):
         self._sam_points = list(points)
         self._sam_box = box
+        self._sam_exclude_boxes = list(exclude_boxes)
         self._sam_mask_outline = []
         if mask is not None:
             self._sam_mask_outline, _ = cv2.findContours(
@@ -1139,6 +1144,7 @@ class Canvas(QWidget):
                     self.sam_prompt_added.emit(("point", point.x(), point.y(), True))
             elif self.tool == "sam_box":
                 self._sam_box_draft = [point, point]
+                self._sam_box_draft_exclude = False
                 self.update()
             elif self.tool == "sam_mask":
                 self._sam_mask_press = {"pos": event.position().toPoint(), "moved": False}
@@ -1153,6 +1159,12 @@ class Canvas(QWidget):
                 self._finish_polyline()
             elif self.tool == "sam_mask":
                 self._emit_mask_prompt(self._poly_points)
+            elif self.tool == "sam_box":
+                point = self._screen_to_image(event.position().toPoint())
+                if point is not None:
+                    self._sam_box_draft = [point, point]
+                    self._sam_box_draft_exclude = True
+                    self.update()
             elif self.tool == "sam_point":
                 point = self._screen_to_image(event.position().toPoint())
                 if point is not None:
@@ -1319,7 +1331,8 @@ class Canvas(QWidget):
             left, right = sorted((first.x(), second.x()))
             top, bottom = sorted((first.y(), second.y()))
             if right - left >= 2 and bottom - top >= 2:
-                self.sam_prompt_added.emit(("box", left, top, right, bottom))
+                kind = "exclude_box" if self._sam_box_draft_exclude else "box"
+                self.sam_prompt_added.emit((kind, left, top, right, bottom))
             return
         if self._roi_draft is not None:
             (x0, y0), (x1, y1) = self._roi_draft
@@ -1364,7 +1377,10 @@ class Canvas(QWidget):
             self.request_delete(self.selection)
             return
         if event.key() == Qt.Key.Key_Escape and (
-            self._sam_points or self._sam_box is not None or self._sam_mask_outline
+            self._sam_points
+            or self._sam_box is not None
+            or self._sam_exclude_boxes
+            or self._sam_mask_outline
         ):
             self.sam_prompts_cleared.emit()
             return
@@ -1380,9 +1396,9 @@ class Canvas(QWidget):
             return
         tagged = self._label_at(event.pos())
         # Off a name tag, a right-click with the Segmented Line or Mask prompt
-        # tool finishes the line instead, and with the Point prompt tool adds an
-        # exclude point.
-        if tagged is None and self.tool in ("polyline", "sam_point", "sam_mask"):
+        # tool finishes the line instead, with the Point prompt tool adds an
+        # exclude point, and with the Box prompt tool starts an exclude box.
+        if tagged is None and self.tool in ("polyline", "sam_point", "sam_box", "sam_mask"):
             return
         kinds = ["mask"] if tagged is not None else self.deletable_at(event.pos())
         if not kinds:
@@ -1502,14 +1518,17 @@ class Canvas(QWidget):
     def _paint_sam_prompts(self, painter):
         width = self._roi_outline_pen_width()
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        boxes = [self._sam_box]
+        boxes = [(self._sam_box, False)] + [(b, True) for b in self._sam_exclude_boxes]
         if self._sam_box_draft is not None:
             first, second = self._sam_box_draft
-            boxes.append((first.x(), first.y(), second.x(), second.y()))
-        painter.setPen(QPen(QColor(255, 220, 0), width, Qt.PenStyle.DashLine))
-        for box in boxes:
+            boxes.append(
+                ((first.x(), first.y(), second.x(), second.y()), self._sam_box_draft_exclude)
+            )
+        for box, exclude in boxes:
             if box is None:
                 continue
+            color = QColor(255, 60, 60) if exclude else QColor(255, 220, 0)
+            painter.setPen(QPen(color, width, Qt.PenStyle.DashLine))
             start = self._image_to_screen(QPoint(box[0], box[1]))
             end = self._image_to_screen(QPoint(box[2], box[3]))
             painter.drawRect(QRect(start, end).normalized())
