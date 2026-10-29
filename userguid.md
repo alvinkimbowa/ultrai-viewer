@@ -41,12 +41,12 @@ A video model, such as V-JEPA, reads 16 frames at a time, so a frame is segmente
 
 ## Propagate masks with SAM 3.1
 
-**SAM 3.1** appears under **Model** on a computer set up with Meta's SAM 3 code and an NVIDIA GPU. It spreads the masks of a few frames of a video over the rest of it.
+**SAM 3.1** appears under **Model** on a computer set up with Meta's SAM 3 code and an NVIDIA GPU. It spreads the masks of a few frames of a video over the rest of it. On images, the prompt tools and **Find** work the same way; there is nothing to propagate.
 
-1. Choose **SAM 3.1** under **Model**. The SAM controls take the place of the Segment buttons, and **SAM Point** and **SAM Box** are added under **Tools**.
+1. Choose **SAM 3.1** under **Model**. The SAM controls take the place of the Segment buttons, and **Point prompt**, **Box prompt** and **Mask prompt** are added under **Tools**.
 2. Give SAM masks to start from, on as many frames as you like:
    - Masks already drawn or annotated are used as they are.
-   - **SAM Point**: left-click to include a spot, right-click to exclude one. **SAM Box**: drag a box around the structure. Each click updates the mask. Press **New object** before prompting the next structure. To redo a mask, select it first.
+   - **Point prompt**: left-click to include a spot, right-click to exclude one. **Box prompt**: drag a box around the structure. **Mask prompt**: outline the structure roughly, either by dragging round it or by clicking its corners and then double-clicking or right-clicking to close the outline. SAM fits the mask to the structure, and later points and boxes refine it, while a new outline starts it again. Each prompt updates the mask. Press **New object** before prompting the next structure. To redo a mask, select it first.
    - **Text prompt** and **Find** add a mask for each match of a phrase.
    - Masks get the label picked under **Labels**; pick one before drawing or prompting, or select the mask to change. A mask with the same label and number on several frames (such as **Median #1**) is followed as one structure.
 3. Go to the frame to start from and click **Propagate video**. **Both directions** fills the frames before and after it. Untick it to choose **Forward** or **Backward**.
@@ -55,6 +55,16 @@ A video model, such as V-JEPA, reads 16 frames at a time, so a frame is segmente
 4. Check the result, then trim it with **Delete before** / **Delete after**, or correct a frame by hand. The masks you change by hand are used as prompts the next time you propagate; SAM's other masks on that frame are tracked again. Your annotated frames are prompts in full.
 
 SAM's masks go in `<output folder>/sam3.1_predictions/`; your own annotation files are not changed. The first prompt or propagation loads the model, which takes about half a minute.
+
+## Prompt masks with UltraSam
+
+**UltraSam** appears under **Model** on a computer set up with the `ultrasam` project. It is SAM trained on ultrasound: it makes one mask at a time from a point or a box, on an image or a video frame, and does not propagate.
+
+1. Choose **UltraSam** under **Model**. **Point prompt**, **Box prompt** and **Mask prompt** are added under **Tools**.
+2. **Box prompt**: drag a box around the structure. **Point prompt**: left-click on it. **Mask prompt**: outline it roughly, by dragging or by clicking its corners and double-clicking to close; UltraSam fits the outline to the structure. Each prompt updates the mask; right-click with **Point prompt** excludes a spot, though UltraSam was trained on a single point or box and follows extra points loosely. Press **New object** before prompting the next structure. To redo a mask, select it first.
+3. Masks get the label picked under **Labels**.
+
+UltraSam's masks go in `<output folder>/ultrasam_predictions/`. The first prompt loads the model, which takes a few seconds; later prompts on the same image take a fraction of a second.
 
 ## Measurements
 

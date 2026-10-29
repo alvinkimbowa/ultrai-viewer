@@ -71,7 +71,7 @@ from .measurements import (
     to_grayscale,
 )
 from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
-from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_point
+from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask, unrotate_point
 from .sam_integration import (
     SAM_MODEL_LABEL,
     SAM_MODEL_NAME,
@@ -84,6 +84,12 @@ from .sam_integration import (
     save_prompts,
 )
 from .sam_plan import propagation_steps
+from .ultrasam_integration import (
+    ULTRASAM_MODEL_LABEL,
+    ULTRASAM_MODEL_NAME,
+    UltraSamPrompter,
+    ultrasam_available,
+)
 from threading import Event, Thread
 from typing import NamedTuple
 from collections import OrderedDict, deque
@@ -103,7 +109,7 @@ DEFAULT_MODEL_CLASS = "median"
 NO_MODEL_LABEL = "No model"
 PREDICTIONS_SUFFIX = "_predictions"
 TOOL_NAMES = ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser", "ROI Box"]
-SAM_TOOL_NAMES = ["SAM Point", "SAM Box"]
+SAM_TOOL_NAMES = ["Point prompt", "Box prompt", "Mask prompt"]
 
 
 def format_duration(seconds):
@@ -353,15 +359,18 @@ class MainWindow(QMainWindow):
         self._model = ModelIntegration()
         self._sam = SamTracker() if sam_available() else None
         self._sam_selected = False
+        self._ultrasam = UltraSamPrompter() if ultrasam_available() else None
+        self._ultrasam_selected = False
         # Set while a SAM request is being answered; prompts made meanwhile are
         # sent once it is.
         self._sam_busy = False
         self._sam_rerun = False
-        # The (label, number) of the mask SAM Point and SAM Box prompts shape, and
-        # those prompts, in pixels of the frame as viewed.
+        # The (label, number) of the mask the point, box and mask prompts shape,
+        # and those prompts, in pixels of the frame as viewed.
         self._sam_object = None
         self._sam_points = []
         self._sam_box = None
+        self._sam_mask = None
         self._inference_thread = None
         self._inference_worker = None
         self._inference_box = None
@@ -544,6 +553,8 @@ class MainWindow(QMainWindow):
     def _selected_model_name(self):
         if self._sam_selected:
             return SAM_MODEL_NAME
+        if self._ultrasam_selected:
+            return ULTRASAM_MODEL_NAME
         return self._model.current_model()
 
     def _measurement_file(self, results_dir):
@@ -1957,11 +1968,22 @@ class MainWindow(QMainWindow):
         sam_layout = QVBoxLayout(self.sam_panel)
         sam_layout.setContentsMargins(0, 0, 0, 0)
         sam_hint = QLabel(
-            "Prompt a mask with SAM Point or SAM Box under Tools: left-click to "
-            "include, right-click to exclude."
+            "Prompt a mask with Point prompt, Box prompt or Mask prompt under "
+            "Tools: left-click to include, right-click to exclude."
         )
         sam_hint.setWordWrap(True)
         sam_layout.addWidget(sam_hint)
+        self.sam_new_object_btn = QPushButton("New object")
+        self.sam_new_object_btn.setToolTip(
+            "Start a new mask: the next points and box prompt a new mask of the "
+            "picked label instead of the one just prompted."
+        )
+        configure_button(self.sam_new_object_btn)
+        sam_layout.addWidget(self.sam_new_object_btn)
+        # Text prompts and propagation, which only SAM 3.1 has.
+        self.sam_video_controls = QWidget()
+        sam_video_layout = QVBoxLayout(self.sam_video_controls)
+        sam_video_layout.setContentsMargins(0, 0, 0, 0)
         sam_text_row = QHBoxLayout()
         self.sam_text = QLineEdit()
         self.sam_text.setPlaceholderText("Text prompt")
@@ -1973,14 +1995,7 @@ class MainWindow(QMainWindow):
         self.sam_find_btn = QPushButton("Find")
         configure_button(self.sam_find_btn)
         sam_text_row.addWidget(self.sam_find_btn)
-        sam_layout.addLayout(sam_text_row)
-        self.sam_new_object_btn = QPushButton("New object")
-        self.sam_new_object_btn.setToolTip(
-            "Start a new mask: the next points and box prompt a new mask of the "
-            "picked label instead of the one just prompted."
-        )
-        configure_button(self.sam_new_object_btn)
-        sam_layout.addWidget(self.sam_new_object_btn)
+        sam_video_layout.addLayout(sam_text_row)
         sam_direction_row = QHBoxLayout()
         self.sam_both_checkbox = QCheckBox("Both directions")
         self.sam_both_checkbox.setChecked(True)
@@ -1993,7 +2008,7 @@ class MainWindow(QMainWindow):
         self.sam_direction_picker.setVisible(False)
         sam_direction_row.addWidget(self.sam_direction_picker)
         sam_direction_row.addStretch(1)
-        sam_layout.addLayout(sam_direction_row)
+        sam_video_layout.addLayout(sam_direction_row)
         sam_propagate_row = QHBoxLayout()
         self.sam_propagate_btn = QPushButton("Propagate video")
         self.sam_propagate_btn.setToolTip(
@@ -2009,7 +2024,8 @@ class MainWindow(QMainWindow):
         )
         configure_button(self.sam_propagate_all_btn)
         sam_propagate_row.addWidget(self.sam_propagate_all_btn)
-        sam_layout.addLayout(sam_propagate_row)
+        sam_video_layout.addLayout(sam_propagate_row)
+        sam_layout.addWidget(self.sam_video_controls)
         self.sam_panel.setVisible(False)
         layout.addWidget(self.sam_panel)
 
@@ -2625,10 +2641,29 @@ class MainWindow(QMainWindow):
             self.canvas.set_hidden_keys(set(self.canvas.hidden_keys) | set(keys))
         self._list_shown_masks()
 
+    def _prompt_model(self):
+        """The helper that the point, box and mask prompts go to, or None while neither
+        SAM 3.1 nor UltraSam is the model selected."""
+        if self._sam_selected:
+            return self._sam
+        if self._ultrasam_selected:
+            return self._ultrasam
+        return None
+
+    def _can_prompt(self):
+        """True when SAM 3.1 or UltraSam is selected and an image or video frame
+        is on screen."""
+        if self._prompt_model() is None or self.canvas.image is None:
+            return False
+        if self._mode == "video":
+            return self._video_frame_index >= 0
+        return self._frame_target() is not None
+
     def _update_sam_controls(self):
         """Show the SAM controls and tools in place of the segmenting ones while
-        SAM is the model selected."""
-        sam = self._sam_selected
+        SAM 3.1 or UltraSam is the model selected."""
+        sam = self._prompt_model() is not None
+        self.sam_video_controls.setVisible(self._sam_selected)
         for widget in (
             self.segment_btn,
             self.segment_video_btn,
@@ -2653,13 +2688,13 @@ class MainWindow(QMainWindow):
         self._update_sam_enabled()
 
     def _update_sam_enabled(self):
+        self.sam_new_object_btn.setEnabled(self._can_prompt())
+        for widget in (self.sam_text, self.sam_find_btn):
+            widget.setEnabled(self._sam_selected and self._can_prompt())
         enabled = (
             self._sam_selected and self._mode == "video" and self._video_frame_index >= 0
         )
         for widget in (
-            self.sam_text,
-            self.sam_find_btn,
-            self.sam_new_object_btn,
             self.sam_both_checkbox,
             self.sam_direction_picker,
             self.sam_propagate_btn,
@@ -2671,6 +2706,7 @@ class MainWindow(QMainWindow):
         self._sam_object = None
         self._sam_points = []
         self._sam_box = None
+        self._sam_mask = None
         self.canvas.set_sam_prompts([], None)
 
     def _new_sam_object(self):
@@ -2688,6 +2724,7 @@ class MainWindow(QMainWindow):
         its bar. With one, the caller shows it, and on_progress gets the
         progress values on the window's thread.
         """
+        helper = self._prompt_model() or self._sam
         self._sam_busy = True
         outcome = {}
         latest = {}
@@ -2703,7 +2740,7 @@ class MainWindow(QMainWindow):
         box = None
         if dialog is None:
             box = QProgressDialog(text, "Cancel", 0, 0, self)
-            box.setWindowTitle("SAM 3.1")
+            box.setWindowTitle(helper.label)
             # A modal box is attached to the window by some desktops, so that
             # dragging it drags the whole app.
             box.setWindowModality(Qt.WindowModality.NonModal)
@@ -2712,7 +2749,7 @@ class MainWindow(QMainWindow):
             box.setAutoClose(False)
             box.setAutoReset(False)
             if cancelable:
-                box.canceled.connect(self._sam.cancel)
+                box.canceled.connect(helper.cancel)
             else:
                 box.setCancelButton(None)
         worker = Thread(target=run, daemon=True)
@@ -2745,17 +2782,18 @@ class MainWindow(QMainWindow):
             box.deleteLater()
         self._sam_busy = False
         if "error" in outcome:
-            QMessageBox.warning(self, "SAM 3.1", outcome["error"])
+            QMessageBox.warning(self, helper.label, outcome["error"])
             return False, None
         if outcome.get("canceled"):
-            self.statusBar().showMessage("SAM 3.1 canceled")
+            self.statusBar().showMessage(f"{helper.label} canceled")
             return False, None
         return True, outcome.get("value")
 
     def _on_sam_prompt(self, prompt):
-        """Add a point or box to the prompts of the mask being prompted, and show
-        the mask SAM makes of them."""
-        if not self._sam_selected or self._mode != "video" or self._video_frame_index < 0:
+        """Add a point, box or mask to the prompts of the mask being prompted, and
+        show the mask SAM 3.1 or UltraSam makes of them. A mask replaces the
+        prompts before it; points and boxes after it refine it."""
+        if not self._can_prompt():
             return
         if self._sam_object is None:
             index = self.canvas.selected_index
@@ -2767,41 +2805,62 @@ class MainWindow(QMainWindow):
                 self._sam_object = (label, next_instance_id(self.canvas.instances, label))
         if prompt[0] == "point":
             self._sam_points.append(tuple(prompt[1:]))
+        elif prompt[0] == "mask":
+            self._sam_mask = prompt[1]
+            self._sam_points = []
+            self._sam_box = None
         else:
             self._sam_box = tuple(prompt[1:])
-        self.canvas.set_sam_prompts(self._sam_points, self._sam_box)
+        self.canvas.set_sam_prompts(self._sam_points, self._sam_box, self._sam_mask)
         self._run_sam_prompts()
 
     def _run_sam_prompts(self):
         if self._sam_busy:
             self._sam_rerun = True
             return
+        helper = self._prompt_model()
         angle, shape = self._shown_angle, self._original_shape
+        target = self._frame_target()
+        # SAM 3.1 decodes a stored video frame itself, so its prompts and mask
+        # are in the stored frame's pixels; otherwise the image as drawn is sent.
+        stored = helper is self._sam and self._mode == "video"
+        corners = lambda x, y: unrotate_point(x, y, angle, shape) if stored else (x, y)
         points, labels = [], []
         if self._sam_box is not None:
             left, top, right, bottom = self._sam_box
-            corners = [
-                unrotate_point(x, y, angle, shape)
+            xs, ys = zip(*(
+                corners(x, y)
                 for x, y in ((left, top), (right, top), (left, bottom), (right, bottom))
-            ]
-            xs, ys = zip(*corners)
+            ))
             points += [(min(xs), min(ys)), (max(xs), max(ys))]
             labels += [2, 3]
         for x, y, include in self._sam_points:
-            points.append(unrotate_point(x, y, angle, shape))
+            points.append(corners(x, y))
             labels.append(1 if include else 0)
-        target = self._frame_target()
+        prompt_mask = self._sam_mask
+        if prompt_mask is not None and stored and angle:
+            prompt_mask = unrotate_mask(prompt_mask, angle, shape)
         sam_object = self._sam_object
-        video, frame = self._video_path, self._video_frame_index
-        ok, mask = self._sam_call(
-            "Segmenting with SAM 3.1...",
-            lambda progress: self._sam.segment_points(video, frame, points, labels),
-        )
+        if stored:
+            video, frame = self._video_path, self._video_frame_index
+            work = lambda progress: self._sam.segment_points(video, frame, points, labels, prompt_mask)
+        else:
+            image = self.canvas.display_rgb()
+            key = repr((target.run_key, target.file_name, target.frame, target.angle))
+            segment = (
+                self._sam.segment_image_points
+                if helper is self._sam
+                else self._ultrasam.segment_points
+            )
+            work = lambda progress: segment(image, key, points, labels, prompt_mask)
+        ok, mask = self._sam_call(f"Segmenting with {helper.label}...", work)
         rerun, self._sam_rerun = self._sam_rerun, False
         if not ok:
             return
+        if stored and angle:
+            mask = rotate_mask(mask, angle)
         label, number = sam_object
-        instance = make_instance(label, number, rotate_mask(mask, angle) if angle else mask)
+        instance = make_instance(label, number, mask)
         on_screen = self._shows_target(target)
         if not self._deliver(
             target,
@@ -2819,13 +2878,13 @@ class MainWindow(QMainWindow):
         if rerun and on_screen and self._sam_object == sam_object:
             self._run_sam_prompts()
         else:
-            self.statusBar().showMessage(f"SAM 3.1: {instance_title(instance)}")
+            self.statusBar().showMessage(f"{helper.label}: {instance_title(instance)}")
 
     def _sam_find_text(self):
         text = self.sam_text.text().strip()
         if not text or self._sam_busy:
             return
-        if not self._sam_selected or self._mode != "video" or self._video_frame_index < 0:
+        if not self._sam_selected or not self._can_prompt():
             return
         if self.canvas.active_class is None:
             QMessageBox.information(
@@ -2837,14 +2896,21 @@ class MainWindow(QMainWindow):
         video, frame, angle = self._video_path, self._video_frame_index, self._shown_angle
         target = self._frame_target()
         label = clean_class(self._model_default_class())
-        ok, masks = self._sam_call(
-            f'Finding "{text}" with SAM 3.1...',
-            lambda progress: self._sam.find_text(video, frame, text),
-        )
+        # As for point prompts, a video frame is found in the stored frame's
+        # pixels and an image as drawn.
+        stored = self._mode == "video"
+        if stored:
+            video, frame = self._video_path, self._video_frame_index
+            work = lambda progress: self._sam.find_text(video, frame, text)
+        else:
+            image = self.canvas.display_rgb()
+            key = repr((target.run_key, target.file_name, target.frame, target.angle))
+            work = lambda progress: self._sam.find_image_text(image, key, text)
+        ok, masks = self._sam_call(f'Finding "{text}" with SAM 3.1...', work)
         if not ok:
             return
         found = [
-            make_instance(label, 0, rotate_mask(mask, angle) if angle else mask)
+            make_instance(label, 0, rotate_mask(mask, angle) if stored and angle else mask)
             for mask in masks
             if mask.any()
         ]
@@ -3324,6 +3390,7 @@ class MainWindow(QMainWindow):
             5: "roi",
             6: "sam_point",
             7: "sam_box",
+            8: "sam_mask",
         }
         tool = tool_map.get(index, "select")
         self.canvas.set_tool(tool)
@@ -4673,6 +4740,8 @@ class MainWindow(QMainWindow):
         models = self._model.list_models()
         if self._sam is not None:
             models.append(SAM_MODEL_LABEL)
+        if self._ultrasam is not None:
+            models.append(ULTRASAM_MODEL_LABEL)
         if not models:
             self.model_picker.clear()
             self.model_picker.addItem("No models loaded")
@@ -4727,8 +4796,16 @@ class MainWindow(QMainWindow):
         elif self._mode == "sequence":
             self._save_sequence_mask_if_needed()
         self._sam_selected = name == SAM_MODEL_LABEL
+        self._ultrasam_selected = name == ULTRASAM_MODEL_LABEL
+        # Only the helper of the model chosen keeps its model on the GPU.
+        if self._sam is not None and not self._sam_selected:
+            self._sam.stop()
+        if self._ultrasam is not None and not self._ultrasam_selected:
+            self._ultrasam.stop()
         try:
-            self._model.set_model("" if name in (NO_MODEL_LABEL, SAM_MODEL_LABEL) else name)
+            self._model.set_model(
+                "" if name in (NO_MODEL_LABEL, SAM_MODEL_LABEL, ULTRASAM_MODEL_LABEL) else name
+            )
             self.statusBar().showMessage(f"Model selected: {name}")
         except Exception as exc:
             QMessageBox.warning(self, "Model error", str(exc))
@@ -5009,8 +5086,9 @@ class MainWindow(QMainWindow):
                 thread.quit()
                 thread.wait(5000)
         self._clear_video_state()
-        if self._sam is not None:
-            self._sam.close()
+        for helper in (self._sam, self._ultrasam):
+            if helper is not None:
+                helper.close()
         super().closeEvent(event)
 
 

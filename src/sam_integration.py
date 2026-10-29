@@ -9,14 +9,12 @@ checkout, by default ~/UltrAi/projects/sam3.
 
 import json
 import os
-import subprocess
 import sys
-import tempfile
-import threading
 from pathlib import Path
 
 import cv2
 
+from .helper_process import HelperCanceled, HelperProcess
 from .instances import clean_class
 
 SAM_MODEL_NAME = "sam3.1"
@@ -114,8 +112,7 @@ def save_prompts(folder, prompts, propagated=None):
     (folder / PROMPTS_FILE_NAME).write_text(json.dumps(data), encoding="utf-8")
 
 
-class SamCanceled(Exception):
-    pass
+SamCanceled = HelperCanceled
 
 
 def read_mask(path):
@@ -125,118 +122,74 @@ def read_mask(path):
     return raw > 127
 
 
-class SamTracker:
-    """Requests to the helper process, which is started on first use and keeps
-    the model loaded until the viewer closes.
+def prompt_mask_fields(folder, mask):
+    """The fields of a points request that carry a prompt mask, saved as a PNG
+    in folder; none without one."""
+    if mask is None:
+        return {}
+    path = Path(folder) / "prompt.png"
+    cv2.imwrite(str(path), mask.astype("uint8") * 255)
+    return {"mask": str(path)}
 
-    Requests block until answered, so they are made from worker threads; one
-    runs at a time. cancel() may be called from any thread.
-    """
 
+class SamTracker(HelperProcess):
     def __init__(self):
-        self._process = None
-        self._lock = threading.Lock()
-        self._write_lock = threading.Lock()
-        self._next_id = 0
-        self._scratch = tempfile.TemporaryDirectory(prefix="ultrai_sam_")
-
-    def scratch_dir(self, name):
-        """An empty folder for the masks of one request."""
-        folder = Path(self._scratch.name) / name
-        if folder.exists():
-            for path in folder.iterdir():
-                path.unlink()
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder
-
-    def _start(self):
-        if self._process is not None and self._process.poll() is None:
-            return
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            p for p in (str(sam_repo()), env.get("PYTHONPATH", "")) if p
+        super().__init__(
+            SAM_MODEL_LABEL,
+            [sam_python(), "-u", WORKER],
+            sam_repo(),
+            LOG_FILE,
+            "ultrai_sam_",
         )
-        log = open(LOG_FILE, "a", encoding="utf-8")
-        self._process = subprocess.Popen(
-            [str(sam_python()), "-u", str(WORKER)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=log,
-            env=env,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-        )
-        log.close()
-        first = self._process.stdout.readline()
-        if not first or not json.loads(first).get("ready"):
-            raise RuntimeError(f"SAM 3.1 could not start. See {LOG_FILE}.")
-
-    def _send(self, message):
-        with self._write_lock:
-            self._process.stdin.write(json.dumps(message) + "\n")
-            self._process.stdin.flush()
-
-    def request(self, cmd, on_progress=None, **fields):
-        with self._lock:
-            self._start()
-            self._next_id += 1
-            request_id = self._next_id
-            self._send({"cmd": cmd, "id": request_id, **fields})
-            while True:
-                line = self._process.stdout.readline()
-                if not line:
-                    raise RuntimeError(f"SAM 3.1 stopped unexpectedly. See {LOG_FILE}.")
-                reply = json.loads(line)
-                if reply.get("id") != request_id:
-                    continue
-                if "progress" in reply:
-                    if on_progress is not None:
-                        on_progress(*reply["progress"])
-                    continue
-                if reply.get("canceled"):
-                    raise SamCanceled()
-                if "error" in reply:
-                    raise RuntimeError(reply["error"])
-                return reply
-
-    def cancel(self):
-        if self._process is not None and self._process.poll() is None:
-            try:
-                self._send({"cmd": "cancel"})
-            except OSError:
-                pass
-
-    def close(self):
-        if self._process is not None and self._process.poll() is None:
-            try:
-                self._send({"cmd": "quit"})
-                self._process.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                self._process.kill()
-        self._process = None
-        self._scratch.cleanup()
 
     def open(self, video):
         return self.request("open", video=str(video))
 
-    def segment_points(self, video, frame, points, labels):
+    def open_image(self, image, key):
+        """Prompt an 8-bit RGB image as a video of one frame; the helper keeps it
+        while key stays the same."""
+        path = self.scratch_dir("image") / "image.png"
+        cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        return self.request("image", image=str(path), key=key)
+
+    def segment_image_points(self, image, key, points, labels, mask=None):
+        """The mask points select on an image, as segment_points gives it for a
+        frame; points and mask are in pixels of the image."""
+        self.open_image(image, key)
+        return self._points(0, points, labels, mask)
+
+    def find_image_text(self, image, key, text):
+        """A mask for each match of a phrase on an image."""
+        self.open_image(image, key)
+        return self._text(0, text)
+
+    def segment_points(self, video, frame, points, labels, mask=None):
         """The mask points select on a frame: (x, y) pixels of the stored frame,
-        labelled 1 to include, 0 to exclude, and 2 and 3 for the corners of a box."""
+        labelled 1 to include, 0 to exclude, and 2 and 3 for the corners of a box.
+        A mask of the frame's size, when given, is prompted first and the points
+        refine it."""
         self.open(video)
-        out = self.scratch_dir("points") / "mask.png"
+        return self._points(frame, points, labels, mask)
+
+    def find_text(self, video, frame, text):
+        """A mask for each match of a phrase on a frame."""
+        self.open(video)
+        return self._text(frame, text)
+
+    def _points(self, frame, points, labels, mask):
+        folder = self.scratch_dir("points")
+        out = folder / "mask.png"
         self.request(
             "points",
             frame=int(frame),
             points=[[float(x), float(y)] for x, y in points],
             labels=[int(label) for label in labels],
             out=str(out),
+            **prompt_mask_fields(folder, mask),
         )
         return read_mask(out)
 
-    def find_text(self, video, frame, text):
-        """A mask for each match of a phrase on a frame."""
-        self.open(video)
+    def _text(self, frame, text):
         reply = self.request(
             "text", frame=int(frame), text=text, out_dir=str(self.scratch_dir("text"))
         )

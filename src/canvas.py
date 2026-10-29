@@ -23,7 +23,7 @@ from .theme import CANVAS
 
 # Tools that make or change a mask of a label, and so need a label picked or a
 # mask selected before they start.
-LABELLED_TOOLS = ("freehand", "polyline", "brush", "sam_point", "sam_box")
+LABELLED_TOOLS = ("freehand", "polyline", "brush", "sam_point", "sam_box", "sam_mask")
 
 
 def label_anchor(mask):
@@ -117,12 +117,19 @@ class Canvas(QWidget):
         self._mask_move = None
         # What a click with the Select tool picked for deletion: "roi", "mask" or None.
         self.selection = None
-        # Opposite corners (x, y) of a box being drawn with the SAM Box tool.
+        # Opposite corners (x, y) of a box being drawn with the Box prompt tool.
         self._sam_box_draft = None
+        # Where a press of the Mask prompt tool landed, in widget pixels, and
+        # whether the pointer has since moved away, while the button is down: a
+        # press that moves draws freehand, one that does not adds a vertex of a
+        # segmented outline.
+        self._sam_mask_press = None
         # The SAM prompts of the object being prompted, drawn over the image:
-        # points (x, y, include) and a box (left, top, right, bottom) or None.
+        # points (x, y, include), a box (left, top, right, bottom) or None, and the
+        # outlines of a drawn mask.
         self._sam_points = []
         self._sam_box = None
+        self._sam_mask_outline = []
 
         # Calibration lines in image pixels: "h" holds the y positions of the two
         # horizontal lines, "v" the x positions of the two vertical lines. They
@@ -300,9 +307,23 @@ class Canvas(QWidget):
         self._mask_touched = True
         self.update()
 
-    def set_sam_prompts(self, points, box):
+    def display_rgb(self):
+        """The image as drawn: 8-bit RGB, gray images scaled to their range."""
+        if self.image is None:
+            return None
+        if self.image.ndim == 2:
+            gray = self._normalize_gray(self.image)
+            return np.ascontiguousarray(np.stack([gray] * 3, axis=-1))
+        return np.ascontiguousarray(self._as_uint8(self.image[:, :, :3]))
+
+    def set_sam_prompts(self, points, box, mask=None):
         self._sam_points = list(points)
         self._sam_box = box
+        self._sam_mask_outline = []
+        if mask is not None:
+            self._sam_mask_outline, _ = cv2.findContours(
+                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
         self.update()
 
     def set_class_order(self, order):
@@ -336,10 +357,11 @@ class Canvas(QWidget):
         self._freehand_points = []
         self._roi_draft = None
         self._sam_box_draft = None
+        self._sam_mask_press = None
         # A selected mask stays selected, so that the brush and eraser keep to it.
         if self.selection != "mask":
             self.selection = None
-        if tool_name in ("roi", "sam_point", "sam_box"):
+        if tool_name in ("roi", "sam_point", "sam_box", "sam_mask"):
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.unsetCursor()
@@ -973,6 +995,18 @@ class Canvas(QWidget):
         self._poly_points = []
         self.update()
 
+    def _emit_mask_prompt(self, points):
+        """Send the filled outline of points as a mask prompt."""
+        if len(points) > 2:
+            mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
+            outline = np.array([[p.x(), p.y()] for p in points], dtype=np.int32)
+            cv2.fillPoly(mask, [outline.reshape((-1, 1, 2))], 1)
+            if mask.any():
+                self.sam_prompt_added.emit(("mask", mask.astype(bool)))
+        self._freehand_points = []
+        self._poly_points = []
+        self.update()
+
     def mousePressEvent(self, event):
         if self.image is None:
             return
@@ -1079,9 +1113,16 @@ class Canvas(QWidget):
             elif self.tool == "sam_box":
                 self._sam_box_draft = [point, point]
                 self.update()
+            elif self.tool == "sam_mask":
+                self._sam_mask_press = {"pos": event.position().toPoint(), "moved": False}
+                self._drawing = True
+                self._freehand_points = [point]
+                self.update()
         elif event.button() == Qt.MouseButton.RightButton:
             if self.tool == "polyline":
                 self._finish_polyline()
+            elif self.tool == "sam_mask":
+                self._emit_mask_prompt(self._poly_points)
             elif self.tool == "sam_point":
                 point = self._screen_to_image(event.position().toPoint())
                 if point is not None:
@@ -1182,7 +1223,12 @@ class Canvas(QWidget):
         point = self._screen_to_image(event.position().toPoint())
         if point is None:
             return
-        if self.tool == "freehand":
+        if self.tool in ("freehand", "sam_mask"):
+            press = self._sam_mask_press
+            if press is not None and (
+                event.position().toPoint() - press["pos"]
+            ).manhattanLength() >= 4:
+                press["moved"] = True
             self._freehand_points.append(point)
             self.update()
             return
@@ -1244,7 +1290,15 @@ class Canvas(QWidget):
                 self.roi_drawn.emit()
             return
         if event.button() == Qt.MouseButton.LeftButton:
-            if self.tool == "freehand":
+            if self.tool == "sam_mask" and self._sam_mask_press is not None:
+                moved = self._sam_mask_press["moved"]
+                self._sam_mask_press = None
+                if moved and len(self._freehand_points) > 2:
+                    self._emit_mask_prompt(self._freehand_points)
+                elif self._freehand_points:
+                    self._poly_points.append(self._freehand_points[0])
+                    self._freehand_points = []
+            elif self.tool == "freehand":
                 if self.fill_mask and len(self._freehand_points) > 2:
                     self._add_polygon(self._freehand_points)
                 elif len(self._freehand_points) > 1:
@@ -1277,9 +1331,9 @@ class Canvas(QWidget):
         super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
-        # A right-click with the Segmented Line tool finishes the line instead, and
-        # with the SAM Point tool adds an exclude point.
-        if self.tool in ("polyline", "sam_point") or self._calibrating:
+        # A right-click with the Segmented Line or Mask prompt tool finishes the
+        # line instead, and with the Point prompt tool adds an exclude point.
+        if self.tool in ("polyline", "sam_point", "sam_mask") or self._calibrating:
             return
         kinds = self.deletable_at(event.pos())
         if not kinds:
@@ -1318,6 +1372,8 @@ class Canvas(QWidget):
     def mouseDoubleClickEvent(self, event):
         if self.tool == "polyline":
             self._finish_polyline()
+        elif self.tool == "sam_mask":
+            self._emit_mask_prompt(self._poly_points)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1342,7 +1398,7 @@ class Canvas(QWidget):
         self._paint_selected_mask(painter, scale, offset_x, offset_y)
         self._paint_labels(painter, scale, offset_x, offset_y, draw_w, draw_h)
 
-        if self.tool == "polyline" and self._poly_points:
+        if self.tool in ("polyline", "sam_mask") and self._poly_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for point in self._poly_points:
                 screen_point = self._image_to_screen(point)
@@ -1351,7 +1407,7 @@ class Canvas(QWidget):
                 start = self._image_to_screen(self._poly_points[idx])
                 end = self._image_to_screen(self._poly_points[idx + 1])
                 painter.drawLine(start, end)
-        if self.tool == "freehand" and self._freehand_points:
+        if self.tool in ("freehand", "sam_mask") and self._freehand_points:
             painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._freehand_points) - 1):
                 start = self._image_to_screen(self._freehand_points[idx])
@@ -1402,6 +1458,9 @@ class Canvas(QWidget):
             start = self._image_to_screen(QPoint(box[0], box[1]))
             end = self._image_to_screen(QPoint(box[2], box[3]))
             painter.drawRect(QRect(start, end).normalized())
+        for contour in self._sam_mask_outline:
+            corners = [self._image_to_screen(QPoint(int(x), int(y))) for x, y in contour[:, 0]]
+            painter.drawPolygon(QPolygonF([QPointF(c) for c in corners]))
         for x, y, include in self._sam_points:
             center = self._image_to_screen(QPoint(int(x), int(y)))
             painter.setPen(QPen(QColor(0, 0, 0), width + 3))

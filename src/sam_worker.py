@@ -11,9 +11,13 @@ names. Anything else the libraries print goes to stderr.
 Requests:
     open       {"video"}  frame count and size of the video, decoded as the viewer
                decodes it
-    points     {"frame", "points", "labels", "out"}  the mask that include (1) and
-               exclude (0) points, and a box given as corner points labelled 2
-               and 3, select on one frame; points are pixels of the stored frame
+    image      {"image", "key"}  an 8-bit RGB PNG as a video of one frame, which the
+               requests after it prompt as frame 0; kept while key stays the same
+    points     {"frame", "points", "labels", "out", "mask"?}  the mask that include
+               (1) and exclude (0) points, and a box given as corner points
+               labelled 2 and 3, select on one frame; points are pixels of the
+               stored frame. "mask", a PNG of the frame's size, prompts as
+               well: as mask logits, with its bounding box when no box is given
     text       {"frame", "text", "out_dir"}  a mask for each match of a phrase
     propagate  {"objects", "start", "direction", "out_dir"}  tracks each object
                from its prompt masks ({frame: png path}) through the video, from
@@ -49,6 +53,8 @@ import torch  # noqa: E402
 
 CHECKPOINT_REPO = "facebook/sam3.1"
 CHECKPOINT_FILE = "sam3.1_multiplex.pt"
+# The magnitude of the logits a drawn mask is given, inside and outside it.
+PROMPT_MASK_LOGIT = 8.0
 
 
 def send(message):
@@ -134,6 +140,9 @@ class Sam:
             model = model.to(self.device()).eval()
             # Each prompt mask becomes a conditioning frame of its object's track.
             model.add_all_frames_to_correct_as_cond = True
+            # Lets the interactive head take a drawn mask as mask logits with the
+            # points; see _points_with_mask.
+            model.iter_use_prev_mask_pred = True
             encode = model.forward_image
             # Without the detector, only the tracker's image features exist.
             model.forward_image = lambda image, **kw: encode(
@@ -182,6 +191,18 @@ class Sam:
             capture.release()
         if not frames:
             raise RuntimeError(f"No readable frames in {os.path.basename(video)}")
+        return self._use_frames(frames, video)
+
+    def open_image(self, path, key):
+        """An 8-bit RGB PNG as a video of one frame, kept while key stays the same."""
+        if self._video == ("image", key):
+            return self._size()
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"Could not read {os.path.basename(path)}")
+        return self._use_frames([cv2.cvtColor(image, cv2.COLOR_BGR2RGB)], ("image", key))
+
+    def _use_frames(self, frames, source):
         side = self.tracker().image_size
         images = torch.stack(
             [
@@ -191,7 +212,7 @@ class Sam:
         ).permute(0, 3, 1, 2)
         self._images = ((images.float() / 255.0 - 0.5) / 0.5).to(self.device())
         self._frames = frames
-        self._video = video
+        self._video = source
         return self._size()
 
     def _size(self):
@@ -215,7 +236,11 @@ class Sam:
             pass
 
     @torch.inference_mode()
-    def points(self, frame, points, labels, out):
+    def points(self, frame, points, labels, out, prompt_mask=None):
+        if prompt_mask is not None and prompt_mask.any():
+            mask = self._points_with_mask(frame, points, labels, prompt_mask)
+            write_mask(out, mask)
+            return {"area": int(mask.sum())}
         height, width = self._frames[0].shape[:2]
         relative = torch.tensor(points, dtype=torch.float32) / torch.tensor(
             [width, height], dtype=torch.float32
@@ -233,6 +258,69 @@ class Sam:
         mask = (masks[0, 0] > 0).cpu().numpy()
         write_mask(out, mask)
         return {"area": int(mask.sum())}
+
+    def _points_with_mask(self, frame, points, labels, prompt_mask):
+        """The mask that points and a drawn mask select, from the tracker's
+        interactive head, as a new object would get it.
+
+        The tracker's own mask prompts skip that head and come back as drawn, so
+        the drawn mask is given as the mask logits the head refines a mask from,
+        with its bounding box in place of a box not given.
+        """
+        model = self.tracker()
+        height, width = self._frames[0].shape[:2]
+        side = model.image_size
+        if 2 not in labels:
+            ys, xs = np.nonzero(prompt_mask)
+            points = list(points) + [
+                [float(xs.min()), float(ys.min())],
+                [float(xs.max() + 1), float(ys.max() + 1)],
+            ]
+            labels = list(labels) + [2, 3]
+        coords = torch.tensor(points, dtype=torch.float32)[None] * torch.tensor(
+            [side / width, side / height]
+        )
+        resized = cv2.resize(
+            prompt_mask.astype(np.float32), (side, side), interpolation=cv2.INTER_LINEAR
+        )
+        logits = np.where(resized > 0.5, PROMPT_MASK_LOGIT, -PROMPT_MASK_LOGIT)
+        with self.autocast():
+            state = self._new_state(frame, 1)
+            obj_idx = model._obj_id_to_idx(state, 1)
+            point_inputs = {
+                "point_coords": coords.to(self.device()),
+                "point_labels": torch.tensor([labels], dtype=torch.int32, device=self.device()),
+            }
+            state["point_inputs_per_obj"][obj_idx][0] = point_inputs
+            state["multiplex_state"] = model.multiplex_controller.get_state(
+                num_valid_entries=1,
+                device=state["device"],
+                dtype=torch.float32,
+                random=False,
+                object_ids=[1],
+            )
+            current, _ = model._run_single_frame_inference(
+                inference_state=state,
+                output_dict=state["output_dict"],
+                frame_idx=0,
+                batch_size=1,
+                is_init_cond_frame=True,
+                point_inputs=point_inputs,
+                mask_inputs=None,
+                reverse=False,
+                run_mem_encoder=False,
+                prev_sam_mask_logits=torch.from_numpy(logits.astype(np.float32))[None, None].to(
+                    self.device()
+                ),
+                add_to_existing_state=False,
+                new_obj_idxs=[obj_idx],
+                new_obj_ids=[1],
+                allow_new_buckets=True,
+                prefer_new_buckets=True,
+                objects_to_interact=[0],
+            )
+            _, masks = model._get_orig_video_res_output(state, current["pred_masks"])
+        return (masks[0, 0] > 0).cpu().numpy()
 
     def text(self, frame, text, out_dir):
         predictor = self.predictor()
@@ -363,9 +451,16 @@ def main():
         try:
             if cmd == "open":
                 result = sam.open(request["video"])
+            elif cmd == "image":
+                result = sam.open_image(request["image"], request.get("key"))
             elif cmd == "points":
+                prompt_mask = read_mask(request["mask"]) if request.get("mask") else None
                 result = sam.points(
-                    request["frame"], request["points"], request["labels"], request["out"]
+                    request["frame"],
+                    request["points"],
+                    request["labels"],
+                    request["out"],
+                    prompt_mask,
                 )
             elif cmd == "text":
                 result = sam.text(request["frame"], request["text"], request["out_dir"])
