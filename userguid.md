@@ -33,9 +33,9 @@ The classes are kept per output folder. Classes found on masks saved earlier are
 
 - **Freehand Line** and **Segmented Line** draw an outline. With **Fill mask** ticked, each outline becomes a new object.
 - **Paint Brush** paints into the selected mask, or starts a new one. **Eraser** erases from the selected mask only, or from every mask shown when none is selected. A mask stays selected when you change tools; press Esc to deselect it.
-- With any tool, click a mask's name tag to select it, and click it again to deselect it. A stroke that starts off a tag paints, erases or draws across tags as usual.
-- With **Select**, drag a mask, or its name tag, to move it. Inside an ROI box, drag off the masks to move the box.
-- Right-click a mask to name it or to **Delete mask**. You can also click it with **Select** and press Delete.
+- With any tool, click a mask's name tag to select it, and click it again to deselect it. Drag the tag to move the mask. A stroke that starts off a tag paints, erases or draws across tags as usual.
+- With **Select**, you can also drag the mask itself to move it. Inside an ROI box, drag off the masks to move the box.
+- Right-click a mask, or its name tag with any tool, to name it or to **Delete mask**. You can also click it with **Select** and press Delete.
 - **Delete masks** in the sidebar deletes every mask of the image or frame on screen.
 - In a video, **Delete before** deletes the masks of every frame up to and including the frame on screen, and **Delete after** deletes those of the frame on screen and every frame after it. With a mask selected, they delete only the masks of its class and number, such as every **Vessel #1**, and leave the rest. Both ask before deleting.
 - Ctrl+Z and Ctrl+Y undo and redo.

@@ -1033,19 +1033,25 @@ class Canvas(QWidget):
             pos = event.position().toPoint()
             index = self._label_at(pos)
             if index is not None:
-                if self.tool == "select":
-                    # With Select, a tag is a handle: it selects the mask and drags it.
-                    self.selected_index = index
-                    self.selection = "mask"
+                # With any tool, a tag is a handle: it selects the mask and drags
+                # it. Outside Select, a click without a drag on the tag of the
+                # mask already selected deselects it.
+                deselect = (
+                    self.tool != "select"
+                    and self.selection == "mask"
+                    and self.selected_index == index
+                )
+                self.selected_index = index
+                self.selection = "mask"
+                if not deselect:
                     self.notice.emit(f"Selected {instance_title(self.instances[index])}")
-                    self._mask_move = {
-                        "press": pos,
-                        "mask": self.instances[index]["mask"].copy(),
-                        "moved": False,
-                    }
-                    self.update()
-                else:
-                    self._select_by_label(index)
+                self._mask_move = {
+                    "press": pos,
+                    "mask": self.instances[index]["mask"].copy(),
+                    "moved": False,
+                    "deselect": deselect,
+                }
+                self.update()
                 return
         if event.button() == Qt.MouseButton.LeftButton:
             point = self._screen_to_image(event.position().toPoint())
@@ -1121,6 +1127,9 @@ class Canvas(QWidget):
                 self._freehand_points = [point]
                 self.update()
         elif event.button() == Qt.MouseButton.RightButton:
+            # A right-click on a name tag opens the menu of its mask instead.
+            if self._label_at(event.position().toPoint()) is not None:
+                return
             if self.tool == "polyline":
                 self._finish_polyline()
             elif self.tool == "sam_mask":
@@ -1141,19 +1150,6 @@ class Canvas(QWidget):
                         return index
         return None
 
-    def _select_by_label(self, index):
-        """Select the mask of a name tag clicked, or deselect it when it is
-        selected already."""
-        if self.selection == "mask" and self.selected_index == index:
-            self.selected_index = None
-            self.selection = None
-            self.notice.emit("No mask selected")
-        else:
-            self.selected_index = index
-            self.selection = "mask"
-            self.notice.emit(f"Selected {instance_title(self.instances[index])}")
-        self.update()
-
     def _select_instance_at(self, pos):
         self.selected_index = self._instance_at(pos)
         self.selection = None if self.selected_index is None else "mask"
@@ -1171,11 +1167,12 @@ class Canvas(QWidget):
                 self._set_line_cursor(self._calibration_line_at(pos))
             return
         self._cursor_pos = self._screen_to_image(event.position().toPoint())
+        if self._mask_move is not None:
+            self._move_mask(event.position().toPoint())
+            return
         if self.tool == "select":
             pos = event.position().toPoint()
-            if self._mask_move is not None:
-                self._move_mask(pos)
-            elif self._roi_drag is not None:
+            if self._roi_drag is not None:
                 x, y = self._image_position(pos)
                 for axis, index in self._roi_drag:
                     self._roi[axis][index] = x if axis == "v" else y
@@ -1203,7 +1200,7 @@ class Canvas(QWidget):
                 self._move_roi(pos)
             elif self._roi_grips_at(pos):
                 self._set_grip_cursor(self._roi_grips_at(pos))
-            elif self._inside_roi(pos):
+            elif self._inside_roi(pos) or self._label_at(pos) is not None:
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
             else:
                 self.setCursor(Qt.CursorShape.CrossCursor)
@@ -1215,11 +1212,13 @@ class Canvas(QWidget):
                 self.update()
             return
         if not self._drawing:
+            if self._label_at(event.position().toPoint()) is not None:
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            elif self.tool in ("sam_point", "sam_box", "sam_mask"):
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.unsetCursor()
             if self.tool in ("brush", "eraser"):
-                if self._label_at(event.position().toPoint()) is not None:
-                    self.setCursor(Qt.CursorShape.PointingHandCursor)
-                else:
-                    self.unsetCursor()
                 self.update()
             return
         point = self._screen_to_image(event.position().toPoint())
@@ -1248,12 +1247,17 @@ class Canvas(QWidget):
             return
         if self._mask_move is not None:
             moved = self._mask_move["moved"]
+            deselect = self._mask_move.get("deselect")
             self._mask_move = None
             if moved:
                 self._drop_empty_instances()
                 self._refresh_mask_pixmap()
                 self._push_history()
                 self._mask_touched = True
+            elif deselect:
+                self.selected_index = None
+                self.selection = None
+                self.notice.emit("No mask selected")
             self.update()
             return
         if self._roi_drag is not None:
@@ -1333,18 +1337,27 @@ class Canvas(QWidget):
         super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
-        # A right-click with the Segmented Line or Mask prompt tool finishes the
-        # line instead, and with the Point prompt tool adds an exclude point.
-        if self.tool in ("polyline", "sam_point", "sam_mask") or self._calibrating:
+        if self._calibrating or self.image is None:
             return
-        kinds = self.deletable_at(event.pos())
+        tagged = self._label_at(event.pos())
+        # Off a name tag, a right-click with the Segmented Line or Mask prompt
+        # tool finishes the line instead, and with the Point prompt tool adds an
+        # exclude point.
+        if tagged is None and self.tool in ("polyline", "sam_point", "sam_mask"):
+            return
+        kinds = ["mask"] if tagged is not None else self.deletable_at(event.pos())
         if not kinds:
             return
         menu = QMenu(self)
         if "outline" in kinds:
             menu.addAction("Delete outline").setData("outline")
         if "mask" in kinds:
-            self._select_instance_at(event.pos())
+            if tagged is not None:
+                self.selected_index = tagged
+                self.selection = "mask"
+                self.notice.emit(f"Selected {instance_title(self.instances[tagged])}")
+            else:
+                self._select_instance_at(event.pos())
             self.update()
             instance = self._selected_instance()
             label_menu = menu.addMenu(f"Name {instance_title(instance)} as")
