@@ -2,11 +2,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
 app_name = os.getenv("APP_NAME").strip()
 
 onnxruntime_bins = collect_dynamic_libs("onnxruntime")
+if sys.platform.startswith("linux"):
+    onnxruntime_bins.append(("vendor/linux/libxcb-cursor.so.0", "vendor/linux"))
 
 a = Analysis(
     ['app.py'],
