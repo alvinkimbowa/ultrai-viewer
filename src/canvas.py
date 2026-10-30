@@ -4,6 +4,7 @@ Canvas widget for displaying images and annotating them with instance masks.
 
 import numpy as np
 import cv2
+from .medical_stack import is_medical, read_medical_frames
 from .tiff_stack import read_tiff_frame
 from PyQt6.QtWidgets import QWidget, QMessageBox, QScrollBar, QStyle, QMenu
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QPolygonF, QFont
@@ -827,7 +828,9 @@ class Canvas(QWidget):
 
     def _read_image(self, file_path):
         lower_path = file_path.lower()
-        if lower_path.endswith((".tif", ".tiff")):
+        if is_medical(file_path):
+            image = read_medical_frames(file_path)[0]
+        elif lower_path.endswith((".tif", ".tiff")):
             # Of a TIFF holding several images, the first one is used.
             image = read_tiff_frame(file_path, 0)
         else:

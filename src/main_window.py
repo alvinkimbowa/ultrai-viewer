@@ -74,7 +74,14 @@ from .measurements import (
     measure_instances,
     to_grayscale,
 )
-from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
+from .medical_stack import (
+    MEDICAL_EXTENSIONS,
+    MedicalStackCapture,
+    is_medical,
+    medical_frame_count,
+    read_medical_frames,
+)
+from .tiff_stack import is_tiff, open_capture as open_file_capture, read_tiff_frame, tiff_frame_count
 from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask, unrotate_point
 from .sam_integration import (
     SAM_MODEL_LABEL,
@@ -104,6 +111,13 @@ VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv")
 MIN_LIMITED_SIZE = 8
 # The label a single-class model's masks get when no label is picked.
 DEFAULT_MODEL_CLASS = "median"
+
+
+def open_capture(path):
+    """Frame reader for a video, a TIFF stack or a DICOM or NIfTI file."""
+    if is_medical(path):
+        return MedicalStackCapture(path)
+    return open_file_capture(path)
 
 
 NO_MODEL_LABEL = "No model"
@@ -4372,8 +4386,9 @@ class MainWindow(QMainWindow):
 
     def _supports_random_seek(self, video_path):
         # OpenCV seeks in a video file by time, and in a video whose frame rate
-        # varies it lands a frame early, so only a TIFF stack is sought in.
-        return is_tiff(video_path)
+        # varies it lands a frame early, so only a stack of stored frames is
+        # sought in.
+        return is_tiff(video_path) or is_medical(video_path)
 
     def _decode_video_frame(self, frame_index):
         if frame_index in self._video_frame_cache:
@@ -4794,7 +4809,28 @@ class MainWindow(QMainWindow):
         output_line.setText(suggested["dir"])
 
         def with_suffix(paths, extensions):
-            return [str(path) for path in paths if Path(path).suffix.lower() in extensions]
+            return [str(path) for path in paths if str(path).lower().endswith(extensions)]
+
+        def sorted_media(paths):
+            """(images, videos) among paths. A DICOM or NIfTI file counts as an
+            image or a video by its number of frames, and one that cannot be read
+            is left out with a warning."""
+            images = with_suffix(paths, IMAGE_EXTENSIONS)
+            videos = with_suffix(paths, VIDEO_EXTENSIONS)
+            unreadable = []
+            for path in with_suffix(paths, MEDICAL_EXTENSIONS):
+                try:
+                    (videos if medical_frame_count(path) > 1 else images).append(path)
+                except Exception:
+                    unreadable.append(Path(path).name)
+            if unreadable:
+                QMessageBox.warning(
+                    dialog,
+                    "Unreadable files",
+                    "These files could not be read and were left out:\n"
+                    + "\n".join(unreadable),
+                )
+            return images, videos
 
         def choose(kind, paths, description, directory):
             selected_paths[:] = paths
@@ -4830,8 +4866,7 @@ class MainWindow(QMainWindow):
             if not directory:
                 return
             entries = sorted(Path(directory).iterdir())
-            images = with_suffix(entries, IMAGE_EXTENSIONS)
-            videos = with_suffix(entries, VIDEO_EXTENSIONS)
+            images, videos = sorted_media(entries)
             if images and videos:
                 kind = ask_kind()
                 if kind is None:
@@ -4848,17 +4883,18 @@ class MainWindow(QMainWindow):
         def select_files():
             image_filter = " ".join(f"*{ext}" for ext in IMAGE_EXTENSIONS)
             video_filter = " ".join(f"*{ext}" for ext in VIDEO_EXTENSIONS)
+            medical_filter = " ".join(f"*{ext}" for ext in MEDICAL_EXTENSIONS)
             files, _ = QFileDialog.getOpenFileNames(
                 dialog,
                 "Select files",
                 input_dir(),
-                f"Images and videos ({image_filter} {video_filter});;"
-                f"Images ({image_filter});;Videos ({video_filter})",
+                f"Images and videos ({image_filter} {video_filter} {medical_filter});;"
+                f"Images ({image_filter});;Videos ({video_filter});;"
+                f"DICOM and NIfTI ({medical_filter})",
             )
             if not files:
                 return
-            images = with_suffix(files, IMAGE_EXTENSIONS)
-            videos = with_suffix(files, VIDEO_EXTENSIONS)
+            images, videos = sorted_media(files)
             if images and videos:
                 QMessageBox.information(
                     dialog,
@@ -5811,7 +5847,9 @@ class BatchInferenceWorker(QObject):
 
     def _load_image(self, file_path):
         lower_path = file_path.lower()
-        if lower_path.endswith((".tif", ".tiff")):
+        if is_medical(file_path):
+            image = read_medical_frames(file_path)[0]
+        elif lower_path.endswith((".tif", ".tiff")):
             # Of a TIFF holding several images, the first one is used.
             image = read_tiff_frame(file_path, 0)
         else:

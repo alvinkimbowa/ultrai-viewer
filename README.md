@@ -4,7 +4,7 @@ A desktop PyQt6 application for annotating images and videos. It loads images an
 
 ## Features
 
-- **Files:** images (`.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`), videos (`.mp4`, `.avi`, `.mov`, `.mkv`, `.m4v`, `.wmv`) and multi-page TIFF stacks.
+- **Files:** images (`.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`), videos (`.mp4`, `.avi`, `.mov`, `.mkv`, `.m4v`, `.wmv`), multi-page TIFF stacks, and DICOM (`.dcm`, `.dicom`) and NIfTI (`.nii`, `.nii.gz`) images, videos and 3D volumes.
 - **Classes and objects:** objects are drawn without a name and named later with a class from the list, or a new one. Every object of a class has the class's colour. The Objects panel lists the objects on screen under their classes, to select, name, hide or delete them.
 - **Instance masks:** several masks per image or frame, each tagged on the canvas, for example "Vessel #1". A mask can be named or deleted from its right-click menu.
 - **Editing tools:** freehand and segmented lines, paint brush, eraser, undo and redo.

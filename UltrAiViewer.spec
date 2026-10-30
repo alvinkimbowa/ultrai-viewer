@@ -3,7 +3,7 @@
 
 import os
 import sys
-from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 app_name = os.getenv("APP_NAME").strip()
 
@@ -19,7 +19,7 @@ a = Analysis(
         ("assets", "assets"),
         ("VERSION", "."),
     ],
-    hiddenimports=[],
+    hiddenimports=collect_submodules("pydicom.pixels"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=["src/runtime_hook_onnxruntime.py"],

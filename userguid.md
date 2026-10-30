@@ -11,7 +11,7 @@ Runs on the CPU; a 4-core CPU and 8 GB of RAM are recommended. macOS is not supp
 
 ## Load files
 
-Click **Load files** and choose images (PNG, JPEG, TIFF, BMP) or videos, and an output folder.
+Click **Load files** and choose images (PNG, JPEG, TIFF, BMP), videos, or DICOM or NIfTI files, and an output folder. A DICOM or NIfTI file of one frame opens as an image. One of several frames, whether a video or the slices of a 3D volume, opens frame by frame like a video. Files that cannot be read are left out with a warning.
 
 Scroll, use the arrow keys, or **Prev** / **Next** to move between images and frames. **N** and **P** go to the next and previous file.
 

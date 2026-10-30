@@ -74,6 +74,9 @@ def viewer_module(name):
 
 
 def open_capture(path):
+    medical = viewer_module("medical_stack")
+    if medical.is_medical(path):
+        return medical.MedicalStackCapture(path)
     return viewer_module("tiff_stack").open_capture(path)
 
 

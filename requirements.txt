@@ -3,6 +3,9 @@ onnxscript
 onnxruntime-gpu[cuda,cudnn]
 opencv-python
 tifffile
+pydicom
+nibabel
+pillow
 numpy
 pyinstaller
 scikit-image
