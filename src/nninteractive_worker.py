@@ -15,8 +15,8 @@ Requests:
              on an 8-bit RGB PNG, in the order they were given. Each prompt is
              {"id", "kind", "include"} and, by kind, "x" and "y" for a "point",
              "box" [left, top, right, bottom] for a "box", or "mask", a PNG of the
-             image's size holding a closed outline, for a "lasso"; positions are
-             pixels of the image. The image is kept while requests carry the same
+             image's size, holding a closed outline for a "lasso" or a stroke for
+             a "scribble"; positions are pixels of the image. The image is kept while requests carry the same
              key.
     load     {}  loads the model, so that the first prompt need not wait for it
     quit
@@ -107,13 +107,16 @@ class NnInteractive:
             ]
             self.session.add_bbox_interaction(box, include, True)
         else:
-            outline = cv2.imread(prompt["mask"], cv2.IMREAD_GRAYSCALE)
-            if outline is None:
+            drawn = cv2.imread(prompt["mask"], cv2.IMREAD_GRAYSCALE)
+            if drawn is None:
                 raise RuntimeError(f"Could not read {prompt['mask']}")
             middle = [[MIDDLE, MIDDLE + 1], [0, height], [0, width]]
-            self.session.add_lasso_interaction(
-                (outline > 127)[None].astype(np.uint8), include, True, interaction_bbox=middle
+            add = (
+                self.session.add_scribble_interaction
+                if prompt["kind"] == "scribble"
+                else self.session.add_lasso_interaction
             )
+            add((drawn > 127)[None].astype(np.uint8), include, True, interaction_bbox=middle)
         self._added.append(prompt["id"])
         self._can_undo = True
 

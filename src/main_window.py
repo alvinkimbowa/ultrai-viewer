@@ -110,6 +110,7 @@ NO_MODEL_LABEL = "No model"
 PREDICTIONS_SUFFIX = "_predictions"
 TOOL_NAMES = ["Select", "Freehand Line", "Segmented Line", "Paint Brush", "Eraser", "ROI Box"]
 SAM_TOOL_NAMES = ["Point prompt", "Box prompt", "Mask prompt"]
+SCRIBBLE_TOOL_NAME = "Scribble prompt"
 
 
 def format_duration(seconds):
@@ -2698,15 +2699,26 @@ class MainWindow(QMainWindow):
         for action in (self.segment_action, self.segment_video_action, self.segment_all_action):
             action.setVisible(not sam)
         self.sam_panel.setVisible(sam)
-        has_sam_tools = self.tool_picker.count() > len(TOOL_NAMES)
-        if sam and not has_sam_tools:
-            self.tool_picker.addItems(SAM_TOOL_NAMES)
-            self.tool_picker.setCurrentIndex(len(TOOL_NAMES))
-        elif not sam and has_sam_tools:
+        wanted = []
+        if sam:
+            wanted = list(SAM_TOOL_NAMES)
+            if self._prompt_model().scribbles:
+                wanted.append(SCRIBBLE_TOOL_NAME)
+        shown = [
+            self.tool_picker.itemText(i)
+            for i in range(len(TOOL_NAMES), self.tool_picker.count())
+        ]
+        if wanted != shown:
+            current = self.tool_picker.currentText()
             if self.tool_picker.currentIndex() >= len(TOOL_NAMES):
                 self.tool_picker.setCurrentIndex(0)
-            for _ in SAM_TOOL_NAMES:
+            for _ in shown:
                 self.tool_picker.removeItem(len(TOOL_NAMES))
+            self.tool_picker.addItems(wanted)
+            if current in wanted:
+                self.tool_picker.setCurrentIndex(len(TOOL_NAMES) + wanted.index(current))
+            elif wanted and (not shown or current in shown):
+                self.tool_picker.setCurrentIndex(len(TOOL_NAMES))
         self._reset_sam_prompts()
         self._update_sam_enabled()
 
@@ -2817,9 +2829,11 @@ class MainWindow(QMainWindow):
         return True, outcome.get("value")
 
     def _on_sam_prompt(self, prompt):
-        """Add a point, box or mask to the prompts of the mask being prompted, and
-        show the mask SAM 3.1, UltraSam or nnInteractive makes of them. A mask
-        replaces the prompts before it; points and boxes after it refine it."""
+        """Add a point, box, mask or scribble to the prompts of the mask being
+        prompted, and show the mask SAM 3.1, UltraSam or nnInteractive makes of
+        them. A box replaces the box before it. For a model that takes its prompts
+        in order every other prompt adds to those before it; for the others a mask
+        replaces the prompts before it, and points and boxes after it refine it."""
         if not self._can_prompt():
             return
         before = self._prompt_state()
@@ -2847,7 +2861,7 @@ class MainWindow(QMainWindow):
         self._prompt_redo.clear()
         entry = (self._next_prompt_id, tuple(prompt))
         self._next_prompt_id += 1
-        if prompt[0] == "mask":
+        if prompt[0] == "mask" and not self._prompt_model().ordered_prompts:
             self._sam_prompts = [entry]
         elif prompt[0] == "box":
             self._sam_prompts = [e for e in self._sam_prompts if e[1][0] != "box"] + [entry]
@@ -2878,8 +2892,14 @@ class MainWindow(QMainWindow):
         return masks[-1] if masks else None
 
     def _show_prompt_marks(self):
+        outlines = [
+            (entry[1][1], entry[1][0] == "mask")
+            for entry in self._sam_prompts
+            if entry[1][0] in ("mask", "exclude_mask")
+        ]
+        scribbles = [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "scribble"]
         self.canvas.set_sam_prompts(
-            self._sam_points, self._sam_box, self._sam_mask, self._sam_exclude_boxes
+            self._sam_points, self._sam_box, self._sam_exclude_boxes, outlines, scribbles
         )
 
     def _prompt_state(self):
@@ -2967,6 +2987,16 @@ class MainWindow(QMainWindow):
         given, which the user is asked to confirm, unless it is a box or outline
         replacing one of its own kind, as with every model."""
         helper = self._prompt_model()
+        if prompt[0] == "exclude_mask" and not helper.exclude_outlines:
+            QMessageBox.warning(
+                self,
+                helper.label,
+                f"{helper.label} has no exclude outlines. Drag with the left button to "
+                "outline the structure.",
+            )
+            return False
+        if prompt[0] == "scribble" and not helper.scribbles:
+            return False
         if prompt[0] == "exclude_box" and not helper.exclude_boxes:
             QMessageBox.warning(
                 self,
@@ -3584,6 +3614,7 @@ class MainWindow(QMainWindow):
             6: "sam_point",
             7: "sam_box",
             8: "sam_mask",
+            9: "sam_scribble",
         }
         tool = tool_map.get(index, "select")
         self.canvas.set_tool(tool)

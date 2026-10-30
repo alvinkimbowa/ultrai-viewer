@@ -43,8 +43,9 @@ class Canvas(QWidget):
     notice = pyqtSignal(str)
     # A SAM prompt, in image pixels: ("point", x, y, include),
     # ("box", left, top, right, bottom), ("exclude_box", left, top, right,
-    # bottom) or ("mask", mask); or ("remove_point", index) for a click on a
-    # prompt point shown.
+    # bottom), ("mask", mask), ("exclude_mask", mask) or ("scribble", points,
+    # include) with points ((x, y), ...) along the stroke; or ("remove_point",
+    # index) for a click on a prompt point shown.
     sam_prompt_added = pyqtSignal(tuple)
     # Esc while prompts are shown: the prompts and the mask they made are dropped.
     sam_prompts_cleared = pyqtSignal()
@@ -122,6 +123,11 @@ class Canvas(QWidget):
         self._sam_box_draft = None
         self._sam_box_draft_exclude = False
         self._sam_exclude_boxes = []
+        self._sam_outlines = []
+        self._sam_scribbles = []
+        # A stroke being drawn with the Scribble prompt tool, as {"points",
+        # "include"}; one drawn with the right button excludes what it covers.
+        self._scribble_draft = None
         # Where a press of the Mask prompt tool landed, in widget pixels, and
         # whether the pointer has since moved away, while the button is down: a
         # press that moves draws freehand, one that does not adds a vertex of a
@@ -132,7 +138,6 @@ class Canvas(QWidget):
         # outlines of a drawn mask.
         self._sam_points = []
         self._sam_box = None
-        self._sam_mask_outline = []
 
         # Calibration lines in image pixels: "h" holds the y positions of the two
         # horizontal lines, "v" the x positions of the two vertical lines. They
@@ -331,15 +336,23 @@ class Canvas(QWidget):
             return np.ascontiguousarray(np.stack([gray] * 3, axis=-1))
         return np.ascontiguousarray(self._as_uint8(self.image[:, :, :3]))
 
-    def set_sam_prompts(self, points, box, mask=None, exclude_boxes=()):
+    def set_sam_prompts(self, points, box, exclude_boxes=(), outlines=(), scribbles=()):
+        """Show the prompts of the mask being prompted: points (x, y, include),
+        the box and the exclude boxes, outlines as (mask, include) and scribbles
+        as (points, include)."""
         self._sam_points = list(points)
         self._sam_box = box
         self._sam_exclude_boxes = list(exclude_boxes)
-        self._sam_mask_outline = []
-        if mask is not None:
-            self._sam_mask_outline, _ = cv2.findContours(
-                mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        self._sam_outlines = [
+            (
+                cv2.findContours(
+                    mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )[0],
+                include,
             )
+            for mask, include in outlines
+        ]
+        self._sam_scribbles = [(list(stroke), include) for stroke, include in scribbles]
         self.update()
 
     def set_class_order(self, order):
@@ -371,10 +384,11 @@ class Canvas(QWidget):
         self._roi_draft = None
         self._sam_box_draft = None
         self._sam_mask_press = None
+        self._scribble_draft = None
         # A selected mask stays selected, so that the brush and eraser keep to it.
         if self.selection != "mask":
             self.selection = None
-        if tool_name in ("roi", "sam_point", "sam_box", "sam_mask"):
+        if tool_name in ("roi", "sam_point", "sam_box", "sam_mask", "sam_scribble"):
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.unsetCursor()
@@ -1028,14 +1042,15 @@ class Canvas(QWidget):
         self._poly_points = []
         self.update()
 
-    def _emit_mask_prompt(self, points):
-        """Send the filled outline of points as a mask prompt."""
+    def _emit_mask_prompt(self, points, include=True):
+        """Send the filled outline of points as a mask prompt, or as one that
+        excludes what it holds."""
         if len(points) > 2:
             mask = np.zeros(self.image.shape[:2], dtype=np.uint8)
             outline = np.array([[p.x(), p.y()] for p in points], dtype=np.int32)
             cv2.fillPoly(mask, [outline.reshape((-1, 1, 2))], 1)
             if mask.any():
-                self.sam_prompt_added.emit(("mask", mask.astype(bool)))
+                self.sam_prompt_added.emit(("mask" if include else "exclude_mask", mask.astype(bool)))
         self._freehand_points = []
         self._poly_points = []
         self.update()
@@ -1151,14 +1166,34 @@ class Canvas(QWidget):
                 self._drawing = True
                 self._freehand_points = [point]
                 self.update()
+            elif self.tool == "sam_scribble":
+                self._scribble_draft = {"points": [point], "include": True}
+                self.update()
         elif event.button() == Qt.MouseButton.RightButton:
             # A right-click on a name tag opens the menu of its mask instead.
             if self._label_at(event.position().toPoint()) is not None:
                 return
             if self.tool == "polyline":
                 self._finish_polyline()
-            elif self.tool == "sam_mask":
+            elif self.tool == "sam_mask" and self._poly_points:
                 self._emit_mask_prompt(self._poly_points)
+            elif self.tool == "sam_mask":
+                # Off a segmented line, a right-drag draws an exclude outline.
+                point = self._screen_to_image(event.position().toPoint())
+                if point is not None:
+                    self._sam_mask_press = {
+                        "pos": event.position().toPoint(),
+                        "moved": False,
+                        "exclude": True,
+                    }
+                    self._drawing = True
+                    self._freehand_points = [point]
+                    self.update()
+            elif self.tool == "sam_scribble":
+                point = self._screen_to_image(event.position().toPoint())
+                if point is not None:
+                    self._scribble_draft = {"points": [point], "include": False}
+                    self.update()
             elif self.tool == "sam_box":
                 point = self._screen_to_image(event.position().toPoint())
                 if point is not None:
@@ -1252,6 +1287,12 @@ class Canvas(QWidget):
                 self._sam_box_draft[1] = point
                 self.update()
             return
+        if self._scribble_draft is not None:
+            point = self._screen_to_image(event.position().toPoint())
+            if point is not None:
+                self._scribble_draft["points"].append(point)
+                self.update()
+            return
         if not self._drawing:
             if self._label_at(event.position().toPoint()) is not None:
                 self.setCursor(Qt.CursorShape.SizeAllCursor)
@@ -1260,7 +1301,7 @@ class Canvas(QWidget):
                 and self._sam_point_at(event.position().toPoint()) is not None
             ):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
-            elif self.tool in ("sam_point", "sam_box", "sam_mask"):
+            elif self.tool in ("sam_point", "sam_box", "sam_mask", "sam_scribble"):
                 self.setCursor(Qt.CursorShape.CrossCursor)
             else:
                 self.unsetCursor()
@@ -1342,6 +1383,26 @@ class Canvas(QWidget):
                 self.set_roi((x0, x1, y0, y1), record=True)
                 self.roi_drawn.emit()
             return
+        if self._scribble_draft is not None:
+            draft = self._scribble_draft
+            self._scribble_draft = None
+            self.update()
+            stroke = tuple((p.x(), p.y()) for p in draft["points"])
+            self.sam_prompt_added.emit(("scribble", stroke, draft["include"]))
+            return
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            and self._sam_mask_press is not None
+            and self._sam_mask_press.get("exclude")
+        ):
+            moved = self._sam_mask_press["moved"]
+            self._sam_mask_press = None
+            self._drawing = False
+            if moved and len(self._freehand_points) > 2:
+                self._emit_mask_prompt(self._freehand_points, include=False)
+            self._freehand_points = []
+            self.update()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             if self.tool == "sam_mask" and self._sam_mask_press is not None:
                 moved = self._sam_mask_press["moved"]
@@ -1380,7 +1441,8 @@ class Canvas(QWidget):
             self._sam_points
             or self._sam_box is not None
             or self._sam_exclude_boxes
-            or self._sam_mask_outline
+            or self._sam_outlines
+            or self._sam_scribbles
         ):
             self.sam_prompts_cleared.emit()
             return
@@ -1397,8 +1459,11 @@ class Canvas(QWidget):
         tagged = self._label_at(event.pos())
         # Off a name tag, a right-click with the Segmented Line or Mask prompt
         # tool finishes the line instead, with the Point prompt tool adds an
-        # exclude point, and with the Box prompt tool starts an exclude box.
-        if tagged is None and self.tool in ("polyline", "sam_point", "sam_box", "sam_mask"):
+        # exclude point, and with the Box prompt or Scribble prompt tool starts
+        # an exclude box or scribble.
+        if tagged is None and self.tool in (
+            "polyline", "sam_point", "sam_box", "sam_mask", "sam_scribble"
+        ):
             return
         kinds = ["mask"] if tagged is not None else self.deletable_at(event.pos())
         if not kinds:
@@ -1479,7 +1544,9 @@ class Canvas(QWidget):
                 end = self._image_to_screen(self._poly_points[idx + 1])
                 painter.drawLine(start, end)
         if self.tool in ("freehand", "sam_mask") and self._freehand_points:
-            painter.setPen(QPen(QColor(0, 255, 0), self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
+            excluding = self._sam_mask_press is not None and self._sam_mask_press.get("exclude")
+            color = QColor(255, 60, 60) if excluding else QColor(0, 255, 0)
+            painter.setPen(QPen(color, self._roi_outline_pen_width(), Qt.PenStyle.SolidLine))
             for idx in range(len(self._freehand_points) - 1):
                 start = self._image_to_screen(self._freehand_points[idx])
                 end = self._image_to_screen(self._freehand_points[idx + 1])
@@ -1532,9 +1599,25 @@ class Canvas(QWidget):
             start = self._image_to_screen(QPoint(box[0], box[1]))
             end = self._image_to_screen(QPoint(box[2], box[3]))
             painter.drawRect(QRect(start, end).normalized())
-        for contour in self._sam_mask_outline:
-            corners = [self._image_to_screen(QPoint(int(x), int(y))) for x, y in contour[:, 0]]
-            painter.drawPolygon(QPolygonF([QPointF(c) for c in corners]))
+        for contours, include in self._sam_outlines:
+            color = QColor(255, 220, 0) if include else QColor(255, 60, 60)
+            painter.setPen(QPen(color, width, Qt.PenStyle.DashLine))
+            for contour in contours:
+                corners = [
+                    self._image_to_screen(QPoint(int(x), int(y))) for x, y in contour[:, 0]
+                ]
+                painter.drawPolygon(QPolygonF([QPointF(c) for c in corners]))
+        strokes = list(self._sam_scribbles)
+        if self._scribble_draft is not None:
+            draft = self._scribble_draft
+            strokes.append(([(p.x(), p.y()) for p in draft["points"]], draft["include"]))
+        for stroke, include in strokes:
+            color = QColor(0, 230, 0) if include else QColor(255, 60, 60)
+            painter.setPen(QPen(color, width + 1, Qt.PenStyle.SolidLine))
+            corners = [self._image_to_screen(QPoint(int(x), int(y))) for x, y in stroke]
+            if len(corners) == 1:
+                painter.drawPoint(corners[0])
+            painter.drawPolyline(QPolygonF([QPointF(c) for c in corners]))
         for x, y, include in self._sam_points:
             center = self._image_to_screen(QPoint(int(x), int(y)))
             painter.setPen(QPen(QColor(0, 0, 0), width + 3))

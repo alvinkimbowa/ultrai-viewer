@@ -22,7 +22,9 @@ class HelperProcess:
 
     A model whose single_prompt is True was trained on one prompt per mask, one
     point or one box, and one with exclude_points False has no trained exclude
-    point; one with exclude_boxes True takes boxes that exclude what they hold.
+    point; one with exclude_boxes True takes boxes that exclude what they hold,
+    one with exclude_outlines True outlines that do, and one with scribbles True
+    scribbles that include or exclude what they cover.
     One with ordered_prompts True takes its prompts in the order they were given,
     through segment_prompts, rather than as points, a box and a mask.
 
@@ -33,6 +35,8 @@ class HelperProcess:
     single_prompt = False
     exclude_points = True
     exclude_boxes = False
+    exclude_outlines = False
+    scribbles = False
     ordered_prompts = False
 
     def __init__(self, label, command, pythonpath, log_file, scratch_prefix):
