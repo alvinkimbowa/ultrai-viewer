@@ -105,6 +105,23 @@ def annotated_frames(folder):
     return frames
 
 
+def frames_of_mask(folder, class_name, instance_id):
+    """The frames of a video's results folder that hold a mask."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return set()
+    matches = (MASK_FILE.match(name) for name in names)
+    return {
+        int(match.group(1))
+        for match in matches
+        if match is not None
+        and match.group(1) is not None
+        and match.group(2) == safe_class(class_name)
+        and int(match.group(3)) == int(instance_id)
+    }
+
+
 class MaskSet:
     """The mask files of one image (frame None) or one video frame."""
 

@@ -78,11 +78,18 @@ UltraSam's masks go in `<output folder>/ultrasam_predictions/`. Selecting UltraS
 
 ## Prompt masks with nnInteractive
 
-**nnInteractive** appears under **Model** on a computer set up with the `nnInteractive` project. It is MIC-DKFZ's promptable nnU-Net, trained on CT, MRI and other 3D scans rather than ultrasound. Like UltraSam, it makes one mask at a time on an image or a video frame, and does not propagate.
+**nnInteractive** appears under **Model** on a computer set up with the `nnInteractive` project. It is MIC-DKFZ's promptable nnU-Net, trained on CT, MRI and other 3D scans rather than ultrasound. On an image it makes one mask at a time. On a video it takes the frames as the third dimension of a volume, so one prompt gives a mask across the frames around it.
 
 1. Choose **nnInteractive** under **Model**. **Point prompt**, **Box prompt**, **Mask prompt** and **Scribble prompt** are added under **Tools**.
 2. Prompt as with SAM 3.1: points, a box, outlines and scribbles combine, and a further outline adds to the prompts rather than replacing them. Every prompt can also exclude: drag with the right button for an exclude box with **Box prompt**, an exclude outline with **Mask prompt**, or an exclude scribble with **Scribble prompt**; exclude prompts are drawn in red. With **Scribble prompt**, drag a stroke across the structure with the left button. nnInteractive takes the prompts one at a time in the order you give them, each refining the mask before it, so the latest prompt weighs most. A box or an outline works far better than a point. On breast ultrasound, the mean Dice is about 0.85 from a box, 0.89 from a rough outline, and 0.47 from a single point. Right-click with **Point prompt** to exclude a spot. Press **New object** before prompting the next structure.
 3. Masks get the class chosen under **Objects**, or are **Unlabeled**.
+
+On a video, DICOM or NIfTI file with several frames, or TIFF stack:
+
+- A prompt goes on the frame on screen, and the mask is saved on every frame it reaches. This works best while the probe stays still, because the structure then lines up from frame to frame.
+- Move to another frame and prompt again to refine the same mask. Prompts stay with the mask until you press **New object**, and each shows only on the frame it was given on. Undo, redo and clearing the prompts update every frame the mask is on. A prompt replaces the mask on the frames it changes, including edits made there by hand.
+- A prompt works on at most 768 frames around the first prompt, and nothing outside them is segmented. The mask is most reliable near the prompt and can fade or leave gaps further away; prompt on those frames to fill them.
+- To go further, prompt on a frame outside those 768 frames. The same mask continues on the 768 frames around that prompt, filling only frames that do not have it yet. The prompts given before stay as masks, and undo reaches only the prompts of the new frames.
 
 nnInteractive's masks go in `<output folder>/nninteractive_predictions/`. Selecting nnInteractive loads its model in the background, which takes several seconds; a prompt given before it is ready waits for it. Its weights are licensed for non-commercial use only (CC BY-NC-SA 4.0).
 

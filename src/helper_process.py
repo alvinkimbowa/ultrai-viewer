@@ -26,7 +26,9 @@ class HelperProcess:
     one with exclude_outlines True outlines that do, and one with scribbles True
     scribbles that include or exclude what they cover.
     One with ordered_prompts True takes its prompts in the order they were given,
-    through segment_prompts, rather than as points, a box and a mask.
+    through segment_prompts, rather than as points, a box and a mask. One with
+    volume_frames True takes the frames of a video as a volume, through
+    segment_volume, and its prompts make masks across them.
 
     Requests block until answered, so they are made from worker threads; one
     runs at a time. cancel() may be called from any thread.
@@ -38,6 +40,7 @@ class HelperProcess:
     exclude_outlines = False
     scribbles = False
     ordered_prompts = False
+    volume_frames = False
 
     def __init__(self, label, command, pythonpath, log_file, scratch_prefix):
         self.label = label

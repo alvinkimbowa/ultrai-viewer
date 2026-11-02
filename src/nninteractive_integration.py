@@ -26,6 +26,10 @@ LOG_FILE = Path(__file__).resolve().parent.parent / "nninteractive_worker.log"
 # Pixels across a scribble, as nnInteractive prefers them (its model folder's
 # inference_session_class.json).
 SCRIBBLE_THICKNESS = 2
+# Frames of a video given to nnInteractive at a time. It looks at a patch of 192
+# slices around a prompt and zooms out at most 4 times, so a prompt reaches no
+# further than this.
+VOLUME_FRAMES = 768
 
 
 def nninteractive_repo():
@@ -68,6 +72,7 @@ class NnInteractivePrompter(HelperProcess):
     exclude_outlines = True
     scribbles = True
     ordered_prompts = True
+    volume_frames = True
 
     def __init__(self):
         super().__init__(
@@ -77,6 +82,7 @@ class NnInteractivePrompter(HelperProcess):
             LOG_FILE,
             "ultrai_nninteractive_",
         )
+        self._volume_key = None
 
     def segment_prompts(self, image, key, prompts):
         """The mask that prompts select on an 8-bit RGB image. prompts are
@@ -90,6 +96,40 @@ class NnInteractivePrompter(HelperProcess):
         image_path = folder / "image.png"
         out = folder / "mask.png"
         cv2.imwrite(str(image_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+        sent = self._encode_prompts(prompts, image.shape[:2], folder)
+        self.request("prompts", image=str(image_path), key=key, prompts=sent, out=str(out))
+        return read_mask(out)
+
+    def segment_volume(self, frames, key, target_object, prompts, shape, offset):
+        """{frame: mask} of the frames whose mask for target_object changed.
+        frames() gives the 8-bit (frames, rows, columns) of the video and is
+        called only when key changes. offset is the first frame it gives, shape
+        the (rows, columns) of a frame. prompts are as for segment_prompts, each
+        with the frame it lies on as a third item."""
+        folder = self.scratch_dir("prompts")
+        volume = self._scratch_volume()
+        if key != self._volume_key:
+            self._volume_key = None
+            np.save(volume, frames())
+            self._volume_key = key
+        sent = self._encode_prompts([entry[:2] for entry in prompts], shape, folder)
+        for encoded, entry in zip(sent, prompts):
+            encoded["z"] = entry[2] - offset
+        out = folder / "masks.npz"
+        self.request(
+            "prompts", volume=str(volume), key=key, object=target_object, prompts=sent, out=str(out)
+        )
+        with np.load(out) as changed:
+            return {
+                int(frame) + offset: mask
+                for frame, mask in zip(changed["frames"], changed["masks"])
+            }
+
+    def _scratch_volume(self):
+        return Path(self._scratch.name) / "volume.npy"
+
+    def _encode_prompts(self, prompts, shape, folder):
+        """The prompts as the helper takes them, with the files they need in folder."""
         sent = []
         for prompt_id, prompt in prompts:
             kind = prompt[0]
@@ -106,7 +146,7 @@ class NnInteractivePrompter(HelperProcess):
                 )
             elif kind == "scribble":
                 path = folder / f"scribble_{prompt_id}.png"
-                stroke = np.zeros(image.shape[:2], dtype=np.uint8)
+                stroke = np.zeros(shape, dtype=np.uint8)
                 corners = np.array(prompt[1], dtype=np.int32).reshape((-1, 1, 2))
                 cv2.polylines(stroke, [corners], False, 255, SCRIBBLE_THICKNESS)
                 cv2.imwrite(str(path), stroke)
@@ -121,5 +161,4 @@ class NnInteractivePrompter(HelperProcess):
                     {"id": prompt_id, "kind": "lasso", "include": kind == "mask",
                      "mask": str(path)}
                 )
-        self.request("prompts", image=str(image_path), key=key, prompts=sent, out=str(out))
-        return read_mask(out)
+        return sent

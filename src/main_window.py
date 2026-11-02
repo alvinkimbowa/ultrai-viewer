@@ -55,6 +55,7 @@ from .instances import (
     clean_class,
     clip_instances,
     display_class,
+    frames_of_mask,
     instance_title,
     instances_from_labels,
     make_instance,
@@ -80,6 +81,7 @@ from .medical_stack import (
     is_medical,
     medical_frame_count,
     read_medical_frames,
+    to_uint8,
 )
 from .tiff_stack import is_tiff, open_capture as open_file_capture, read_tiff_frame, tiff_frame_count
 from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask, unrotate_point
@@ -95,7 +97,11 @@ from .sam_integration import (
     save_prompts,
 )
 from .sam_plan import propagation_steps
-from .nninteractive_integration import NnInteractivePrompter, nninteractive_available
+from .nninteractive_integration import (
+    VOLUME_FRAMES,
+    NnInteractivePrompter,
+    nninteractive_available,
+)
 from .ultrasam_integration import UltraSamPrompter, ultrasam_available
 from threading import Event, Thread
 from typing import NamedTuple
@@ -118,6 +124,40 @@ def open_capture(path):
     if is_medical(path):
         return MedicalStackCapture(path)
     return open_file_capture(path)
+
+
+def read_frames(path, start, stop, angle, seek, progress):
+    """The frames from start up to stop of a video as 8-bit grey (frames, rows,
+    columns), turned by angle. seek says the video can be sought in."""
+    capture = open_capture(path)
+    frames = []
+    try:
+        if seek:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+        else:
+            for _ in range(start):
+                if not capture.grab():
+                    break
+        for index in range(start, stop):
+            success, frame = capture.read()
+            if not success or frame is None:
+                break
+            if frame.ndim == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frames.append(rotate_image(frame, angle))
+            progress(index - start + 1, stop - start)
+    finally:
+        capture.release()
+    if not frames:
+        raise RuntimeError(f"Could not read the frames of {Path(path).name}")
+    return to_uint8(np.stack(frames))
+
+
+def volume_window(frame, count):
+    """(start, stop) of the frames of a video of count frames given to a model
+    that takes them as a volume, around frame."""
+    start = max(0, min(frame - VOLUME_FRAMES // 2, count - VOLUME_FRAMES))
+    return start, min(start + VOLUME_FRAMES, count)
 
 
 NO_MODEL_LABEL = "No model"
@@ -403,6 +443,10 @@ class MainWindow(QMainWindow):
         self._next_prompt_id = 0
         self._prompt_undo = []
         self._prompt_redo = []
+        self._volume_window = None
+        self._volume_source = None
+        self._volume_kept = set()
+        self._volume_replaced = {}
         self._prompt_start = None
         self._inference_thread = None
         self._inference_worker = None
@@ -927,8 +971,16 @@ class MainWindow(QMainWindow):
         """Put an image as stored on the canvas, turned by its file's angle."""
         self._original_shape = image.shape[:2]
         self._shown_angle = self._current_angle()
-        self._reset_sam_prompts()
+        keep_prompts = (
+            self._volume_window is not None
+            and self._mode == "video"
+            and self._volume_source == (self._video_path, self._shown_angle)
+        )
+        if not keep_prompts:
+            self._reset_sam_prompts()
         self.canvas.load_image_array(rotate_image(image, self._shown_angle), source_name)
+        if keep_prompts:
+            self._show_prompt_marks()
 
     def _run_key(self):
         """What a segmentation worker calls the image or frame on screen."""
@@ -2765,6 +2817,14 @@ class MainWindow(QMainWindow):
         self._prompt_undo = []
         self._prompt_redo = []
         self._prompt_start = None
+        # For a model that takes frames as a volume: the (start, stop) of its
+        # frames and the (video, angle) they are of; the frames whose mask of this
+        # object is left as it is; and the masks that prompts on such a frame
+        # replaced, by frame, put back when the prompts are taken away.
+        self._volume_window = None
+        self._volume_source = None
+        self._volume_kept = set()
+        self._volume_replaced = {}
         self._show_prompt_marks()
 
     def _new_sam_object(self):
@@ -2857,7 +2917,7 @@ class MainWindow(QMainWindow):
             return
         before = self._prompt_state()
         if prompt[0] == "remove_point":
-            points = [entry for entry in self._sam_prompts if entry[1][0] == "point"]
+            points = [entry for entry in self._shown_prompts if entry[1][0] == "point"]
             if self._sam_busy or not 0 <= prompt[1] < len(points):
                 return
             removed = points[prompt[1]]
@@ -2874,49 +2934,109 @@ class MainWindow(QMainWindow):
             else:
                 label = self.canvas.active_class or UNLABELED
                 self._sam_object = (label, next_instance_id(self.canvas.instances, label))
+        frame = self._prompt_frame
+        if frame is not None:
+            if self._enter_volume_window(frame):
+                before = []
+            self._hold_replaced_mask(frame)
         if self._prompt_start is None:
             self._prompt_start = self._canvas_point_in_history()
         self._prompt_undo.append(before)
         self._prompt_redo.clear()
-        entry = (self._next_prompt_id, tuple(prompt))
+        entry = (self._next_prompt_id, tuple(prompt), frame)
         self._next_prompt_id += 1
         if prompt[0] == "mask" and not self._prompt_model().ordered_prompts:
             self._sam_prompts = [entry]
         elif prompt[0] == "box":
-            self._sam_prompts = [e for e in self._sam_prompts if e[1][0] != "box"] + [entry]
+            self._sam_prompts = [
+                e for e in self._sam_prompts if e[1][0] != "box" or e[2] != frame
+            ] + [entry]
         else:
             self._sam_prompts.append(entry)
         self._show_prompt_marks()
         self._run_sam_prompts()
 
+    def _enter_volume_window(self, frame):
+        """Make sure the window of frames given to the model holds frame. A window
+        around it replaces one that does not, ending the prompts given there:
+        their masks stay and the new window only fills frames without one.
+        Returns whether the window changed."""
+        window = self._volume_window
+        if window is not None and window[0] <= frame < window[1]:
+            return False
+        self._volume_window = volume_window(frame, self._video_frame_count)
+        self._volume_source = (self._video_path, self._shown_angle)
+        self._sam_prompts = []
+        self._prompt_undo = []
+        self._prompt_redo = []
+        self._prompt_start = None
+        self._volume_replaced = {}
+        label, number = self._sam_object
+        self._volume_kept = frames_of_mask(
+            self._video_output_root_for_path(self._video_path), label, number
+        ) | frames_of_mask(Path(self._video_base_dir) / Path(self._video_path).stem, label, number)
+        return True
+
+    def _hold_replaced_mask(self, frame):
+        """Let prompts on frame replace the mask it holds, keeping that mask to
+        put back when they are taken away."""
+        if frame not in self._volume_kept:
+            return
+        self._volume_kept.remove(frame)
+        self._volume_replaced[frame] = next(
+            (
+                i["mask"].copy()
+                for i in self.canvas.instances
+                if (i["class"], i["id"]) == self._sam_object
+            ),
+            None,
+        )
+
+    @property
+    def _prompt_frame(self):
+        """The frame on screen, for a model that takes frames as a volume, whose
+        prompts each lie on a frame; else None."""
+        helper = self._prompt_model()
+        if helper is None or not self._volume_prompts(helper):
+            return None
+        return self._video_frame_index
+
+    def _volume_prompts(self, helper):
+        return helper.volume_frames and self._mode == "video" and self._video_frame_count > 1
+
+    @property
+    def _shown_prompts(self):
+        frame = self._prompt_frame
+        return [entry for entry in self._sam_prompts if entry[2] == frame]
+
     @property
     def _sam_points(self):
         """The (x, y, include) of the point prompts, in the order given."""
-        return [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "point"]
+        return [entry[1][1:] for entry in self._shown_prompts if entry[1][0] == "point"]
 
     @property
     def _sam_box(self):
         """The (left, top, right, bottom) of the box prompt, or None."""
-        boxes = [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "box"]
+        boxes = [entry[1][1:] for entry in self._shown_prompts if entry[1][0] == "box"]
         return boxes[-1] if boxes else None
 
     @property
     def _sam_exclude_boxes(self):
-        return [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "exclude_box"]
+        return [entry[1][1:] for entry in self._shown_prompts if entry[1][0] == "exclude_box"]
 
     @property
     def _sam_mask(self):
         """The mask prompt, or None."""
-        masks = [entry[1][1] for entry in self._sam_prompts if entry[1][0] == "mask"]
+        masks = [entry[1][1] for entry in self._shown_prompts if entry[1][0] == "mask"]
         return masks[-1] if masks else None
 
     def _show_prompt_marks(self):
         outlines = [
             (entry[1][1], entry[1][0] == "mask")
-            for entry in self._sam_prompts
+            for entry in self._shown_prompts
             if entry[1][0] in ("mask", "exclude_mask")
         ]
-        scribbles = [entry[1][1:] for entry in self._sam_prompts if entry[1][0] == "scribble"]
+        scribbles = [entry[1][1:] for entry in self._shown_prompts if entry[1][0] == "scribble"]
         self.canvas.set_sam_prompts(
             self._sam_points, self._sam_box, self._sam_exclude_boxes, outlines, scribbles
         )
@@ -2953,7 +3073,7 @@ class MainWindow(QMainWindow):
         they make; with none left, the mask is as it was before its first prompt."""
         self._sam_prompts = list(state)
         self._show_prompt_marks()
-        if self._has_prompts():
+        if self._has_prompts() or self._volume_window is not None:
             self._run_sam_prompts()
         else:
             self._restore_unprompted()
@@ -3068,6 +3188,9 @@ class MainWindow(QMainWindow):
             self._sam_rerun = True
             return
         helper = self._prompt_model()
+        if self._volume_prompts(helper):
+            self._run_volume_prompts(helper)
+            return
         angle, shape = self._shown_angle, self._original_shape
         target = self._frame_target()
         # SAM 3.1 decodes a stored video frame itself, so its prompts and mask
@@ -3097,7 +3220,7 @@ class MainWindow(QMainWindow):
             image = self.canvas.display_rgb()
             key = repr((target.run_key, target.file_name, target.frame, target.angle))
             if helper.ordered_prompts:
-                ordered = list(self._sam_prompts)
+                ordered = [entry[:2] for entry in self._sam_prompts]
                 work = lambda progress: helper.segment_prompts(image, key, ordered)
             else:
                 segment = (
@@ -3130,6 +3253,78 @@ class MainWindow(QMainWindow):
             self._run_sam_prompts()
         else:
             self.statusBar().showMessage(f"{helper.label}: {instance_title(instance)}")
+
+    def _run_volume_prompts(self, helper):
+        """Show and save the masks that the prompts make across the frames of the
+        window."""
+        start, stop = self._volume_window
+        video, angle, seek = self._video_path, self._shown_angle, self._video_use_random_seek
+        target = self._frame_target()
+        sam_object = self._sam_object
+        kept, replaced = self._volume_kept, self._volume_replaced
+        prompts = list(self._sam_prompts)
+        shape = self.canvas.image.shape[:2]
+        key = repr((video, start, stop, angle))
+
+        def work(progress):
+            frames = lambda: read_frames(video, start, stop, angle, seek, progress)
+            return helper.segment_volume(
+                frames, key, repr(sam_object), prompts, shape, start
+            )
+
+        ok, masks = self._sam_call(f"Segmenting with {helper.label}...", work)
+        rerun, self._sam_rerun = self._sam_rerun, False
+        if not ok:
+            return
+        for frame, mask in replaced.items():
+            if frame in masks and not masks[frame].any() and mask is not None:
+                masks[frame] = mask
+        masks = {frame: mask for frame, mask in masks.items() if frame not in kept}
+        self._save_volume_masks(target, sam_object, masks)
+        if rerun and self._sam_object == sam_object:
+            self._run_sam_prompts()
+        else:
+            self.statusBar().showMessage(
+                f"{helper.label}: {instance_title({'class': sam_object[0], 'id': sam_object[1]})}"
+                f" within frames {start + 1}-{stop}"
+            )
+
+    def _save_volume_masks(self, target, sam_object, masks):
+        """Make masks, {frame: mask}, the masks of sam_object on those frames of the
+        video of target, with their measurements. An empty mask takes it away."""
+        label, number = sam_object
+        name, angle = target.file_name, target.angle
+        rois = self._roi_store(target.output_dir)
+        log = self._measurement_log(target.output_dir)
+        px_per_mm = (self.px_per_mm_x_spin.value(), self.px_per_mm_y_spin.value())
+        base_folder = target.base_mask_set.folder if target.base_mask_set is not None else None
+        try:
+            for frame, mask in sorted(masks.items()):
+                mask_set = MaskSet(target.mask_set.folder, frame)
+                if mask_set == self._current_mask_set() and angle == self._shown_angle:
+                    if mask.any():
+                        self.canvas.put_instance(make_instance(label, number, mask))
+                    else:
+                        self.canvas.remove_instance(sam_object)
+                    self._stash_video_mask_for_current_frame(force=True)
+                    continue
+                base = None if base_folder is None else MaskSet(base_folder, frame)
+                source = mask_set if mask_set.exists() else base
+                stored = source.read(angle) if source is not None and source.exists() else []
+                instances = [i for i in stored if (i["class"], i["id"]) != sam_object]
+                if mask.any():
+                    instances.append(make_instance(label, number, mask))
+                box = rois.get(name, str(frame))
+                instances = clip_instances(instances, box)
+                if instances:
+                    mask_set.write(instances, angle, target.shape)
+                    log.set(name, frame, instances, *px_per_mm, limits=box, rotation=angle)
+                else:
+                    mask_set.remove()
+                    log.remove(name, frame)
+            log.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Save error", str(exc))
 
     def _sam_find_text(self):
         text = self.sam_text.text().strip()

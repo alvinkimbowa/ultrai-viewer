@@ -3,7 +3,9 @@ nnInteractive helper process for UltrAi Viewer.
 
 nnInteractive is MIC-DKFZ's promptable nnU-Net, trained on 3D volumes. A 2D
 image is given to it as a volume of DEPTH copies of the image, every prompt lies
-on the middle slice, and the mask is that slice of the result. The viewer has
+on the middle slice, and the mask is that slice of the result. The frames of a
+video are given to it as they are, as the slices of a volume, and a prompt's mask
+reaches along them. The viewer has
 no PyTorch, so it runs this script with the Python of an environment that has
 PyTorch and the nnInteractive package, and talks to it
 through the pipes: one JSON request per line on stdin, one JSON reply per line
@@ -18,6 +20,11 @@ Requests:
              image's size, holding a closed outline for a "lasso" or a stroke for
              a "scribble"; positions are pixels of the image. The image is kept while requests carry the same
              key.
+             With "volume", a .npy of 8-bit (frames, rows, columns), and "object",
+             the prompts lie on frames of the volume, each given by its "z", and
+             "image" is left out. "out" is then an .npz of "frames", the frames
+             whose mask differs from the last reply for that object, and "masks",
+             their masks. The volume is read only when the key changes.
     load     {}  loads the model, so that the first prompt need not wait for it
     quit
 
@@ -76,6 +83,9 @@ class NnInteractive:
         self.session.initialize_from_trained_model_folder(str(model_folder))
         self._key = None
         self._target = None
+        # The object of the last volume request, and the result sent for it.
+        self._object = None
+        self._sent = None
         # Ids of the prompts in the session, in the order added; None when the
         # session no longer matches them, after a failed request.
         self._added = []
@@ -85,8 +95,11 @@ class NnInteractive:
         if key is not None and key == self._key and self._target is not None:
             return
         grey = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
-        self.session.set_image(np.repeat(grey[None, None], DEPTH, axis=1))
-        self._target = torch.zeros((DEPTH, *grey.shape), dtype=torch.uint8)
+        self._start_session(np.repeat(grey[None], DEPTH, axis=0), key)
+
+    def _start_session(self, volume, key):
+        self.session.set_image(volume[None])
+        self._target = torch.zeros(volume.shape, dtype=torch.uint8)
         self.session.set_target_buffer(self._target)
         self._key = key
         self._added = []
@@ -94,14 +107,15 @@ class NnInteractive:
 
     def _add(self, prompt, height, width):
         include = bool(prompt["include"])
+        z = int(prompt.get("z", MIDDLE))
         if prompt["kind"] == "point":
             x = min(max(int(prompt["x"]), 0), width - 1)
             y = min(max(int(prompt["y"]), 0), height - 1)
-            self.session.add_point_interaction((MIDDLE, y, x), include, True)
+            self.session.add_point_interaction((z, y, x), include, True)
         elif prompt["kind"] == "box":
             left, top, right, bottom = prompt["box"]
             box = [
-                [MIDDLE, MIDDLE + 1],
+                [z, z + 1],
                 [int(top), max(int(top) + 1, int(round(bottom)))],
                 [int(left), max(int(left) + 1, int(round(right)))],
             ]
@@ -110,13 +124,13 @@ class NnInteractive:
             drawn = cv2.imread(prompt["mask"], cv2.IMREAD_GRAYSCALE)
             if drawn is None:
                 raise RuntimeError(f"Could not read {prompt['mask']}")
-            middle = [[MIDDLE, MIDDLE + 1], [0, height], [0, width]]
+            slice_box = [[z, z + 1], [0, height], [0, width]]
             add = (
                 self.session.add_scribble_interaction
                 if prompt["kind"] == "scribble"
                 else self.session.add_lasso_interaction
             )
-            add((drawn > 127)[None].astype(np.uint8), include, True, interaction_bbox=middle)
+            add((drawn > 127)[None].astype(np.uint8), include, True, interaction_bbox=slice_box)
         self._added.append(prompt["id"])
         self._can_undo = True
 
@@ -124,6 +138,28 @@ class NnInteractive:
     def prompts(self, image, key, prompts):
         self._set_image(image, key)
         height, width = image.shape[:2]
+        self._apply(prompts, height, width)
+        if not self._added:
+            return np.zeros((height, width), dtype=bool)
+        return self._target[MIDDLE].numpy() > 0
+
+    @torch.inference_mode()
+    def volume_prompts(self, path, key, target_object, prompts):
+        """(frames, masks) of the frames of the volume whose mask changed."""
+        if key is None or key != self._key or self._target is None:
+            self._start_session(np.load(path), key)
+            self._sent = None
+        if self._sent is None or target_object != self._object:
+            self._sent = np.zeros(self._target.shape, dtype=bool)
+            self._object = target_object
+        self._apply(prompts, *self._target.shape[1:])
+        result = self._target.numpy() > 0
+        frames = np.flatnonzero((result != self._sent).any(axis=(1, 2)))
+        self._sent = result
+        return frames, result[frames]
+
+    def _apply(self, prompts, height, width):
+        """Bring the session to prompts, in the order given."""
         ids = [prompt["id"] for prompt in prompts]
         added = self._added
         try:
@@ -148,9 +184,6 @@ class NnInteractive:
         except Exception:
             self._added = None
             raise
-        if not self._added:
-            return np.zeros((height, width), dtype=bool)
-        return self._target[MIDDLE].numpy() > 0
 
 
 def main():
@@ -172,6 +205,13 @@ def main():
                 model = NnInteractive(model_folder)
             if cmd == "load":
                 send({"id": reply_id, "ok": True})
+                continue
+            if "volume" in request:
+                frames, masks = model.volume_prompts(
+                    request["volume"], request.get("key"), request.get("object"), request["prompts"]
+                )
+                np.savez(request["out"], frames=frames, masks=masks)
+                send({"id": reply_id, "ok": True, "frames": len(frames)})
                 continue
             image = cv2.imread(request["image"], cv2.IMREAD_COLOR)
             if image is None:

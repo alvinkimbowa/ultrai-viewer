@@ -56,7 +56,7 @@ def medical_frame_rate(path):
     return float(header.get("CineRate") or 0.0)
 
 
-def _to_uint8(frames):
+def to_uint8(frames):
     """8-bit frames, scaled by the range of the whole file so that brightness
     does not change from one frame to the next."""
     if frames.dtype == np.uint8:
@@ -76,7 +76,7 @@ def _read_dicom(path):
     pixels = pixel_array(dataset)
     if int(dataset.get("NumberOfFrames") or 1) == 1:
         pixels = pixels[None]
-    frames = _to_uint8(pixels)
+    frames = to_uint8(pixels)
     # MONOCHROME1 stores its brightest pixels as the lowest values.
     if dataset.get("PhotometricInterpretation") == "MONOCHROME1":
         frames = 255 - frames
@@ -90,7 +90,7 @@ def _read_nifti(path):
     columns, rows = volume.shape[:2]
     # NIfTI's first axis runs across the image, and its last axes vary slowest.
     stacked = volume.reshape((columns, rows, -1), order="F")
-    return _to_uint8(stacked.transpose(2, 1, 0))
+    return to_uint8(stacked.transpose(2, 1, 0))
 
 
 def read_medical_frames(path):
