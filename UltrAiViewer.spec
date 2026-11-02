@@ -8,12 +8,23 @@ app_name = os.getenv("APP_NAME").strip()
 
 onnxruntime_bins = collect_dynamic_libs("onnxruntime")
 
+# The models packed into the app. Other models in assets/ are left out.
+MODELS = [
+    "nnunet205.onnx",
+    "monounet205.onnx",
+]
+
+missing = [name for name in MODELS if not os.path.isfile(os.path.join("assets", name))]
+if missing:
+    raise SystemExit(f"Models missing from assets/: {', '.join(missing)}")
+
 a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=onnxruntime_bins,
     datas=[
-        ("assets", "assets"),
+        ("assets/icons", "assets/icons"),
+        *((os.path.join("assets", name), "assets") for name in MODELS),
         ("VERSION", "."),
     ],
     hiddenimports=[],

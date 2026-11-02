@@ -150,7 +150,7 @@ ship.bat
 
 - Batch segmentation currently applies to image sequences, not videos.
 - Video mode automatically saves the current frame mask when you move between frames.
-- The packaged build includes icons and `VERSION`; models must still be present in `assets/` at build time.
+- The packaged build includes icons, `VERSION` and the models listed in `MODELS` in `UltrAiViewer.spec`; those models must be present in `assets/` at build time, and any others there are left out.
 - Inference logs are written to `inference.log`.
 
 ## Citation
