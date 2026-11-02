@@ -347,6 +347,11 @@ class MainWindow(QMainWindow):
         self.frame_slider.setSingleStep(1)
         self.frame_slider.setPageStep(1)
         frame_nav_row.addWidget(self.frame_slider, stretch=1)
+        self.frame_position_label = QLabel("")
+        self.frame_position_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        frame_nav_row.addWidget(self.frame_position_label, stretch=0)
         canvas_layout.addLayout(frame_nav_row, stretch=0)
         root_layout.addWidget(canvas_panel, stretch=1)
         root_layout.addWidget(
@@ -4597,6 +4602,7 @@ class MainWindow(QMainWindow):
         self.frame_slider.setRange(int(minimum), int(maximum))
         self.frame_slider.setEnabled(bool(enabled))
         self.frame_slider.blockSignals(False)
+        self._show_slider_position()
         if not enabled:
             self.play_btn.setEnabled(False)
             self.frame_first_btn.setEnabled(False)
@@ -4608,6 +4614,19 @@ class MainWindow(QMainWindow):
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(int(value))
         self.frame_slider.blockSignals(False)
+        self._show_slider_position()
+
+    def _show_slider_position(self):
+        """Show the frame or file on screen and the total at the end of the slider,
+        in a width that fits the largest number so that the slider stays still."""
+        if not self.frame_slider.isEnabled():
+            self.frame_position_label.clear()
+            return
+        total = self.frame_slider.maximum() + 1
+        self.frame_position_label.setFixedWidth(
+            self.frame_position_label.fontMetrics().horizontalAdvance(f"{total}/{total}") + 8
+        )
+        self.frame_position_label.setText(f"{self.frame_slider.value() + 1}/{total}")
 
     def _on_frame_slider_changed(self, value):
         if self._mode == "video":
