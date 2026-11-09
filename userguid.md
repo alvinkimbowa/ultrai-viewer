@@ -29,6 +29,17 @@ Masks are saved automatically as you go to `<output folder>/<model_name>_predict
 
 Masks cannot be edited while comparing; click **Stop comparing** to edit again.
 
+## Compare with manual masks
+
+1. Click **Manual masks...** and choose the folder holding your manual segmentations. They are matched to the images by name, as saved masks are: `scan.png` or `scan_mask.png` for `scan.tif`. nnU-Net folders work too: for an image `case_0000.png` in `imagesTr`, choose `labelsTr` and its label `case.png` is used. For a video frame, use `<video name>/frame_000123.png` in that folder. The folder is remembered.
+2. The manual mask is drawn as a **green outline** over the model mask. Untick **Show manual mask** to hide it and the agreement numbers below.
+3. **Agreement with manual mask**, under the measurements, compares the mask on screen with the manual one. It updates as you edit the mask:
+   - **Dice**: how much the two masks overlap; 100% means they are identical.
+   - **HD95**: the 95th percentile of the distances between the two outlines, taking the larger of model-to-manual and manual-to-model.
+   - **MASD**: the mean distance from the model's outline to the manual outline. It is one-way, as MONAI's `SurfaceDistanceMetric` computes it by default.
+
+   Distances are in pixels, and in mm using **Pixels per mm**.
+
 ## Measurements
 
 1. **Calibrate:** enter **Pixels per mm**, or click **Calibrate** and drag the lines onto a known distance. Until then the default of 1.00 is used, so the results are not real mm.

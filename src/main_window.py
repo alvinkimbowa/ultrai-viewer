@@ -45,7 +45,8 @@ from PyQt6.QtGui import (
     QShortcut,
 )
 
-from .canvas import Canvas, REGION_COLORS
+from .agreement import agreement, is_number
+from .canvas import Canvas, REFERENCE_COLOR, REGION_COLORS
 from .compare_grid import CompareGrid
 from .theme import TEXT, TEXT_DISABLED
 from .model_integration import ModelIntegration, GPU_FALLBACK_WARNING
@@ -111,6 +112,27 @@ def find_mask_files(folder, image_path, images=()):
             continue
         found.append(path)
     return sorted(found, key=lambda path: (path.stem != stem, len(path.name), path.name))
+
+
+def find_manual_mask(folder, image_path, images=()):
+    """Manual mask file of an image in `folder`, or None.
+
+    Found by name as find_mask_files finds it. nnU-Net names an image
+    "case_0000.png", the last four digits being its channel, and its label
+    "case.png"; such a label is found when nothing else is.
+    """
+    found = find_mask_files(folder, image_path, images)
+    if found:
+        return found[0]
+    image_path = Path(image_path)
+    case, channel = image_path.stem[:-5], image_path.stem[-5:]
+    if not case or channel[0] != "_" or not channel[1:].isdigit():
+        return None
+    for extension in MASK_EXTENSIONS:
+        path = Path(folder) / f"{case}{extension}"
+        if path.is_file() and os.path.abspath(path) != os.path.abspath(image_path):
+            return path
+    return None
 
 
 def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
@@ -369,6 +391,7 @@ class MainWindow(QMainWindow):
         self._last_video_input_dir = ""
         self._last_video_output_dir = ""
         self._last_load_kind = "image"
+        self._manual_mask_dir = ""
         self._input_folder_name = None
         self._load_persisted_paths()
         self._update_output_dir_tooltip()
@@ -392,7 +415,11 @@ class MainWindow(QMainWindow):
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.setInterval(250)
         self._measurement_timer.timeout.connect(self._update_measurements)
+        # The manual mask of the image or frame on screen as stored, before any
+        # rotation, or None when it has none.
+        self._manual_mask_stored = None
         self.canvas.mask_changed.connect(self._measurement_timer.start)
+        self._update_manual_mask_controls()
         settings = self._settings()
         for spin, key in (
             (self.px_per_mm_x_spin, "measurements/px_per_mm_x"),
@@ -590,6 +617,7 @@ class MainWindow(QMainWindow):
         self._last_video_input_dir = str(settings.value("paths/video_input_dir", "", str) or "")
         self._last_video_output_dir = str(settings.value("paths/video_output_dir", "", str) or "")
         self._last_load_kind = str(settings.value("paths/last_load_kind", "image", str) or "image")
+        self._manual_mask_dir = str(settings.value("paths/manual_mask_dir", "", str) or "")
 
     def _save_persisted_paths(self):
         settings = self._settings()
@@ -598,6 +626,7 @@ class MainWindow(QMainWindow):
         settings.setValue("paths/video_input_dir", self._last_video_input_dir)
         settings.setValue("paths/video_output_dir", self._last_video_output_dir)
         settings.setValue("paths/last_load_kind", self._last_load_kind)
+        settings.setValue("paths/manual_mask_dir", self._manual_mask_dir)
 
     def _on_px_per_mm_changed(self):
         settings = self._settings()
@@ -912,7 +941,58 @@ class MainWindow(QMainWindow):
         self._original_shape = image.shape[:2]
         self._shown_angle = self._current_angle()
         self.canvas.load_image_array(rotate_image(image, self._shown_angle), source_name)
+        self._show_manual_mask()
 
+    def _manual_mask_path(self):
+        """Manual mask file of the image or frame on screen, or None.
+
+        An image's manual mask is found by name in the manual mask folder by
+        find_manual_mask. A video frame's is
+        "<video name>/frame_000123.png" in that folder.
+        """
+        folder = self._manual_mask_dir
+        if not folder:
+            return None
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            path = (
+                Path(folder)
+                / Path(self._video_path).stem
+                / f"frame_{int(self._video_frame_index):06d}.png"
+            )
+            return path if path.is_file() else None
+        if self._mode == "sequence" and 0 <= self._sequence_index < len(
+            self._sequence_paths
+        ):
+            return find_manual_mask(
+                folder, self._sequence_paths[self._sequence_index], self._sequence_paths
+            )
+        return None
+
+    def _read_manual_mask(self):
+        """The manual mask of the image or frame on screen as stored, or None."""
+        path = self._manual_mask_path()
+        if path is None:
+            return None
+        try:
+            return self._read_saved_mask(path)
+        except Exception:
+            return None
+
+    def _show_manual_mask(self, stored=None, angle=None):
+        """Put the manual mask of the image or frame on screen on the canvas.
+
+        stored is the manual mask as stored, read from its file when None; it is
+        turned by angle, or by the angle the image is shown at.
+        """
+        if stored is None:
+            stored = self._read_manual_mask()
+        if angle is None:
+            angle = self._shown_angle
+        self.canvas.set_reference_mask(
+            None if stored is None else rotate_mask(stored, angle)
+        )
+        self._manual_mask_stored = stored
+        self._measurement_timer.start()
     def _run_key(self):
         """What a segmentation worker calls the image or frame on screen."""
         if self._mode == "video":
@@ -1046,6 +1126,7 @@ class MainWindow(QMainWindow):
         self._rotation_preview = {
             "image": image,
             "mask": mask,
+            "manual": self._read_manual_mask(),
             "source": self.canvas.image_path or "",
         }
         return True
@@ -1060,6 +1141,8 @@ class MainWindow(QMainWindow):
         )
         if preview["mask"] is not None:
             self.canvas.set_mask(rotate_mask(preview["mask"], angle).astype(np.float32))
+        if preview["manual"] is not None:
+            self._show_manual_mask(preview["manual"], angle)
 
     def _finish_rotation(self, angle):
         """Keep an angle chosen in a preview, or with None go back to the stored one."""
@@ -1542,7 +1625,63 @@ class MainWindow(QMainWindow):
 
     def _update_measurements(self):
         self.results_table.show_result(self._measure_mask(self.canvas.visible_mask()))
+        self._update_agreement()
         self._update_compare_measurements()
+
+    def _update_agreement(self):
+        """Show how well the mask on screen agrees with its manual mask."""
+        visible = bool(self._manual_mask_dir) and self.show_manual_checkbox.isChecked()
+        self.agreement_box.setVisible(visible)
+        if not visible:
+            return
+        if self.canvas.image is None:
+            self.agreement_table.show_message("No image")
+            return
+        if self._manual_mask_stored is None:
+            self.agreement_table.show_message("No manual mask")
+            return
+        manual = self.canvas.reference_mask
+        if manual is None:
+            self.agreement_table.show_message("Manual mask size does not match the image")
+            return
+        shown = self.canvas.visible_mask()
+        pred = None if shown is None else np.asarray(shown) >= 0.5
+        if pred is None or not pred.any():
+            self.agreement_table.show_message("No model mask")
+            return
+        across = self.px_per_mm_x_spin.value()
+        down = self.px_per_mm_y_spin.value()
+        self.agreement_table.show_result(
+            agreement(pred, manual, (across, down) if across and down else None)
+        )
+
+    def _choose_manual_mask_dir(self):
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select manual masks folder",
+            self._manual_mask_dir or self._last_image_input_dir,
+        )
+        if not directory:
+            return
+        self._manual_mask_dir = directory
+        self._save_persisted_paths()
+        self._update_manual_mask_controls()
+        if self.canvas.image is not None:
+            self._show_manual_mask()
+        self.statusBar().showMessage(f"Manual masks folder: {directory}")
+
+    def _update_manual_mask_controls(self):
+        self.show_manual_checkbox.setEnabled(bool(self._manual_mask_dir))
+        self.show_manual_checkbox.setToolTip(
+            self._manual_mask_dir or "Choose a manual masks folder first"
+        )
+        self.manual_mask_btn.setToolTip(
+            "Folder of manual segmentations, named after the images: "
+            "scan.png or scan_mask.png for scan.tif. Its masks are drawn as a "
+            "green outline and compared with the mask on screen."
+            + (f"\n\n{self._manual_mask_dir}" if self._manual_mask_dir else "")
+        )
+        self._update_agreement()
 
     def _measure_mask(self, mask):
         """Measurements of a mask of the image on screen, with the calibration,
@@ -1914,6 +2053,21 @@ class MainWindow(QMainWindow):
         configure_button(self.segment_all_btn)
         layout.addWidget(self.segment_all_btn)
 
+        manual_row = QHBoxLayout()
+        self.manual_mask_btn = QPushButton("Manual masks...")
+        configure_button(self.manual_mask_btn)
+        manual_row.addWidget(self.manual_mask_btn)
+        self.show_manual_checkbox = QCheckBox("Show manual mask")
+        self.show_manual_checkbox.setChecked(True)
+        swatch = QPixmap(16, 16)
+        swatch.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(swatch)
+        painter.fillRect(1, 7, 14, 3, QColor(*REFERENCE_COLOR))
+        painter.end()
+        self.show_manual_checkbox.setIcon(QIcon(swatch))
+        manual_row.addWidget(self.show_manual_checkbox)
+        layout.addLayout(manual_row)
+
         mask_row = QHBoxLayout()
         self.delete_mask_btn = QPushButton("Delete mask")
         configure_button(self.delete_mask_btn)
@@ -2093,6 +2247,15 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.compare_results)
         self._compare_tables = {}
 
+        self.agreement_box = QWidget()
+        agreement_layout = QVBoxLayout(self.agreement_box)
+        agreement_layout.setContentsMargins(0, 8, 0, 0)
+        agreement_layout.addWidget(self._section_header("Agreement with manual mask"))
+        self.agreement_table = AgreementTable()
+        agreement_layout.addWidget(self.agreement_table)
+        self.agreement_box.hide()
+        layout.addWidget(self.agreement_box)
+
         layout.addStretch()
 
         return panel
@@ -2108,6 +2271,9 @@ class MainWindow(QMainWindow):
         self.segment_video_action.triggered.connect(self._run_current_video_inference)
         self.segment_all_btn.clicked.connect(self._segment_all)
         self.segment_all_action.triggered.connect(self._segment_all)
+        self.manual_mask_btn.clicked.connect(self._choose_manual_mask_dir)
+        self.show_manual_checkbox.toggled.connect(self.canvas.set_reference_visible)
+        self.show_manual_checkbox.toggled.connect(self._update_agreement)
         self.save_btn.clicked.connect(self._save_current_mask)
         self.save_mask_action.triggered.connect(self._save_current_mask)
         self.delete_mask_btn.clicked.connect(self._delete_current_mask)
@@ -4406,6 +4572,64 @@ class MainWindow(QMainWindow):
                 thread.wait(5000)
         self._clear_video_state()
         super().closeEvent(event)
+
+
+class AgreementTable(QWidget):
+    """Dice, HD95 and MASD between the mask on screen and its manual mask."""
+
+    ROWS = (
+        ("dice", "Dice", "Overlap of the two masks: 100% when they are the same."),
+        (
+            "hd95",
+            "HD95",
+            "95th percentile of the distances between the two outlines, the larger "
+            "of model to manual and manual to model.",
+        ),
+        (
+            "masd",
+            "MASD",
+            "Mean distance from the model mask's outline to the manual mask's "
+            "outline (one way, as MONAI's SurfaceDistanceMetric).",
+        ),
+    )
+
+    def __init__(self):
+        super().__init__()
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        self._values = {}
+        for row, (key, title, tip) in enumerate(self.ROWS):
+            label = QLabel(title)
+            label.setToolTip(tip)
+            grid.addWidget(label, row, 0)
+            value = QLabel("–")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight)
+            grid.addWidget(value, row, 1)
+            self._values[key] = value
+        self._message = QLabel()
+        self._message.setStyleSheet(f"color: {TEXT_DISABLED};")
+        grid.addWidget(self._message, len(self.ROWS), 0, 1, 2)
+        grid.setColumnStretch(0, 1)
+        self.show_message("")
+
+    def show_message(self, text):
+        for value in self._values.values():
+            value.setText("–")
+        self._message.setText(text)
+        self._message.setVisible(bool(text))
+
+    def show_result(self, result):
+        self._message.hide()
+        dice = result["dice"]
+        self._values["dice"].setText(f"{dice * 100:.2f}%" if is_number(dice) else "–")
+        for key in ("hd95", "masd"):
+            px, mm = result[f"{key}_px"], result[f"{key}_mm"]
+            text = f"{px:.2f} px" if is_number(px) else "–"
+            if is_number(mm):
+                text += f"  ({mm:.3f} mm)"
+            self._values[key].setText(text)
 
 
 class ResultsTable(QWidget):

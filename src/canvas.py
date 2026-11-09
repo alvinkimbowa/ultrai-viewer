@@ -33,6 +33,7 @@ REGION_COLORS = {
 UNASSIGNED_COLOR = (160, 160, 160)
 WHOLE_MASK_COLOR = (255, 255, 180)
 CENTRE_MARKER_COLOR = (255, 235, 0)
+REFERENCE_COLOR = (0, 255, 120)
 REGION_LABELS = {"lateral": "Lateral", "intercondylar": "Notch", "medial": "Medial"}
 
 
@@ -61,6 +62,11 @@ class Canvas(QWidget):
         self.mask_pixmap = None
         self.mask_opacity = 0.5
         self.show_contour_only = True
+        # A mask drawn as an outline over the editable one for comparison; the
+        # editing tools and undo history never touch it.
+        self.reference_mask = None
+        self.reference_pixmap = None
+        self.reference_visible = True
         # Each history entry is (mask, ROI box): the state after one edit.
         self._undo_stack = []
         self._redo_stack = []
@@ -221,6 +227,8 @@ class Canvas(QWidget):
         self.image = raw
         self.pixmap = self._to_pixmap(raw)
         self.image_path = source_name or None
+        self.reference_mask = None
+        self.reference_pixmap = None
         height, width = self.image.shape[:2]
         self.mask = np.zeros((height, width), dtype=np.float32)
         self.centre_x = None
@@ -281,6 +289,7 @@ class Canvas(QWidget):
         self.pixmap = None
         self.image_path = None
         self.clear_mask()
+        self.set_reference_mask(None)
         self._last_outline = []
         self._reset_view()
         self.update()
@@ -293,6 +302,37 @@ class Canvas(QWidget):
         self._refresh_mask_pixmap()
         self._mask_touched = True
         self._reset_history()
+        self.update()
+
+    def set_reference_mask(self, mask):
+        """Show mask as an outline over the editable mask, or nothing for None.
+
+        A mask whose size is not the image's is not shown.
+        """
+        self.reference_mask = None
+        self.reference_pixmap = None
+        if mask is not None and self.image is not None:
+            binary = (np.asarray(mask) > 0).astype(np.uint8)
+            if binary.shape == self.image.shape[:2]:
+                self.reference_mask = binary.astype(bool)
+                rgba = np.zeros((*binary.shape, 4), dtype=np.uint8)
+                contours, _ = cv2.findContours(
+                    binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                cv2.drawContours(
+                    rgba, contours, -1, (*REFERENCE_COLOR, 255),
+                    self._roi_outline_thickness_px(),
+                )
+                height, width = binary.shape
+                q_image = QImage(
+                    rgba.tobytes(), width, height, rgba.strides[0],
+                    QImage.Format.Format_RGBA8888,
+                ).copy()
+                self.reference_pixmap = QPixmap.fromImage(q_image)
+        self.update()
+
+    def set_reference_visible(self, visible):
+        self.reference_visible = bool(visible)
         self.update()
 
     def set_mask_opacity(self, opacity):
@@ -1212,6 +1252,8 @@ class Canvas(QWidget):
         painter.drawPixmap(target, self.pixmap)
         if self.mask_pixmap is not None:
             painter.drawPixmap(target, self.mask_pixmap)
+        if self.reference_visible and self.reference_pixmap is not None:
+            painter.drawPixmap(target, self.reference_pixmap)
 
         self._paint_region_overlay(painter, scale, offset_x, offset_y)
         self._paint_roi(painter, scale, offset_x, offset_y, draw_w, draw_h)
