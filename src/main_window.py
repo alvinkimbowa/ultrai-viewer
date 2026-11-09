@@ -430,9 +430,6 @@ class MainWindow(QMainWindow):
         self._measurement_timer.setSingleShot(True)
         self._measurement_timer.setInterval(250)
         self._measurement_timer.timeout.connect(self._update_measurements)
-        # The manual mask of the image or frame on screen as stored, before any
-        # rotation, or None when it has none.
-        self._manual_mask_stored = None
         self.canvas.mask_changed.connect(self._measurement_timer.start)
         self._update_manual_mask_controls()
         settings = self._settings()
@@ -1030,7 +1027,8 @@ class MainWindow(QMainWindow):
         self.canvas.set_reference_mask(
             None if stored is None else rotate_mask(stored, angle)
         )
-        self._manual_mask_stored = stored
+        if stored is not None and self.canvas.reference_mask is None:
+            self.statusBar().showMessage("Manual mask size does not match the image")
         self._measurement_timer.start()
     def _run_key(self):
         """What a segmentation worker calls the image or frame on screen."""
@@ -1668,20 +1666,12 @@ class MainWindow(QMainWindow):
         self._update_compare_measurements()
 
     def _update_agreement(self):
-        """Show how well the mask on screen agrees with its manual mask."""
-        visible = bool(self._manual_mask_dir) and self.show_manual_checkbox.isChecked()
+        """Show how well the mask on screen agrees with its manual mask, only
+        while that manual mask is on screen."""
+        manual = self.canvas.reference_mask
+        visible = manual is not None and self.show_manual_checkbox.isChecked()
         self.agreement_box.setVisible(visible)
         if not visible:
-            return
-        if self.canvas.image is None:
-            self.agreement_table.show_message("No image")
-            return
-        if self._manual_mask_stored is None:
-            self.agreement_table.show_message("No manual mask")
-            return
-        manual = self.canvas.reference_mask
-        if manual is None:
-            self.agreement_table.show_message("Manual mask size does not match the image")
             return
         shown = self.canvas.visible_mask()
         pred = None if shown is None else np.asarray(shown) >= 0.5
