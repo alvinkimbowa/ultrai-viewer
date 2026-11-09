@@ -288,8 +288,23 @@ class MainWindow(QMainWindow):
         canvas_layout.setSpacing(0)
         self.compare_grid = CompareGrid()
         self.compare_grid.navigation_requested.connect(self._on_canvas_navigation_requested)
+        # Split view: the image alone on the left of the editable canvas, zoomed
+        # and scrolled with it.
+        self.plain_canvas = Canvas()
+        self.plain_canvas.set_read_only(True)
+        self.plain_canvas.navigation_requested.connect(self._on_canvas_navigation_requested)
+        self.plain_canvas.hide()
+        self.canvas.image_loaded.connect(self._mirror_plain_image)
+        self.canvas.view_changed.connect(self.plain_canvas.set_view)
+        self.plain_canvas.view_changed.connect(self.canvas.set_view)
+        self.single_view = QWidget()
+        single_layout = QHBoxLayout(self.single_view)
+        single_layout.setContentsMargins(0, 0, 0, 0)
+        single_layout.setSpacing(4)
+        single_layout.addWidget(self.plain_canvas, stretch=1)
+        single_layout.addWidget(self.canvas, stretch=1)
         self.view_stack = QStackedWidget()
-        self.view_stack.addWidget(self.canvas)
+        self.view_stack.addWidget(self.single_view)
         self.view_stack.addWidget(self.compare_grid)
         canvas_layout.addWidget(self.view_stack, stretch=1)
         canvas_layout.addSpacing(6)
@@ -421,6 +436,7 @@ class MainWindow(QMainWindow):
         self.canvas.mask_changed.connect(self._measurement_timer.start)
         self._update_manual_mask_controls()
         settings = self._settings()
+        self.split_view_checkbox.setChecked(bool(settings.value("view/split", False, bool)))
         for spin, key in (
             (self.px_per_mm_x_spin, "measurements/px_per_mm_x"),
             (self.px_per_mm_y_spin, "measurements/px_per_mm_y"),
@@ -942,6 +958,29 @@ class MainWindow(QMainWindow):
         self._shown_angle = self._current_angle()
         self.canvas.load_image_array(rotate_image(image, self._shown_angle), source_name)
         self._show_manual_mask()
+
+    def _set_split_view(self, enabled):
+        self.plain_canvas.setVisible(enabled)
+        self._settings().setValue("view/split", bool(enabled))
+        self._mirror_plain_image()
+
+    def _mirror_plain_image(self, *_):
+        """Show the image on the editable canvas, without masks, in the split view."""
+        if not self.plain_canvas.isVisibleTo(self.single_view):
+            return
+        if self.canvas.image is None:
+            self.plain_canvas.clear_image()
+            return
+        if self.plain_canvas.image is not self.canvas.image:
+            self.plain_canvas.load_image_array(self.canvas.image, self.canvas.image_path or "")
+        # Each canvas works out its own zoom while it is being laid out, so the
+        # editable one's view is applied once both have their size.
+        QTimer.singleShot(0, self._sync_plain_view)
+
+    def _sync_plain_view(self):
+        self.plain_canvas.set_view(
+            self.canvas.scale, self.canvas._scroll_x, self.canvas._scroll_y
+        )
 
     def _manual_mask_path(self):
         """Manual mask file of the image or frame on screen, or None.
@@ -2148,6 +2187,13 @@ class MainWindow(QMainWindow):
         view_buttons_row.addWidget(self.rotate_btn)
         layout.addLayout(view_buttons_row)
 
+        self.split_view_checkbox = QCheckBox("Split view")
+        self.split_view_checkbox.setToolTip(
+            "Show the image alone beside the image with its masks, zoomed and "
+            "scrolled together"
+        )
+        layout.addWidget(self.split_view_checkbox)
+
         self.auto_roi_btn = QPushButton("Auto ROI")
         self.auto_roi_btn.setToolTip(
             "Draw the ROI around the ultrasound sector, on the image on screen or "
@@ -2286,6 +2332,8 @@ class MainWindow(QMainWindow):
         self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
         self.fit_btn.clicked.connect(self.compare_grid.fit_to_window)
+        self.fit_btn.clicked.connect(self.plain_canvas.fit_to_window)
+        self.split_view_checkbox.toggled.connect(self._set_split_view)
         self.compare_btn.clicked.connect(self._toggle_compare)
         self.rotate_btn.clicked.connect(self._rotate_dialog)
         self.auto_roi_btn.clicked.connect(self._auto_roi)
@@ -4175,7 +4223,7 @@ class MainWindow(QMainWindow):
         if self._compare_run is not None:
             self.statusBar().showMessage("Segmentation already running...")
             return
-        self.view_stack.setCurrentWidget(self.canvas)
+        self.view_stack.setCurrentWidget(self.single_view)
         self.compare_grid.clear()
         self.compare_results.hide()
         self.results_table.show()
