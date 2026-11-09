@@ -1253,7 +1253,9 @@ class Canvas(QWidget):
         if self.mask_pixmap is not None:
             painter.drawPixmap(target, self.mask_pixmap)
         if self.reference_visible and self.reference_pixmap is not None:
+            painter.setOpacity(self.mask_opacity)
             painter.drawPixmap(target, self.reference_pixmap)
+            painter.setOpacity(1.0)
 
         self._paint_region_overlay(painter, scale, offset_x, offset_y)
         self._paint_roi(painter, scale, offset_x, offset_y, draw_w, draw_h)
