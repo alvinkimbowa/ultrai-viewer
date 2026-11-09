@@ -55,6 +55,6 @@ Measurements are saved automatically as you go to `<output folder>/<model_name>_
 - The models are most reliable when they see only the ultrasound field of view and the image is upright:
   - **Auto ROI** boxes the field of view on the current image or on all images. You can also draw a box with **ROI Box** under **Tools**. Boxes can be moved, resized or deleted.
   - **Rotate image** straightens a tilted image. The image file itself is not changed.
-- **Split view** shows the image alone on the left of the image with its masks, to see the cartilage without the outlines in the way. Zooming and dragging move both sides together.
+- **Split view** shows the image alone on the left of the image with its masks, to see the cartilage without the outlines in the way. Zooming and dragging move both sides together. Press **S** to turn it on or off.
 
 ![UltAI Viewer with an ROI, a segmented image and its measurements per region](docs/images/app_window.png)

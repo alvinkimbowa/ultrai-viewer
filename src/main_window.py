@@ -366,6 +366,8 @@ class MainWindow(QMainWindow):
         self._next_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Right), self)
         self._prev_shortcut.setEnabled(False)
         self._next_shortcut.setEnabled(False)
+        self._split_view_shortcut = QShortcut(QKeySequence(Qt.Key.Key_S), self)
+        self._split_view_shortcut.activated.connect(self.split_view_checkbox.toggle)
         self._arrow_repeat_timer = QTimer(self)
         self._arrow_repeat_timer.timeout.connect(self._on_arrow_repeat_timeout)
         self._arrow_repeat_direction = 0
@@ -2180,7 +2182,7 @@ class MainWindow(QMainWindow):
         self.split_view_checkbox = QCheckBox("Split view")
         self.split_view_checkbox.setToolTip(
             "Show the image alone beside the image with its masks, zoomed and "
-            "scrolled together"
+            "scrolled together (S)"
         )
         layout.addWidget(self.split_view_checkbox)
 
