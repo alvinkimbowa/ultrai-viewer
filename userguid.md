@@ -19,6 +19,7 @@ Runs on the CPU; a 4-core CPU and 8 GB of RAM are recommended. macOS is not supp
 Scroll, use the arrow keys, or **Prev** / **Next** to move between images.
 
 Masks are saved automatically as you go to `<output folder>/<model_name>_predictions/<image name>.png`. When you load a folder, they go in a subfolder named after it: `<output folder>/<model_name>_predictions/<input folder name>/<image name>.png`. Each video gets its own folder of frame masks named after the video.
+Each run also saves the model's probability map, in a `probabilities` folder beside the masks.
 
 ## Compare models
 
@@ -56,5 +57,6 @@ Measurements are saved automatically as you go to `<output folder>/<model_name>_
   - **Auto ROI** boxes the field of view on the current image or on all images. You can also draw a box with **ROI Box** under **Tools**. Boxes can be moved, resized or deleted.
   - **Rotate image** straightens a tilted image. The image file itself is not changed.
 - **Split view** shows the image alone on the left of the image with its masks, to see the cartilage without the outlines in the way. Zooming and dragging move both sides together. Press **S** to turn it on or off.
+- **Probability map** shows how sure the model is about each pixel, as a heatmap over the image (blue 0, red 1). It sits on the right of the image with its masks, and zooms and moves with it. **Mask Opacity** sets how strong the heatmap is. Press **P** to turn it on or off. Images segmented before this option existed have no map until they are segmented again.
 
 ![UltAI Viewer with an ROI, a segmented image and its measurements per region](docs/images/app_window.png)

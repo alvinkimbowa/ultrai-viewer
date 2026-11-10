@@ -60,7 +60,13 @@ from .measurements import (
     to_grayscale,
 )
 from .tiff_stack import is_tiff, open_capture, read_tiff_frame, tiff_frame_count
-from .rotations import RotationStore, rotate_image, rotate_mask, unrotate_mask
+from .rotations import (
+    RotationStore,
+    rotate_image,
+    rotate_mask,
+    unrotate_image,
+    unrotate_mask,
+)
 from threading import Event
 from collections import OrderedDict
 import html
@@ -145,19 +151,44 @@ def write_mask_file(mask_path, mask, angle=0.0, original_shape=None):
     stored = np.asarray(mask) > 0
     if angle:
         stored = unrotate_mask(stored, angle, original_shape)
-    mask_uint8 = stored.astype(np.uint8) * 255
-    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_image_file(mask_path, stored.astype(np.uint8) * 255)
+
+
+def _write_image_file(path, data):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     # The file is written under another name and then moved into place, so that
-    # a mask being saved by a segmentation run is never read half-written.
-    partial = mask_path.with_name(f".{mask_path.stem}.partial{mask_path.suffix}")
+    # a file being saved by a segmentation run is never read half-written.
+    partial = path.with_name(f".{path.stem}.partial{path.suffix}")
     try:
-        if mask_path.suffix.lower() in (".tif", ".tiff"):
-            tifffile.imwrite(str(partial), mask_uint8)
-        elif not cv2.imwrite(str(partial), mask_uint8):
-            raise OSError(f"Failed to save mask: {mask_path.name}")
-        os.replace(partial, mask_path)
+        if path.suffix.lower() in (".tif", ".tiff"):
+            tifffile.imwrite(str(partial), data)
+        elif not cv2.imwrite(str(partial), data):
+            raise OSError(f"Failed to save {path.name}")
+        os.replace(partial, path)
     finally:
         partial.unlink(missing_ok=True)
+
+
+PROBABILITY_DIR_NAME = "probabilities"
+
+
+def probability_path(mask_path):
+    """Where the probability map of a saved mask is kept: a PNG of the same name
+    in a "probabilities" folder beside it."""
+    mask_path = Path(mask_path)
+    return mask_path.parent / PROBABILITY_DIR_NAME / f"{mask_path.stem}.png"
+
+
+def write_probability_file(mask_path, probability, angle=0.0, original_shape=None):
+    """Save a probability map as 0-255 beside the mask saved at mask_path, lined
+    up with the image file as stored, as write_mask_file does with the mask."""
+    stored = np.clip(np.asarray(probability, dtype=np.float32), 0.0, 1.0)
+    if angle:
+        stored = unrotate_image(stored, angle, original_shape)
+    _write_image_file(
+        probability_path(mask_path), np.round(stored * 255.0).astype(np.uint8)
+    )
 
 
 def format_duration(seconds):
@@ -239,20 +270,18 @@ def crop_to_box(image, box):
     return np.ascontiguousarray(image[top:bottom, left:right])
 
 
-def place_prediction(prediction, image, box):
+def place_prediction(prediction, image, box, interpolation=cv2.INTER_NEAREST):
     """Turn a model output into a mask the size of the image.
 
     The model's output has its own fixed size. With a box (left, right, top,
     bottom) it covers only that part of the image, and the rest of the mask is
-    left empty.
+    left empty. A probability map is resized with cv2.INTER_LINEAR.
     """
     height, width = image.shape[:2]
     left, right, top, bottom = (0, width, 0, height) if box is None else box
     part = np.asarray(prediction).astype(np.float32)
     if part.shape[:2] != (bottom - top, right - left):
-        part = cv2.resize(
-            part, (right - left, bottom - top), interpolation=cv2.INTER_NEAREST
-        )
+        part = cv2.resize(part, (right - left, bottom - top), interpolation=interpolation)
     mask = np.zeros((height, width), dtype=np.float32)
     mask[top:bottom, left:right] = part
     return mask
@@ -294,15 +323,24 @@ class MainWindow(QMainWindow):
         self.plain_canvas.set_read_only(True)
         self.plain_canvas.navigation_requested.connect(self._on_canvas_navigation_requested)
         self.plain_canvas.hide()
-        self.canvas.image_loaded.connect(self._mirror_plain_image)
-        self.canvas.view_changed.connect(self.plain_canvas.set_view)
-        self.plain_canvas.view_changed.connect(self.canvas.set_view)
+        # The model's probability map as a heatmap over the image, right of the
+        # editable canvas.
+        self.prob_canvas = Canvas()
+        self.prob_canvas.set_read_only(True)
+        self.prob_canvas.navigation_requested.connect(self._on_canvas_navigation_requested)
+        self.prob_canvas.hide()
+        self._probability_cache = None
+        self._loading_side_view = False
+        self.canvas.image_loaded.connect(self._mirror_side_views)
+        for view in self._linked_views():
+            view.view_changed.connect(self._share_view)
         self.single_view = QWidget()
         single_layout = QHBoxLayout(self.single_view)
         single_layout.setContentsMargins(0, 0, 0, 0)
         single_layout.setSpacing(4)
         single_layout.addWidget(self.plain_canvas, stretch=1)
         single_layout.addWidget(self.canvas, stretch=1)
+        single_layout.addWidget(self.prob_canvas, stretch=1)
         self.view_stack = QStackedWidget()
         self.view_stack.addWidget(self.single_view)
         self.view_stack.addWidget(self.compare_grid)
@@ -368,6 +406,8 @@ class MainWindow(QMainWindow):
         self._next_shortcut.setEnabled(False)
         self._split_view_shortcut = QShortcut(QKeySequence(Qt.Key.Key_S), self)
         self._split_view_shortcut.activated.connect(self.split_view_checkbox.toggle)
+        self._probability_shortcut = QShortcut(QKeySequence(Qt.Key.Key_P), self)
+        self._probability_shortcut.activated.connect(self.probability_checkbox.toggle)
         self._arrow_repeat_timer = QTimer(self)
         self._arrow_repeat_timer.timeout.connect(self._on_arrow_repeat_timeout)
         self._arrow_repeat_direction = 0
@@ -436,6 +476,9 @@ class MainWindow(QMainWindow):
         self._update_manual_mask_controls()
         settings = self._settings()
         self.split_view_checkbox.setChecked(bool(settings.value("view/split", False, bool)))
+        self.probability_checkbox.setChecked(
+            bool(settings.value("view/probability", False, bool))
+        )
         for spin, key in (
             (self.px_per_mm_x_spin, "measurements/px_per_mm_x"),
             (self.px_per_mm_y_spin, "measurements/px_per_mm_y"),
@@ -961,25 +1004,114 @@ class MainWindow(QMainWindow):
     def _set_split_view(self, enabled):
         self.plain_canvas.setVisible(enabled)
         self._settings().setValue("view/split", bool(enabled))
-        self._mirror_plain_image()
+        self._mirror_side_views()
 
-    def _mirror_plain_image(self, *_):
-        """Show the image on the editable canvas, without masks, in the split view."""
-        if not self.plain_canvas.isVisibleTo(self.single_view):
+    def _set_probability_view(self, enabled):
+        self.prob_canvas.setVisible(enabled)
+        self._settings().setValue("view/probability", bool(enabled))
+        self._mirror_side_views()
+
+    def _linked_views(self):
+        return (self.plain_canvas, self.canvas, self.prob_canvas)
+
+    def _share_view(self, scale, scroll_x, scroll_y):
+        """Zoom and scroll the other canvases of the single view as one was."""
+        if self._loading_side_view:
             return
-        if self.canvas.image is None:
-            self.plain_canvas.clear_image()
-            return
-        if self.plain_canvas.image is not self.canvas.image:
-            self.plain_canvas.load_image_array(self.canvas.image, self.canvas.image_path or "")
+        source = self.sender()
+        for view in self._linked_views():
+            if view is not source:
+                view.set_view(scale, scroll_x, scroll_y)
+
+    def _side_view_shown(self, view):
+        return view.isVisibleTo(self.single_view)
+
+    def _mirror_side_views(self, *_):
+        """Bring the panels beside the editable canvas up to the image on it."""
+        if self._side_view_shown(self.plain_canvas):
+            self._loading_side_view = True
+            try:
+                if self.canvas.image is None:
+                    self.plain_canvas.clear_image()
+                elif self.plain_canvas.image is not self.canvas.image:
+                    self.plain_canvas.load_image_array(
+                        self.canvas.image, self.canvas.image_path or ""
+                    )
+            finally:
+                self._loading_side_view = False
+        self._show_probability()
         # Each canvas works out its own zoom while it is being laid out, so the
-        # editable one's view is applied once both have their size.
-        QTimer.singleShot(0, self._sync_plain_view)
+        # editable one's view is applied once all have their size.
+        QTimer.singleShot(0, self._sync_side_views)
 
-    def _sync_plain_view(self):
-        self.plain_canvas.set_view(
-            self.canvas.scale, self.canvas._scroll_x, self.canvas._scroll_y
-        )
+    def _sync_side_views(self):
+        for view in (self.plain_canvas, self.prob_canvas):
+            view.set_view(self.canvas.scale, self.canvas._scroll_x, self.canvas._scroll_y)
+
+    def _mask_target_path(self):
+        """Where the mask of the image or frame on screen is saved, or None."""
+        if self._mode == "video" and self._video_path and self._video_frame_index >= 0:
+            return self._video_mask_path(self._video_path, self._video_frame_index)
+        if (
+            self._mode == "sequence"
+            and self._sequence_output_dir
+            and 0 <= self._sequence_index < len(self._sequence_paths)
+        ):
+            stem = Path(self._sequence_paths[self._sequence_index]).stem
+            return Path(self._sequence_output_dir) / f"{stem}.png"
+        return None
+
+    def _read_probability(self, angle):
+        """The saved probability map of the image or frame on screen, from 0 to 1
+        and turned by angle, or None."""
+        for mask_path in (self._mask_target_path(), self._shown_mask_path()):
+            if mask_path is None:
+                continue
+            path = probability_path(mask_path)
+            try:
+                stamp = (str(path), path.stat().st_mtime_ns)
+            except OSError:
+                continue
+            if self._probability_cache is None or self._probability_cache[0] != stamp:
+                stored = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+                if stored is None:
+                    continue
+                self._probability_cache = (stamp, stored.astype(np.float32) / 255.0)
+            return rotate_image(self._probability_cache[1], angle)
+        return None
+
+    def _show_probability(self, angle=None):
+        """Show the probability map of the image or frame on screen as a heatmap
+        over it, as strong as the mask opacity."""
+        if not self._side_view_shown(self.prob_canvas):
+            return
+        image = self.canvas.image
+        if image is None:
+            self.prob_canvas.clear_image()
+            return
+        if angle is None:
+            angle = self._shown_angle
+        probability = self._read_probability(angle)
+        if image.ndim == 2:
+            display = cv2.cvtColor(self.canvas._normalize_gray(image), cv2.COLOR_GRAY2RGB)
+        else:
+            display = self.canvas._as_uint8(image[:, :, :3])
+        if probability is not None and probability.shape == image.shape[:2]:
+            heat = cv2.applyColorMap(
+                np.round(probability * 255.0).astype(np.uint8), cv2.COLORMAP_JET
+            )
+            heat = cv2.cvtColor(heat, cv2.COLOR_BGR2RGB)
+            strength = self.canvas.mask_opacity
+            display = cv2.addWeighted(display, 1.0 - strength, heat, strength, 0.0)
+            title = "Probability: blue 0, red 1"
+        else:
+            title = "No probability map: segment this image again"
+        self._loading_side_view = True
+        try:
+            self.prob_canvas.replace_image(display, self.canvas.image_path or "")
+        finally:
+            self._loading_side_view = False
+        self.prob_canvas.set_title(title)
 
     def _manual_mask_path(self):
         """Manual mask file of the image or frame on screen, or None.
@@ -1075,6 +1207,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Load failed", str(exc))
                 return
             self.canvas.set_mask(mask.astype(np.float32))
+        self._show_probability()
 
     def _rotate_dialog(self):
         """Let the user turn the image on screen, previewing while a slider moves."""
@@ -1182,6 +1315,7 @@ class MainWindow(QMainWindow):
             self.canvas.set_mask(rotate_mask(preview["mask"], angle).astype(np.float32))
         if preview["manual"] is not None:
             self._show_manual_mask(preview["manual"], angle)
+        self._show_probability(angle)
 
     def _finish_rotation(self, angle):
         """Keep an angle chosen in a preview, or with None go back to the stored one."""
@@ -2184,7 +2318,15 @@ class MainWindow(QMainWindow):
             "Show the image alone beside the image with its masks, zoomed and "
             "scrolled together (S)"
         )
-        layout.addWidget(self.split_view_checkbox)
+        self.probability_checkbox = QCheckBox("Probability map")
+        self.probability_checkbox.setToolTip(
+            "Show the model's probability map as a heatmap over the image, right "
+            "of the image with its masks (P). Mask Opacity sets how strong it is."
+        )
+        view_toggles_row = QHBoxLayout()
+        view_toggles_row.addWidget(self.split_view_checkbox)
+        view_toggles_row.addWidget(self.probability_checkbox)
+        layout.addLayout(view_toggles_row)
 
         self.auto_roi_btn = QPushButton("Auto ROI")
         self.auto_roi_btn.setToolTip(
@@ -2325,6 +2467,9 @@ class MainWindow(QMainWindow):
         self.fit_btn.clicked.connect(self.canvas.fit_to_window)
         self.fit_btn.clicked.connect(self.compare_grid.fit_to_window)
         self.fit_btn.clicked.connect(self.plain_canvas.fit_to_window)
+        self.fit_btn.clicked.connect(self.prob_canvas.fit_to_window)
+        self.probability_checkbox.toggled.connect(self._set_probability_view)
+        self.opacity_slider.valueChanged.connect(lambda _: self._show_probability())
         self.split_view_checkbox.toggled.connect(self._set_split_view)
         self.compare_btn.clicked.connect(self._toggle_compare)
         self.rotate_btn.clicked.connect(self._rotate_dialog)
@@ -2494,9 +2639,11 @@ class MainWindow(QMainWindow):
         try:
             for mask_path in mask_paths:
                 mask_path.unlink()
+                probability_path(mask_path).unlink(missing_ok=True)
         except OSError as exc:
             QMessageBox.warning(self, "Delete error", str(exc))
             return
+        self._show_probability()
         if self._mode == "video":
             self._forget_measurement(
                 result_dir,
@@ -4411,7 +4558,8 @@ class MainWindow(QMainWindow):
             self._show_inference_time_left()
         self._start_inference_worker(session, run["crop"], self._on_compare_model_finished)
 
-    def _on_compare_model_finished(self, prediction):
+    def _on_compare_model_finished(self, result):
+        prediction, probability = result
         model = self._inference_model_name
         self._inference_seconds[model] = time.monotonic() - self._inference_started
         run = self._compare_run
@@ -4419,6 +4567,15 @@ class MainWindow(QMainWindow):
             return
         mask = place_prediction(prediction, run["image"], run["box"])
         try:
+            if probability is not None:
+                write_probability_file(
+                    run["targets"][model],
+                    place_prediction(
+                        probability, run["image"], run["box"], cv2.INTER_LINEAR
+                    ),
+                    run["angle"],
+                    run["original_shape"],
+                )
             write_mask_file(
                 run["targets"][model], mask >= 0.5, run["angle"], run["original_shape"]
             )
@@ -4556,7 +4713,8 @@ class MainWindow(QMainWindow):
         if self._inference_dialog:
             self._inference_dialog.setLabelText("Canceling segmentation...")
 
-    def _on_inference_finished(self, prediction):
+    def _on_inference_finished(self, result):
+        prediction, probability = result
         self._inference_seconds[self._inference_model_name] = (
             time.monotonic() - self._inference_started
         )
@@ -4567,6 +4725,23 @@ class MainWindow(QMainWindow):
                     self._last_prediction, self.canvas.image, self._inference_box
                 )
             )
+            target = self._mask_target_path()
+            if probability is not None and target is not None:
+                try:
+                    write_probability_file(
+                        target,
+                        place_prediction(
+                            probability,
+                            self.canvas.image,
+                            self._inference_box,
+                            cv2.INTER_LINEAR,
+                        ),
+                        self._shown_angle,
+                        self._original_shape,
+                    )
+                except OSError as exc:
+                    QMessageBox.warning(self, "Save error", str(exc))
+                self._show_probability()
         self.statusBar().showMessage("Segmentation complete")
         self._close_inference_dialog()
 
@@ -4979,6 +5154,7 @@ class InferenceWorker(QObject):
             prediction = self._model.run_inference(
                 self._image,
                 cancel_event=self._cancel_event,
+                with_probability=True,
             )
         except Exception as exc:
             if str(exc).lower().startswith("inference canceled"):
@@ -5076,19 +5252,23 @@ class BatchInferenceWorker(QObject):
                 box = box_to_segment(
                     image, self._rois.get((Path(image_path).name, ""))
                 )
-                prediction = self._model.run_inference(
+                prediction, probability = self._model.run_inference(
                     crop_to_box(image, box),
                     cancel_event=self._cancel_event,
+                    with_probability=True,
                 )
                 if prediction is not None:
                     mask = place_prediction(prediction, image, box)
                     self.started.add(image_path)
-                    write_mask_file(
-                        Path(self._output_dir) / f"{Path(image_path).stem}.png",
-                        mask >= 0.5,
-                        angle,
-                        stored_shape,
-                    )
+                    mask_path = Path(self._output_dir) / f"{Path(image_path).stem}.png"
+                    if probability is not None:
+                        write_probability_file(
+                            mask_path,
+                            place_prediction(probability, image, box, cv2.INTER_LINEAR),
+                            angle,
+                            stored_shape,
+                        )
+                    write_mask_file(mask_path, mask >= 0.5, angle, stored_shape)
                     self.saved.add(image_path)
                     self._measurement_log.set(
                         Path(image_path).name,
@@ -5248,15 +5428,23 @@ class VideoBatchInferenceWorker(QObject):
                         box = box_to_segment(
                             image, self._rois.get((video_name, str(frame_index)))
                         )
-                        prediction = self._model.run_inference(
+                        prediction, probability = self._model.run_inference(
                             crop_to_box(image, box),
                             cancel_event=self._cancel_event,
+                            with_probability=True,
                         )
                         if self._cancel_event.is_set():
                             self.canceled.emit()
                             return
                         mask = place_prediction(prediction, image, box)
                         self.started.add((video_path, frame_index))
+                        if probability is not None:
+                            write_probability_file(
+                                output_path,
+                                place_prediction(probability, image, box, cv2.INTER_LINEAR),
+                                angle,
+                                stored_shape,
+                            )
                         write_mask_file(output_path, mask >= 0.5, angle, stored_shape)
                         self.saved.add((video_path, frame_index))
                         measurement_log.set(

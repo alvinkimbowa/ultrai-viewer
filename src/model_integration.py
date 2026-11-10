@@ -242,6 +242,18 @@ class ModelIntegration:
             data = np.squeeze(data)
         return self._largest_component(data)
 
+    def _probability(self, prediction):
+        """Chance of each pixel being cartilage: one minus the softmax of the
+        background class. None for an output that is not one score per class
+        and pixel."""
+        data = np.asarray(prediction, dtype=np.float32)
+        while data.ndim > 3 and data.shape[0] == 1:
+            data = data[0]
+        if data.ndim != 3 or data.shape[0] < 2:
+            return None
+        scores = np.exp(data - data.max(axis=0, keepdims=True))
+        return 1.0 - scores[0] / scores.sum(axis=0)
+
     def _largest_component(self, mask):
         binary = np.asarray(mask) > 0
         if binary.ndim != 2:
@@ -256,7 +268,12 @@ class ModelIntegration:
         largest = int(np.argmax(sizes))
         return (labels == largest).astype(np.uint8)
 
-    def run_inference(self, image, cancel_event=None) -> np.ndarray:
+    def run_inference(self, image, cancel_event=None, with_probability=False):
+        """The mask the model gives for an image, at the model's output size.
+
+        With with_probability, (mask, probability), the probability being None
+        for a model whose output does not give one.
+        """
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Inference canceled.")
         session = self._ensure_session()
@@ -275,4 +292,7 @@ class ModelIntegration:
             raise RuntimeError("Model returned no outputs.")
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Inference canceled.")
-        return self._postprocess(outputs[0])
+        mask = self._postprocess(outputs[0])
+        if with_probability:
+            return mask, self._probability(outputs[0])
+        return mask

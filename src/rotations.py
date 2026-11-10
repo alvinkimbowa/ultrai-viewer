@@ -35,6 +35,21 @@ def rotate_image(image, angle):
     return cv2.warpAffine(image, matrix, size, flags=cv2.INTER_LINEAR)
 
 
+def unrotate_image(image, angle, original_shape):
+    """Bring an image turned by rotate_image back onto the image as stored,
+    whose (height, width) is original_shape."""
+    if not angle:
+        return image
+    matrix, _ = _transform(original_shape, angle)
+    height, width = original_shape[:2]
+    return cv2.warpAffine(
+        image,
+        cv2.invertAffineTransform(matrix),
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+    )
+
+
 def rotate_mask(mask, angle):
     """Turn a mask the way rotate_image turns its image. Returns a bool array."""
     binary = np.asarray(mask) > 0

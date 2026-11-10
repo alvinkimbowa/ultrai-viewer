@@ -219,6 +219,17 @@ class Canvas(QWidget):
             return
         self._load_image_data(raw, file_path)
 
+    def replace_image(self, image, source_name=""):
+        """Show image in place of the one on screen, keeping the zoom and scroll
+        when it is the same size."""
+        if self.image is None or image.shape[:2] != self.image.shape[:2]:
+            self.load_image_array(image, source_name)
+            return
+        self.image = image
+        self.pixmap = self._to_pixmap(image)
+        self.image_path = source_name or None
+        self.update()
+
     def load_image_array(self, image, source_name=""):
         raw = np.asarray(image)
         self._load_image_data(raw, source_name)
